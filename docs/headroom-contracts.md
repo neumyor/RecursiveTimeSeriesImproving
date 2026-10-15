@@ -10,7 +10,9 @@
 - 数值数组一律 `float64`。`values: [T, C]`，通道即列，下标即时间。
 - **起点 o**：输入窗口最后一个观测的下标。输入 `x[o-L+1..o]`，目标 `x[o+1..o+H]`，`h = 1..H`。
 - **残差** `r[i, h-1, c] = x[o_i+h] - pred[i, h-1, c]`。
-- **e 序列**：`e_full[t] = r[origin t, h=1, :]`（起点 t 最新已实现的 1 步残差），仅在起点上有定义，其余位置为 NaN。
+- **e 序列**：`e_full[t] = r_full[t-1, 0, :]`——在起点 t-1 做出、目标恰为 x[t] 的 1 步残差（即 e_t = r[t-1,1]）。
+  这是「在时刻 t 已实现」的最新 1 步残差；非 NaN 行为 `[seg_start+1, seg_stop-H]`。
+  （注意：不得写成 r[origin t, h=1]——那会让 lag-0 特征等于 h=1 目标本身，造成目标泄漏。）
 - **段（segment）**：一段含前缀历史的连续数组（局部下标从 0 开始）。段的可用起点 `o` 满足 `o >= burn_in` 且 `o + H <= T - 1`；`burn_in = max_lag + fir_len_cap`（见 config）。这保证起点 o 的全部特征只依赖段内已实现信息。
 - 标准化统计量只来自 train。
 - **增益符号**：`delta = MSE_m - MSE_{m+g}`（在评估段上），正值表示改进。
@@ -96,7 +98,10 @@ class SegmentData:
 
 def segment_data(values: np.ndarray, seg_start: int, seg_stop: int,
                  pred: np.ndarray, cfg: HeadroomConfig) -> SegmentData
-    # 由模型在段内全部可用起点上的预测 pred[B,H,C] 构造；内部生成 e_full/r_full
+    # pred[B,H,C] 与「目标完全落在段内」的全部起点 [seg_start, seg_stop-H-1] 对齐
+    # （注意：不是 burn_in 限制后的可用起点——e/r 序列必须从段起点就存在，
+    # 否则首个可用起点的深滞后特征会缺失）。origins 字段才是 segment_origins 的输出；
+    # 两者行数不同，长度不符抛 ValueError。
 ```
 
 **截断不变性**（必须测试）：任意坐标在起点 o 的特征只依赖 `values[0..o]`、`e_full[0..o]`、`r_full[0..o]`。
@@ -111,8 +116,8 @@ class Coordinate:
     aspect: str   # periodicity | lag-structure | long-range-beyond-window | cross-channel | horizon-range | level-bias | other
     spec: dict    # 如 {"k1": 0, "k2": 23} / {"period": 24} / {"target_channel": 3} / {"h1": 1, "h2": 12}
 
-def select_period_peaks(e_full: np.ndarray, cfg: HeadroomConfig) -> list[int]
-    # 只用 A 段的 e_full（非 NaN 行）：平均各通道周期图，取 (band_period_range) 内
+def select_period_peaks(e_full: np.ndarray, a_origins: np.ndarray, cfg: HeadroomConfig) -> list[int]
+    # 只用 A 段（a_origins 为 A 段起点下标，连续）：平均各通道周期图，取 (band_period_range) 内
     # 按高度排序的前 max_period_peaks 个峰，峰间至少隔 2 个频率点；返回周期（整数步）
 
 def enumerate_coordinates(cfg, period_peaks: list[int], n_channels: int,
@@ -247,7 +252,8 @@ def render_feedback(arm: str, incumbent: dict, gains: list[GainReport],
     # card：按 Bonferroni 调整后 LCB 降序的坐标增益（点估计 + block bootstrap 展示区间）、
     #        total 的 delta 与 LCB、μ²、各坐标 by_horizon 的峰值区间；使用 Coordinate.aspect 措辞。
     # placebo：与 card 完全同构，但用 placebo_perm 固定置换坐标行（内容取自同一张卡片）。
-    # incumbent dict：{"diagMse": float, "mseByHGroup": {...}, "round": int, "budgetLeft": int}
+    # incumbent dict：{"diagMse": float, "mseByHGroup": {...}, "round": int, "budgetLeft": int,
+    #                 "eFull": np.ndarray}（eFull = diag 段 e_full，bj 臂据此自算 ACF/Ljung–Box/周期图）
     # history row：{"round", "candidateId", "accepted", "diagMse"}
     # 禁止出现：数据集名称、领域词（ECG/电力等）、「残差」之外的引导词表按计划 §3.2。
 ```

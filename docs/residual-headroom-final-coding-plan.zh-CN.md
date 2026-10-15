@@ -1,6 +1,6 @@
 # Residual Headroom 实验系统：最终编码计划
 
-> 金文档：[minipaper v0.2](minipaper-residual-guided-discovery-v0.2.zh-CN.md)
+> 金文档：[minipaper v0.3](minipaper-residual-guided-discovery-v0.3.zh-CN.md)（v0.2 已由 §8 的同步修改取代）
 > 本计划综合了初版方案 [residual-headroom-implementation-plan](residual-headroom-implementation-plan.zh-CN.md) 与三方评审（A 研究有效性 / B 代码集成 / C 范围与排期）的意见，以下内容以本文为准。
 > 日期：2026-10-15
 
