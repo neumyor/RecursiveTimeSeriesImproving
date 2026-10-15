@@ -38,7 +38,7 @@ backend/harnessing_ts/headroom/          # 核心层：纯 numpy/scipy，确定�
 ├── synthetic.py     # 合成过程 + 全信息 oracle
 ├── residuals.py     # 残差张量；已实现信息集的特征构造
 ├── correctors.py    # 坐标枚举；线性校正器；held-out 实现增益
-├── inference.py     # HAC/DM(HLN)、解析置信界、块 bootstrap（仅展示用）
+├── inference.py     # HAC/DM(HLN)、解析置信界
 ├── certify.py       # 多坐标 Bonferroni + 均匀 α 的 ε-饱和
 ├── feedback.py      # Scalar / BJ / Card / Placebo 四种渲染
 ├── candidate.py     # 候选契约、AST 白名单、隔离子进程评估、批不变性检查
@@ -102,12 +102,12 @@ tests/test_headroom_*.py
 | `band(P)` | $e$ 经**因果** FIR 带通后取两个正交滞后（0 和 P/4，保留相位信息）。周期峰**只用 diag-A 的残差选取**（A-M4） |
 | `beyond-L` | **只用原始值** $x_{o-k}-x_o$（$k\ge L$），避免和 lag 坐标混淆（A-M11） |
 | `channel(→i)` | 其他所有通道的 $e$ 与 $\Delta x$ 的过去，用来预测通道 i 的残差，共 C 个坐标（C：不做 log-det 筛选） |
-| `total` | 以上全部特征的并集 |
+| `total` | **贪心坐标聚合**：`fit_greedy` 在 A 段内做前向选择（标准化特征块、A 内 80/20 验证、至多 4 步、无改进即停），选中坐标集在全部 A 上重拟合；eval 段全程不参与选择。并集 ridge 已废弃（低信号任务上过参数化、样本外负迁移） |
 
 - **校正器**：ridge 回归，α 只在 A 内做带 H 间隔的时间序列 CV 来选；在 A 上拟合，在 B 上评估实现增益。
 - **实现增益**：逐起点损失差 $d_o=\frac1{HC}\sum_{h,c}[r^2-(r-\hat g)^2]$，$\hat\Delta=\bar d$。同时报告 `by_horizon` 和均值偏移项 μ²。
-- **置信界**：Newey–West HAC 方差（带宽自动选择且 ≥H−1）+ HLN 小样本修正 + t 临界值，得到解析的 LCB/UCB。块 bootstrap 只用于卡片中的展示区间。
-- **卡片排序**用 Bonferroni 调整后的 LCB，抑制头号坐标的赢家诅咒（A-M4）。
+- **置信界**：Newey–West HAC 方差（带宽自动选择且 ≥H−1）+ HLN 小样本修正 + t 临界值，得到解析的 LCB/UCB。卡片行即**点估计 + 解析置信下界**（block bootstrap 展示区间已简化掉）。
+- **卡片排序**用 Bonferroni 调整后的 LCB（由 `correctors.card_level` 计算），抑制头号坐标的赢家诅咒（A-M4）。
 - 不做：多变量 Szegő 筛选、IS 密度、multitaper KS 闭式（只在 stage0 的 notebook 中验证观察 0 和命题 1 的闭式）。
 
 ### 2.4 认证（`certify.py`）
@@ -127,7 +127,7 @@ tests/test_headroom_*.py
 |---|---|
 | `scalar` | 无 |
 | `bj` | 1 步残差的 ACF（前 48 阶，按 lag 顺序）、Ljung–Box (Q,p)、周期图前 5 个峰 |
-| `card` | 按 Bonferroni-LCB 排序的坐标增益（点估计 + 展示区间）、total 增益的 LCB、μ²、各坐标的 `by_horizon` 峰值区间 |
+| `card` | 按 Bonferroni-LCB 排序的坐标增益（点估计 + 解析置信下界）、total 增益的 LCB、μ²、各坐标的 `by_horizon` 峰值区间 |
 | `placebo` | 与 card 格式相同，但对坐标标签做**固定置换**（只保留这一种，A/C） |
 
 - 措辞中性。卡片里的坐标名映射到所有臂共用的 `targetAspect` 词表（§3.3）。
@@ -213,7 +213,7 @@ for round in 1..budget:
  "mechanism": "…", "expectation": "…"}
 ```
 
-`targetAspect` 取值：`periodicity | long-range-beyond-window | cross-channel | horizon-range | level-bias | other`（A-M6，所有臂共用）。
+`targetAspect` 取值：`periodicity | lag-structure | long-range-beyond-window | cross-channel | horizon-range | level-bias | other`（与坐标 aspect 词表一致；A-M6，所有臂共用）。
 
 ### 3.4 记录
 
@@ -242,17 +242,19 @@ for round in 1..budget:
 | 项 | 规格 |
 |---|---|
 | **一次性 m0+g** | total 线性校正器在完整 diag 上拟合，在 test 上评估（A-M7）。P4 再加一次性的非线性 g（随机特征 ridge） |
-| **规则修复** | 按头号坐标选固定修法：band→对应周期的 Fourier 项；beyond-L→加长 lookback；channel→跨通道线性项；lag→AR 残差头。在 m0 模板上实现，不涉及 LLM，同样受预算约束 |
+| **规则修复** | 按头号坐标选固定修法：band→对应周期的 Fourier 项；beyond-L→在固定 96 行窗口内提取低频相位（候选契约固定 L=96，无法加长 lookback）；channel→跨通道线性项；lag→AR 残差头。在 m0 模板上实现，不涉及 LLM，同样受预算约束 |
 | **统一 m+g 后处理** | 对每个方法的最终 incumbent 都叠加一次在完整 diag 上拟合的 total 校正器，然后在 test 上评估 |
 | auto.arima / ETS | 只在真实任务上跑（合成任务已有 oracle） |
 | 不做 | TSFM、SEATS 复现、EvoCast+卡（P5） |
+
+M2 的 m+g 后处理与一次性 m0+g 复用 M1 的公共 API 实现：`correctors.fit_greedy`（拟合段内贪心选择）→ `FittedCorrector` → `correctors.corrector_gain`（held-out 增益与解析置信界）。
 
 **`posthoc.py` 输出**：
 
 - **主终点（预先登记）**：m+g 后处理之后、第 25 个候选时的 test 最优性差距（归一化），以及前 25 个候选的差距曲线下面积。
 - **臂间检验**：以 run 为单位，做按任务分层的置换检验或 bootstrap（A-M10：不同 run 之间没有配对关系，不能用 DM 做臂间比较）。
 - **缺陷定向率**：父模型的头号坐标在 diag 上选定；修改后它的 Δ（在 test 或新段上评估）降幅超过阈值，**并且**降幅大于其余坐标的平均降幅（A-M6）。按 `targetAspect` 与头号坐标是否对应分别统计。
-- off-target 率、diag 与 test 增益的散点、token 和 GPU 时长。
+- off-target 率、diag 与 test 增益的散点、LCB 与 gap 的相关性（紧度事后指标，自 G0-3 移入）、token 和 GPU 时长。
 - **认证事后停止点**；停止点之后继续搜索的收益（RQ3）。
 - **审计**：ws 之外路径的访问、源码大小异常、diag 增益远大于 cert 增益的候选。
 - **图 1**：横轴为候选数（另附 token 版本），纵轴为 test 最优性差距；叠加 card 臂在后台 cert 上的 headroom 区间，并换算到同一尺度；标出事后读出的认证停止点。
@@ -276,10 +278,10 @@ for round in 1..budget:
 |---|---|---|
 | G0-1 | **m = oracle 负对照**（每个任务） | LCB≤0 的覆盖率 ≥95%；判饱和率 ≥ 1−α |
 | G0-2 | **区间双侧校准**：在新长段（10⁵ 步）上计算 $\Delta(\hat g)$ 的真值 | P(LCB≤Δ) 和 P(UCB≥Δ) 都约为 95%（ARFIMA 单独看） |
-| G0-3 | **紧度**：对 gap ≥ 2ε·MSE 的植入缺陷 | Δ(ĝ)/gap 的中位数 ≥0.3；LCB 与 gap 的相关性 ≥0.8 |
+| G0-3 | **紧度**：对 gap ≥ 2ε·MSE 的植入缺陷 | Δ(ĝ)/gap 的中位数 ≥0.3；G0 只记录逐格 (LCB, Δ, gap) 散点（LCB 与 gap 的相关性 ≥0.8 移作主实验的 posthoc 指标） |
 | G0-4 | **定位**：头号坐标与预设映射一致 | ≥70% |
-| G0-5 | **认证误停率**（对照 Δ(ĝ) 真值） | ≤α；同时给出“样本量—判饱和率”曲线，据此冻结 T、ε 和带宽 |
-| G0-6 | **任务筛选**：一次性 m0+g 之后，剩余真实 gap 占初始 gap 的比例 | ≥30%（C 风险 1）。不达标的任务不用于 RQ2/RQ4，并重新设计缺陷：体制切换、乘性季节、长周期配合有限滞后等 |
+| G0-5 | **认证误停率**（对照 Δ(ĝ) 真值） | ≤α；同时给出“样本量—判饱和率”曲线与“饱和 ⟹ Δ(ĝ) ≤ ε·MSE”交叉验证，据此冻结 T、ε 和带宽 |
+| G0-6 | **任务筛选**：一次性 m0+g 之后，剩余真实 gap 占初始 gap 的比例 | ≥30%（C 风险 1），且 m+g 未造成负迁移（greedy total 修复后 remaining ≤ 1）。任务集按曲线重跑结果决定：xchannel 预期合法落选，由 nonlinear_xchannel 替代。不达标的任务不用于 RQ2/RQ4，并重新设计缺陷：体制切换、乘性季节、长周期配合有限滞后等 |
 | G0-7 | 观察 0 正对照：AR(1)、m≡0、h=1 | 实现增益 ≈ φ²s²；白噪声 ≈ 0 |
 
 **判定**：G0-1、G0-2、G0-5、G0-7 任一不过，停下来修理论或实现；G0-6 不过，最多再花 1 周重新设计任务。

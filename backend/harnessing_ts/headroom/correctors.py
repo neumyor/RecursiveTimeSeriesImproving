@@ -47,6 +47,7 @@ class GainReport:
     delta: float  # mean per-origin loss reduction on the eval segment
     lcb: float  # HAC + HLN lower confidence bound at `level`
     ucb: float
+    level: float  # confidence level lcb/ucb were computed at
     by_horizon: np.ndarray  # [H] per-step gains
     mu2: float  # (mean residual on the eval segment)^2, the level-bias scale
     n_eval: int
@@ -99,14 +100,24 @@ def select_period_peaks(
     candidates.sort(key=lambda b: power[b], reverse=True)
     chosen: list[int] = []
     for b in candidates:
-        # 峰间至少隔 2 个频率点: two accepted peaks always keep at least two
-        # frequency bins between them, so one spectral lobe of a windowed
-        # periodogram is never reported twice.
-        if all(abs(b - k) > 2 for k in chosen):
+        # One spectral lobe must be reported once: require a relative
+        # frequency separation, not a bin separation (adjacent bins of a
+        # long-tailed lobe would otherwise all qualify at short periods).
+        # The first and last in-band bins are excluded above (no in-band
+        # neighbour on one side).
+        period_b = 1.0 / float(freqs[b])
+        if all(abs(period_b - 1.0 / float(freqs[k])) / (1.0 / float(freqs[k])) >= 0.15 for k in chosen):
             chosen.append(b)
         if len(chosen) == cfg.max_period_peaks:
             break
-    return [int(round(1.0 / float(freqs[b]))) for b in chosen]
+    periods: list[int] = []
+    for b in chosen:
+        period = int(round(1.0 / float(freqs[b])))
+        # Adjacent bins can round to the same integer period at short
+        # periods; duplicates would inflate the certification family.
+        if period not in periods:
+            periods.append(period)
+    return periods
 
 
 def enumerate_coordinates(
@@ -125,10 +136,14 @@ def enumerate_coordinates(
         for period in period_peaks
     ]
     coordinates.append(Coordinate("beyond_l", "beyond_l", _COORDINATE_ASPECTS["beyond_l"], {}))
-    coordinates += [
-        Coordinate("channel", f"channel->{i}", _COORDINATE_ASPECTS["channel"], {"target_channel": i})
-        for i in range(min(n_channels, cfg.channel_max))
-    ]
+    # A channel->i coordinate needs at least one OTHER channel to feed on;
+    # with C=1 it degenerates to an intercept-only fit and would sit on the
+    # card of every univariate task.
+    if n_channels >= 2:
+        coordinates += [
+            Coordinate("channel", f"channel->{i}", _COORDINATE_ASPECTS["channel"], {"target_channel": i})
+            for i in range(min(n_channels, cfg.channel_max))
+        ]
     # The horizon coordinate needs no spec: its per-h blocks are implied by
     # r_full's shape; `horizon` stays in the signature per the contract.
     coordinates.append(Coordinate("horizon", "horizon", _COORDINATE_ASPECTS["horizon"], {}))
@@ -151,9 +166,11 @@ def _band_block(e_full: np.ndarray, origins: np.ndarray, period: int, cfg: Headr
     taps = min(cfg.fir_len_cap, 4 * period)
     if taps % 2 == 0:
         taps += 1  # odd length keeps the FIR phase-linear
+    # firwin cutoff is a fraction of Nyquist (1.0 = pi rad/sample), so the
+    # angular band [2*pi/(1.2P), 2*pi/(0.8P)] becomes [2/(1.2P), 2/(0.8P)].
     fir = firwin(
         taps,
-        cutoff=(1.0 / (1.2 * period), 1.0 / (0.8 * period)),
+        cutoff=(2.0 / (1.2 * period), 2.0 / (0.8 * period)),
         window="hamming",
         pass_zero=False,
     )
@@ -240,15 +257,10 @@ def build_features(
     elif coord.kind == "horizon":
         blocks = _horizon_blocks(seg.r_full, origins, cfg)
     elif coord.kind in ("total", "hgroup"):
-        # hgroup reuses the total features and only re-scopes the evaluation
-        # (contract §5), so both kinds build the identical union here.  The
-        # band blocks come from spec["periods"], filled by all_gains: the
-        # peaks are chosen on A and must be the same for every coordinate.
-        blocks = [_lag_block(seg.e_full, origins, k1, k2) for k1, k2 in cfg.lag_segments]
-        blocks += [_band_block(seg.e_full, origins, period, cfg) for period in coord.spec.get("periods", ())]
-        blocks.append(_beyond_block(seg.values, origins, cfg))
-        blocks += _channel_blocks(seg, origins, None)
-        blocks += _horizon_blocks(seg.r_full, origins, cfg)
+        raise ValueError(
+            "total/hgroup gains come from the greedy FittedCorrector "
+            "(fit_greedy + corrector_gain), not from build_features"
+        )
     else:
         raise ValueError(f"unknown coordinate kind {coord.kind!r}")
     x = np.concatenate(blocks, axis=1) if blocks else np.zeros((origins.size, 0))
@@ -348,26 +360,191 @@ def coordinate_gain(
         delta=mean,
         lcb=lcb,
         ucb=ucb,
+        level=level,
         by_horizon=gains[:, :, channels].mean(axis=(0, 2)),
         mu2=float(r.mean() ** 2),
         n_eval=int(seg_b.origins.size),
     )
 
 
-def all_gains(
-    seg_a: SegmentData,
-    seg_b: SegmentData,
+@dataclass(frozen=True)
+class FittedCorrector:
+    """A fitted multi-coordinate linear corrector, built by greedy selection.
+
+    The aggregate ("total") corrector is NOT the union of every coordinate's
+    features: the union is over-parameterized on low-signal tasks and
+    transfers negatively out of sample (measured on lgssm_xchannel, where
+    single coordinates gain while the union loses).  Greedy forward
+    selection over coordinates, validated on an A-internal time split, keeps
+    the corrector inside the same linear class G while staying honest: the
+    eval segment (B, cert, or test) never touches the selection.
+    """
+
+    coordinates: tuple[Coordinate, ...]
+    means: np.ndarray  # [F] feature means from the fit rows
+    stds: np.ndarray  # [F] feature stds from the fit rows
+    coef: np.ndarray  # [F, H*C] in standardized space
+    intercept: np.ndarray  # [H*C]
+    label: str = "total"
+
+
+def _pool_coordinates(
     cfg: HeadroomConfig,
     period_peaks: list[int],
-) -> list[GainReport]:
-    """total + every enumerated coordinate + the two step-length groups.
+    n_channels: int,
+) -> list[Coordinate]:
+    """Coordinates eligible for greedy aggregation (horizon fits per-h)."""
+    return [
+        c for c in enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon)
+        if c.kind != "horizon"
+    ]
+
+
+def _internal_split(n: int, embargo: int) -> tuple[int, int]:
+    n_fit = int(n * 0.8)
+    eval_start = n_fit + embargo
+    if n_fit < 2 or eval_start >= n:
+        raise ValueError(
+            f"need more than {eval_start} rows for the 80/20 split with embargo {embargo}, got {n}"
+        )
+    return n_fit, eval_start
+
+
+def fit_greedy(
+    seg_a: SegmentData,
+    cfg: HeadroomConfig,
+    period_peaks: list[int],
+    *,
+    max_steps: int = 4,
+) -> FittedCorrector:
+    """Greedy forward selection of coordinates on the A segment alone."""
+    pool = _pool_coordinates(cfg, period_peaks, seg_a.values.shape[1])
+    y = seg_a.r.reshape(seg_a.origins.size, -1)
+    n_fit, eval_start = _internal_split(y.shape[0], cfg.horizon)
+
+    # Precompute each coordinate's standardized block once, split into the
+    # A-internal fit and validation rows; pair-wise gram blocks make every
+    # greedy step a cheap assembly + solve instead of a fresh matrix product.
+    blocks: dict[str, np.ndarray] = {}
+    for coord in pool:
+        x_all, _ = build_features(seg_a, coord, cfg)
+        stds = x_all[:n_fit].std(axis=0)
+        stds[stds == 0.0] = 1.0
+        blocks[coord.label] = (x_all - x_all[:n_fit].mean(axis=0)) / stds
+    y_fit, y_val = y[:n_fit], y[eval_start:]
+
+    def _val_mse(labels: tuple[str, ...]) -> float:
+        if not labels:
+            # Intercept-only baseline: predict the fit-part mean.
+            return float(np.mean(np.square(y_val - y_fit.mean(axis=0))))
+        design_fit = np.concatenate([blocks[label][:n_fit] for label in labels], axis=1)
+        design_val = np.concatenate([blocks[label][eval_start:] for label in labels], axis=1)
+        gram = design_fit.T @ design_fit
+        cross = design_fit.T @ y_fit
+        eye = np.eye(design_fit.shape[1])
+        best = np.inf
+        for alpha in cfg.ridge_alphas:
+            coef = np.linalg.solve(gram + alpha * eye, cross)
+            best = min(best, float(np.mean(np.square(y_val - design_val @ coef))))
+        return best
+
+    baseline_mse = _val_mse(())
+    selected: list[str] = []
+    remaining = [coord.label for coord in pool]
+    while remaining and len(selected) < max_steps:
+        best_label: str | None = None
+        best_mse = baseline_mse
+        for label in remaining:
+            mse = _val_mse(tuple(selected + [label]))
+            if mse < best_mse:
+                best_mse, best_label = mse, label
+        if best_label is None:
+            break
+        selected.append(best_label)
+        remaining.remove(best_label)
+        baseline_mse = best_mse
+
+    # Refit the selected set on all of A with its own alpha choice.
+    label_to_coord = {coord.label: coord for coord in pool}
+    coords = tuple(label_to_coord[label] for label in selected)
+    x_all = (
+        np.concatenate([blocks[label] for label in selected], axis=1)
+        if selected
+        else np.zeros((y.shape[0], 0))
+    )
+    coef, intercept = _fit_ridge(x_all, y, cfg.ridge_alphas, cfg.horizon)
+    means = np.zeros(x_all.shape[1])
+    stds = np.ones(x_all.shape[1])
+    if selected:
+        raw = np.concatenate(
+            [build_features(seg_a, label_to_coord[label], cfg)[0] for label in selected], axis=1
+        )
+        means = raw[:n_fit].mean(axis=0)
+        stds = raw[:n_fit].std(axis=0)
+        stds[stds == 0.0] = 1.0
+    return FittedCorrector(
+        coordinates=coords,
+        means=means,
+        stds=stds,
+        coef=coef,
+        intercept=intercept,
+        label="total",
+    )
+
+
+def corrector_gain(
+    fitted: FittedCorrector,
+    seg_b: SegmentData,
+    cfg: HeadroomConfig,
+    level: float = 0.95,
+    *,
+    h_scope: tuple[int, int] | None = None,
+    label: str | None = None,
+) -> GainReport:
+    """Held-out gain of a fitted corrector on seg_b (optionally h-scoped)."""
+    if fitted.coordinates:
+        x_b = np.concatenate(
+            [build_features(seg_b, coord, cfg)[0] for coord in fitted.coordinates], axis=1
+        )
+        y_hat = ((x_b - fitted.means) / fitted.stds) @ fitted.coef + fitted.intercept
+    else:
+        shape = (seg_b.origins.size, *seg_b.r.shape[1:])
+        y_hat = np.broadcast_to(fitted.intercept.reshape(1, *seg_b.r.shape[1:]), shape).copy()
+    y_hat = y_hat.reshape(seg_b.r.shape)
+    r = seg_b.r
+    gains = r * r - (r - y_hat) ** 2
+    steps = slice(h_scope[0] - 1, h_scope[1]) if h_scope else slice(None)
+    d = gains[:, steps, :].mean(axis=(1, 2))
+    mean, lcb, ucb = mean_ci(d, bandwidth=auto_bandwidth(d, cfg.horizon), level=level)
+    return GainReport(
+        coordinate=Coordinate(
+            "hgroup" if h_scope else "total",
+            label or fitted.label,
+            _COORDINATE_ASPECTS.get("total" if not h_scope else "hgroup", "other"),
+            {"h1": h_scope[0], "h2": h_scope[1]} if h_scope else {},
+        ),
+        delta=mean,
+        lcb=lcb,
+        ucb=ucb,
+        level=level,
+        by_horizon=gains.mean(axis=(0, 2)),
+        mu2=float(r.mean() ** 2),
+        n_eval=int(seg_b.origins.size),
+    )
+
+
+def certification_family(
+    cfg: HeadroomConfig,
+    period_peaks: list[int],
+    n_channels: int,
+) -> list[Coordinate]:
+    """The certification statistic family K: total + coordinates + hgroups.
 
     The total and hgroup coordinates need the A-selected periods to build
     their band blocks, so they carry them in spec["periods"] — build_features
     has no other way to receive them (contract signature).
     """
     periods = tuple(period_peaks)
-    n_channels = seg_a.values.shape[1]
     horizon = cfg.horizon
     coordinates = [
         Coordinate("total", "total", _COORDINATE_ASPECTS["total"], {"periods": periods})
@@ -388,4 +565,60 @@ def all_gains(
             {"h1": half + 1, "h2": horizon, "periods": periods},
         ),
     ]
-    return [coordinate_gain(coord, seg_a, seg_b, cfg) for coord in coordinates]
+    return coordinates
+
+
+def certify_level(
+    cfg: HeadroomConfig,
+    j_max: int,
+    period_peaks: list[int],
+    n_channels: int,
+) -> float:
+    """Per-statistic confidence level for the j-th certification.
+
+    The uniform alpha spending alpha/j_max is split over the family K by
+    Bonferroni; gains fed to certify() must be computed at exactly this level
+    or the family-wise false-stop bound (Proposition 2) does not hold.
+    """
+    family_size = len(certification_family(cfg, period_peaks, n_channels))
+    return 1.0 - (cfg.certify_alpha / j_max) / family_size
+
+
+def card_level(
+    cfg: HeadroomConfig,
+    period_peaks: list[int],
+    n_channels: int,
+) -> float:
+    """Bonferroni-adjusted level for the card's coordinate rows (A-M4)."""
+    card_size = len(enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon))
+    return 1.0 - cfg.acceptance_alpha / max(card_size, 1)
+
+
+def all_gains(
+    seg_a: SegmentData,
+    seg_b: SegmentData,
+    cfg: HeadroomConfig,
+    period_peaks: list[int],
+    level: float = 0.95,
+) -> list[GainReport]:
+    """total (greedy) + every enumerated coordinate + the two step-length groups.
+
+    The total and both hgroups share ONE greedy corrector fitted on A; the
+    hgroups only re-scope the evaluation to their horizon range, which is
+    exactly the certification semantics (same corrector, per-scope statistic).
+    """
+    n_channels = seg_a.values.shape[1]
+    fitted = fit_greedy(seg_a, cfg, period_peaks)
+    total = corrector_gain(fitted, seg_b, cfg, level)
+    coordinates = enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon)
+    half = cfg.horizon // 2
+    hgroups = [
+        corrector_gain(
+            fitted, seg_b, cfg, level, h_scope=(1, half), label=f"hgroup[1,{half}]"
+        ),
+        corrector_gain(
+            fitted, seg_b, cfg, level, h_scope=(half + 1, cfg.horizon), label=f"hgroup[{half + 1},{cfg.horizon}]"
+        ),
+    ]
+    coord_gains = [coordinate_gain(coord, seg_a, seg_b, cfg, level=level) for coord in coordinates]
+    return [total, *coord_gains, *hgroups]

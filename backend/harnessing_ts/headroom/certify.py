@@ -1,16 +1,27 @@
-"""Epsilon-saturation certificate for the incumbent corrector; see docs/headroom-contracts.md §7."""
+"""Epsilon-saturation certificate for the incumbent corrector; see docs/headroom-contracts.md §7.
+
+``gains`` must be pre-computed at the Bonferroni level returned by
+``correctors.certify_level(cfg, j_max, period_peaks, n_channels)`` and passed
+through ``correctors.all_gains(..., level=...)``; certify() rejects gains
+carrying any other level, because a UCB read off-level silently voids the
+family-wise bound.  That level is two-sided — ``mean_ci`` builds one two-sided
+interval per statistic — so each UCB compared below actually sits at the
+one-sided level 1 - alpha_j / (2K) and the family-wise false-early-stop
+probability is bounded by certify_alpha / 2, not certify_alpha.  The
+factor-of-two conservatism is deliberate: it can only make stopping harder,
+never too eager.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from harnessing_ts.headroom.config import HeadroomConfig
+from harnessing_ts.headroom.correctors import GainReport
 
-if TYPE_CHECKING:
-    # correctors.py is coded in parallel; at runtime certify only touches the
-    # duck-typed surface `.coordinate.label` / `.ucb`, so this import never runs.
-    from harnessing_ts.headroom.correctors import GainReport
+# Levels agree only when the caller wired the same Bonferroni arithmetic;
+# anything inside this tolerance is float noise, not a wiring bug.
+_LEVEL_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
@@ -36,11 +47,11 @@ def certify(
     after each acceptance), so j counts incumbent versions rather than raw
     candidate rounds, and the total certify_alpha budget is spent uniformly
     over at most j_max certifications: alpha_j = certify_alpha / j_max. Within
-    one check, Bonferroni splits alpha_j across the K statistics, so each UCB
-    is read at level 1 - alpha_j / K; the union bound then keeps the
-    family-wise false-early-stop probability below certify_alpha. Saturation
-    means every coordinate's gain UCB lies below certify_epsilon times its
-    group's cert-segment MSE: no aspect retains a relative improvement beyond
+    one check, Bonferroni splits alpha_j across the K statistics, so every
+    gain must carry the level 1 - alpha_j / K (see the module docstring for
+    the two-sided reading and its alpha/2 conservatism). Saturation means
+    every coordinate's gain UCB lies below certify_epsilon times its group's
+    cert-segment MSE: no aspect retains a relative improvement beyond
     epsilon.
     """
     if j < 1:
@@ -57,6 +68,19 @@ def certify(
     # higher per-statistic level and wider UCBs: planning more certifications
     # makes each one individually stricter so the total stays under certify_alpha.
     level = 1.0 - (cfg.certify_alpha / j_max) / len(gains)
+
+    # Regression guard for the level wiring: an off-level UCB breaks the
+    # family-wise bound without any visible symptom, so refuse to certify.
+    # Written as `not <=` so a NaN level is rejected too.
+    for gain in gains:
+        if not abs(float(gain.level) - level) <= _LEVEL_TOLERANCE:
+            raise RuntimeError(
+                f"gain {gain.coordinate.label!r} was computed at level {gain.level}, but "
+                f"certification j={j} of j_max={j_max} with K={len(gains)} statistics "
+                f"requires level {level}; pre-compute the gains at the Bonferroni "
+                f"level via correctors.all_gains(..., level=correctors.certify_level("
+                f"cfg, j_max, period_peaks, n_channels))"
+            )
 
     failures: list[dict[str, str | float]] = []
     for gain in gains:

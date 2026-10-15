@@ -124,7 +124,7 @@ $$\hat\Delta=\frac{1}{|B|}\sum_{t\in B}\big[r_t^2-(r_t-\hat g_t)^2\big].$$
 
 在 A、B 两段分布一致（平稳）的条件下，$\mathbb{E}[\hat\Delta\mid\hat g]=\mathrm{MSE}(m)-\mathrm{MSE}(m+\hat g)\le H_{\mathcal{G}}\le$ 到最优的差距。所以 $\hat\Delta$ 的**置信下界**是到最优差距的置信下界，也就是一个带置信度的“非最优性见证”。
 
-置信区间用 moving-block bootstrap 计算（块长不小于 $h$），或用 HAC 方差（Newey–West，滞后不小于 $h-1$），以处理重叠窗口带来的相关性。
+置信界用 HAC 方差（Newey–West，滞后不小于 $h-1$）加 HLN 小样本修正解析地计算，以处理重叠窗口带来的相关性；缺陷卡各行即**点估计 + 解析置信下界**。
 
 > 这里刻意以“实现增益”作为主量，而不是 plug-in 的谱估计：后者在有限样本下会高估可实现的修正量。
 
@@ -173,7 +173,7 @@ incumbent 改变时：后台在 cert 上检验 ε-饱和 → 满足即停止（�
 
 ### 3.5 认证停止
 
-**规则。** 认证只在 **incumbent 改变时**进行：第 0 轮（对初始 incumbent）以及每次接受之后（对新 incumbent）；被拒绝的轮次不消耗 $\alpha$。设候选预算为 $B$，incumbent 版本数至多 $J_{\max}=B+1$；$\alpha$ 按版本**均匀分配**，第 $j$ 个 incumbent 版本分得 $\alpha_j=\alpha/J_{\max}$。每次认证在 cert 上对统计量集合 $\mathcal K=\{\text{total}\}\cup\{\text{各坐标}\}\cup\{\text{步长组}\}$ 逐项计算 headroom 的上置信界，逐项置信水平为 $1-\alpha_j/|\mathcal K|$（Bonferroni）。当且仅当**每一项**都满足 $\mathrm{UCB}_k<\varepsilon\cdot\mathrm{MSE}_k$（$\mathrm{MSE}_k$ 按该项对应的步长组计算）时停止。
+**规则。** 认证只在 **incumbent 改变时**进行：第 0 轮（对初始 incumbent）以及每次接受之后（对新 incumbent）；被拒绝的轮次不消耗 $\alpha$。设候选预算为 $B$，incumbent 版本数至多 $J_{\max}=B+1$；$\alpha$ 按版本**均匀分配**，第 $j$ 个 incumbent 版本分得 $\alpha_j=\alpha/J_{\max}$。每次认证在 cert 上对统计量集合 $\mathcal K=\{\text{total}\}\cup\{\text{各坐标}\}\cup\{\text{步长组}\}$ 逐项计算 headroom 的上置信界，逐项置信水平为 $1-\alpha_j/|\mathcal K|$（Bonferroni）。当且仅当**每一项**都满足 $\mathrm{UCB}_k<\varepsilon\cdot\mathrm{MSE}_k$（$\mathrm{MSE}_k$ 按该项对应的步长组计算）时停止。实现层面，聚合统计量（total）用贪心坐标选择构造——它仍是已实现信息集上的线性校正器，命题 1 的下界不受影响。
 
 **命题 2（误停保证）。** 记 $\Delta_{j,k}$ 为第 $j$ 次认证中统计量 $k\in\mathcal K$ 所拟合校正器的真实可实现增益，则
 

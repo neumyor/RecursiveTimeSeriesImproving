@@ -11,6 +11,7 @@ from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.feedback import (
     acf,
     ljung_box,
+    min_p_ljung_box,
     periodogram_peaks,
     render_feedback,
 )
@@ -45,7 +46,7 @@ class _Coordinate:
 
 @dataclass(frozen=True)
 class _Gain:
-    """Stand-in for correctors.GainReport (parallel-developed module)."""
+    """Stand-in for correctors.GainReport; the renderer duck-types at runtime."""
 
     coordinate: _Coordinate
     delta: float
@@ -193,6 +194,39 @@ def test_bj_reports_diagnostics_without_any_gain_numbers() -> None:
         assert heading in out
 
 
+def test_bj_ljung_box_row_shows_min_p_across_channels() -> None:
+    # One strongly autocorrelated channel, one white channel: the old mean-ACF
+    # portmanteau diluted the signal (and can cancel it outright across
+    # sign-opposed channels), weakening the bj arm relative to card. The
+    # per-channel minimum p must show a tiny p at lag 24.
+    n = 2000
+    rng = np.random.default_rng(33)
+    ar1 = lfilter([1.0], [1.0, -0.9], rng.normal(0.0, 1.0, size=n))
+    e = np.column_stack([ar1, rng.normal(0.0, 1.0, size=n)])
+    gains = [
+        _Gain(
+            _Coordinate("band", "band(P=24)", "periodicity"),
+            88.8888,
+            77.7777,
+            90.0,
+            np.zeros(HORIZON),
+            66.6666,
+            500,
+        )
+    ]
+    out = render_feedback("bj", _make_incumbent(e), gains, _make_history(1), HeadroomConfig())
+    assert "Q (min p over channels)" in out
+    # The lag-24 row is the AR(1) channel's own (Q, p) — the minimum-p
+    # channel — and its p is tiny (renders as 0.0000).
+    rho = acf(e, 48)
+    q24, p24 = ljung_box(rho[:, 0], n, (24,))[24]
+    assert p24 < 1e-10
+    assert f"| 24 | {q24:.4f} | {p24:.4f} |" in out
+    # The bj arm still renders no gain numbers and no coordinate labels.
+    assert "88.8888" not in out
+    assert "band(P=24)" not in out
+
+
 def test_card_orders_coordinates_by_lcb_descending() -> None:
     out = render_feedback("card", _make_incumbent(), _make_gains(), _make_history(1), HeadroomConfig())
     section = out.split("## Remaining improvement by coordinate", 1)[1]
@@ -288,6 +322,35 @@ def test_ljung_box_ar1_rejects_whiteness() -> None:
     assert abs(rho[0] - 0.9) < 0.02  # ACF sanity: lag-1 autocorrelation is phi
     _, p = ljung_box(rho, n, (24,))[24]
     assert p < 1e-10
+
+
+def test_min_p_ljung_box_reports_the_autocorrelated_channel() -> None:
+    # Channel 0 is a strong AR(1), channel 1 is white noise. The cross-channel
+    # mean ACF is no series' ACF — here it halves channel 0's signal, and with
+    # opposite-signed channels it cancels outright — so the portmanteau must
+    # run per channel; the minimum p then exposes the AR(1) at every lag.
+    n = 2000
+    rng = np.random.default_rng(31)
+    ar1 = lfilter([1.0], [1.0, -0.9], rng.normal(0.0, 1.0, size=n))
+    e = np.column_stack([ar1, rng.normal(0.0, 1.0, size=n)])
+    rho = acf(e, 48)
+    worst = min_p_ljung_box(rho, n, (12, 24, 48))
+    for m, (q, p) in worst.items():
+        q0, p0 = ljung_box(rho[:, 0], n, (m,))[m]
+        assert (q, p) == (q0, p0)  # the AR(1) channel is the minimum-p channel
+        assert p < 1e-10
+
+
+def test_min_p_ljung_box_skips_channels_with_no_acf() -> None:
+    # A constant channel has a NaN ACF and therefore no vote; the minimum
+    # must fall to the remaining informative channel rather than become n/a.
+    rng = np.random.default_rng(32)
+    e = np.column_stack([np.full(2000, 3.0), rng.normal(0.0, 1.0, size=2000)])
+    rho = acf(e, 48)
+    q, p = min_p_ljung_box(rho, 2000, (24,))[24]
+    q1, p1 = ljung_box(rho[:, 1], 2000, (24,))[24]
+    assert (q, p) == (q1, p1)
+    assert np.isfinite(p)
 
 
 def test_periodogram_peaks_locate_a_known_period() -> None:

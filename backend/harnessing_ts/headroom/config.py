@@ -36,7 +36,6 @@ _FIELD_ALIASES: dict[str, str] = {
     "cert_ratio": "certRatio",
     "diag_a_ratio": "diagARatio",
     "seed": "seed",
-    "bootstrap_runs": "bootstrapRuns",
 }
 _JSON_ALIASES: dict[str, str] = {value: key for key, value in _FIELD_ALIASES.items()}
 
@@ -66,7 +65,6 @@ class HeadroomConfig:
     cert_ratio: float = 0.1
     diag_a_ratio: float = 0.5
     seed: int = 0
-    bootstrap_runs: int = 200
 
     @property
     def max_lag(self) -> int:
@@ -89,6 +87,24 @@ class HeadroomConfig:
             )
         if self.horizon <= 0:
             errors.append("horizon must be positive")
+        if self.lag_segments:
+            # Feature depths must stay inside the burn-in, or numpy negative
+            # indexing would silently wrap around to future rows.
+            beyond_depth = self.input_length + 16 * (self.beyond_l_lags - 1)
+            if self.burn_in < beyond_depth:
+                errors.append(
+                    f"burnIn ({self.burn_in}) must be >= the beyond-l feature depth ({beyond_depth})"
+                )
+            horizon_depth = self.horizon + self.horizon_realized_lags - 1
+            if self.burn_in < horizon_depth:
+                errors.append(
+                    f"burnIn ({self.burn_in}) must be >= the horizon feature depth ({horizon_depth})"
+                )
+            band_lag = self.band_period_range[1] // 4
+            if band_lag > self.max_lag:
+                errors.append(
+                    f"band period range implies a band lag of {band_lag} > maxLag ({self.max_lag})"
+                )
         if self.arm not in ARM_VALUES:
             errors.append(f"arm must be one of {ARM_VALUES}")
         if not 1 <= self.budget_candidates <= 500:
@@ -134,8 +150,6 @@ class HeadroomConfig:
             errors.append("diagARatio must be in (0, 1)")
         if self.seed < 0:
             errors.append("seed must be >= 0")
-        if not 0 <= self.bootstrap_runs <= 10000:
-            errors.append("bootstrapRuns must be in [0, 10000]")
         return errors
 
     def to_dict(self) -> dict[str, Any]:

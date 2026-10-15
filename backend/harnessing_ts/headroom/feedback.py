@@ -9,19 +9,14 @@ coding plan §2.5/§3.2 (arm-neutral wording: no dataset or domain
 vocabulary, no status language such as "certified").
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 from scipy import stats
 from scipy.signal import find_peaks, periodogram
 
 from harnessing_ts.headroom.config import ARM_VALUES, HeadroomConfig
-
-if TYPE_CHECKING:
-    # GainReport lives in the parallel-developed correctors module.  It is
-    # imported for type hints only; at runtime we duck-type the reports so
-    # this module never depends on correctors being importable.
-    from harnessing_ts.headroom.correctors import GainReport
+from harnessing_ts.headroom.correctors import GainReport
 
 # The bj diagnostics are fixed by the protocol (contract §9), not configurable:
 # the whole point of the arm is a standard Box-Jenkins style diagnostic view.
@@ -82,6 +77,28 @@ def ljung_box(rho: np.ndarray, n: int, lags: tuple[int, ...]) -> dict[int, tuple
     return result
 
 
+def min_p_ljung_box(
+    rho: np.ndarray, n: int, lags: tuple[int, ...]
+) -> dict[int, tuple[float, float]]:
+    """Per-channel Ljung-Box, reduced at each lag to the smallest-p channel.
+
+    The portmanteau is a single-series test, and the cross-channel mean ACF
+    is no series' ACF: sign cancellation can push its Q toward zero while
+    every channel is autocorrelated, which would hand the bj agent a weaker
+    diagnostic than the card arm's per-coordinate view.  Reporting the
+    strongest per-channel evidence at each lag names no channel and ranks
+    nothing; at C = 1 it reduces to the textbook test.
+    """
+    rho = np.asarray(rho, dtype=np.float64)
+    per_channel = [ljung_box(rho[:, channel], n, lags) for channel in range(rho.shape[1])]
+    worst: dict[int, tuple[float, float]] = {}
+    for m in lags:
+        # A channel with a NaN ACF (constant) or too few rows has no vote.
+        finite = [per_channel[c][m] for c in range(rho.shape[1]) if np.isfinite(per_channel[c][m][1])]
+        worst[m] = min(finite, key=lambda pair: pair[1]) if finite else (float("nan"), float("nan"))
+    return worst
+
+
 def periodogram_peaks(e: np.ndarray, top: int) -> list[tuple[float, float]]:
     """Up to ``top`` spectral peaks of the channel-averaged periodogram.
 
@@ -105,7 +122,7 @@ def periodogram_peaks(e: np.ndarray, top: int) -> list[tuple[float, float]]:
 def render_feedback(
     arm: str,
     incumbent: dict[str, Any],
-    gains: "list[GainReport]",
+    gains: list[GainReport],
     history: list[dict[str, Any]],
     cfg: HeadroomConfig,
     placebo_perm: tuple[int, ...] | None = None,
@@ -120,12 +137,13 @@ def render_feedback(
     "headroom").
 
     Card ordering: coordinate rows are sorted by the ``lcb`` values the
-    caller passed.  Those intervals are already Bonferroni-adjusted
-    upstream (correctors computes each lcb at level
-    1 - 0.05 / len(gains)); this function never recomputes intervals, it
-    only sorts by them.  NaN lcb values sort last; ties keep the caller's
-    order.  The ``total`` gain becomes the aggregate row and ``mu2`` the
-    level row; hgroup gains are certification statistics and are excluded.
+    caller passed.  This function never computes or adjusts intervals; the
+    caller must compute the card gains at the Bonferroni-adjusted level
+    ``correctors.card_level(cfg, period_peaks, n_channels)`` (the A-M4
+    winner's-curse adjustment) and pass the resulting reports here.  NaN lcb
+    values sort last; ties keep the caller's order.  The ``total`` gain
+    becomes the aggregate row and ``mu2`` the level row; hgroup gains are
+    certification statistics and are excluded.
 
     Placebo: exactly the card layout with the coordinate rows permuted —
     each row keeps its own numbers, only the order changes.  With
@@ -200,7 +218,6 @@ def _bj_block(incumbent: dict[str, Any]) -> str:
     # leaves the contiguous realized 1-step residual series.
     e = e[~np.isnan(e).any(axis=1)]
     rho = acf(e, _BJ_ACF_LAGS)
-    mean_rho = rho.mean(axis=1)
 
     if e.shape[1] <= _BJ_PER_CHANNEL_MAX:
         headers = [f"ch{c}" for c in range(e.shape[1])]
@@ -213,16 +230,17 @@ def _bj_block(incumbent: dict[str, Any]) -> str:
             for k in range(1, _BJ_ACF_LAGS + 1)
         ]
     else:
+        mean_rho = rho.mean(axis=1)
         acf_rows = ["| lag | mean |", "| --- | --- |"]
         acf_rows += [
             f"| {k} | {_fmt(mean_rho[k - 1])} |" for k in range(1, _BJ_ACF_LAGS + 1)
         ]
 
-    # One (Q, p) pair per lag regardless of channel count: the portmanteau
-    # runs on the cross-channel mean ACF, which reduces to the textbook
-    # single-series test at C = 1.
-    lb = ljung_box(mean_rho, e.shape[0], _BJ_LB_LAGS)
-    lb_rows = ["| lag | Q (mean acf) | p (mean acf) |", "| --- | --- | --- |"]
+    lb = min_p_ljung_box(rho, e.shape[0], _BJ_LB_LAGS)
+    lb_rows = [
+        "| lag | Q (min p over channels) | p (min over channels) |",
+        "| --- | --- | --- |",
+    ]
     lb_rows += [f"| {m} | {_fmt(q)} | {_fmt(p)} |" for m, (q, p) in lb.items()]
 
     peak_rows = ["| period (steps) | power |", "| --- | --- |"]
@@ -238,7 +256,7 @@ def _bj_block(incumbent: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
-def _split_gains(gains: "list[GainReport]") -> "tuple[list[GainReport], GainReport | None]":
+def _split_gains(gains: list[GainReport]) -> tuple[list[GainReport], GainReport | None]:
     """Card rows (all coordinates) plus the total report.
 
     hgroup gains are excluded: the contract reserves them for certification,
@@ -255,8 +273,8 @@ def _split_gains(gains: "list[GainReport]") -> "tuple[list[GainReport], GainRepo
     return rows, total
 
 
-def _sorted_by_lcb(rows: "list[GainReport]") -> "list[GainReport]":
-    """Descending by the caller's lcb (already Bonferroni-adjusted upstream)."""
+def _sorted_by_lcb(rows: list[GainReport]) -> list[GainReport]:
+    """Descending by the caller's lcb (computed at correctors.card_level upstream)."""
     return sorted(
         rows,
         key=lambda gain: float(gain.lcb) if np.isfinite(gain.lcb) else -np.inf,
@@ -270,7 +288,7 @@ def _default_perm(n: int, cfg: HeadroomConfig) -> tuple[int, ...]:
 
 
 def _card_table(
-    ordered: "list[GainReport]", total: "GainReport | None", perm: tuple[int, ...] | None
+    ordered: list[GainReport], total: GainReport | None, perm: tuple[int, ...] | None
 ) -> str:
     """Defect card: coordinate rows, then the aggregate total, then mu2."""
     if perm is not None:
@@ -296,7 +314,7 @@ def _card_table(
     return "\n".join(lines)
 
 
-def _card_row(gain: "GainReport") -> str:
+def _card_row(gain: GainReport) -> str:
     window = _peak_range(gain.by_horizon)
     strongest = "n/a" if window is None else f"h in [{window[0]}, {window[1]}]"
     return (

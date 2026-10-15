@@ -45,7 +45,6 @@ class HeadroomConfig:
     cert_ratio: float = 0.1
     diag_a_ratio: float = 0.5                # diag 内 A 段占比
     seed: int = 0
-    bootstrap_runs: int = 200                # 仅用于展示区间
 
     @property
     def max_lag(self) -> int                 # lag_segments 最大值（335）
@@ -58,6 +57,13 @@ class HeadroomConfig:
     @classmethod
     def from_json(cls, path: Path) -> "HeadroomConfig"            # 解析失败/校验失败 ValueError
 ```
+
+除各字段的取值范围外，`validate` 还强制以下特征深度约束（汇总报告，任一违反即不合法）：
+
+- `burn_in >= input_length`：独立 cert/test 段的输入窗口从段首起算，burn-in 必须盖住整个 lookback；
+- `burn_in >= input_length + 16*(beyond_l_lags - 1)`：beyond-L 特征的最深滞后不得越出段内已实现范围（否则 numpy 负下标会静默绕到未来行）；
+- `burn_in >= horizon + horizon_realized_lags - 1`：horizon 特征同理；
+- `band_period_range[1] // 4 <= max_lag`：band 坐标读取的 P//4 相位滞后必须落在 lag 覆盖内。
 
 ## 3. `headroom/timeidx.py`
 
@@ -117,47 +123,99 @@ class Coordinate:
     spec: dict    # 如 {"k1": 0, "k2": 23} / {"period": 24} / {"target_channel": 3} / {"h1": 1, "h2": 12}
 
 def select_period_peaks(e_full: np.ndarray, a_origins: np.ndarray, cfg: HeadroomConfig) -> list[int]
-    # 只用 A 段（a_origins 为 A 段起点下标，连续）：平均各通道周期图，取 (band_period_range) 内
-    # 按高度排序的前 max_period_peaks 个峰，峰间至少隔 2 个频率点；返回周期（整数步）
+    # 只用 A 段（a_origins 为 A 段起点下标，连续）：平均各通道周期图，取 band_period_range
+    # 内按高度排序的局部极大峰；接受一个新峰要求它与已接受峰的**周期相对间隔 >= 15%**
+    # （同一谱瓣只报一次，长周期与短周期一视同仁）；相邻 bin 舍入到同一整数周期的重复
+    # 剔除；返回至多 max_period_peaks 个周期（整数步）
 
 def enumerate_coordinates(cfg, period_peaks: list[int], n_channels: int,
                           horizon: int) -> list[Coordinate]
     # = lag 段坐标 + band(P) 坐标 + beyond_l + 每个通道一个 channel(->i) + horizon
-    # （hgroup 由 certify 单独处理，不在本表）
+    # n_channels < 2 时不生成 channel 坐标（没有其他通道可喂，会退化为纯截距拟合）
+    # （total/hgroup 由认证族与 corrector_gain 单独处理，不在本表）
 
 def build_features(seg: SegmentData, coord: Coordinate, cfg: HeadroomConfig)
     -> tuple[np.ndarray, np.ndarray]
     # (X[B,F], Y[B,H,C])，特征只来自该坐标：
     # lag[k1,k2]   : e_full[o-k]（k 取 [k1,k2] 内，第 3 段步长为 2），目标全 (h,c)
     # band(P)      : e_full 经因果 FIR 带通（firwin，numtaps=min(fir_len_cap,4P) 取奇数，
-    #                通带 [1.2P, 0.8P] 对应的角频率），取滞后 0 与 P//4 两个相位
+    #                通带为角频率 [2π/(1.2P), 2π/(0.8P)]；firwin 的 cutoff 以 Nyquist 为单位
+    #                （1.0 = π rad/样本），故实际传 [2/(1.2P), 2/(0.8P)]），
+    #                取滞后 0 与 P//4 两个相位
     # beyond_l     : values[o-k] - values[o]，k = L + 16*j（j=0..beyond_l_lags-1）
     # channel->i   : 其他通道的 e_full[o-k]（k=0..23）与 values[o-k]-values[o]（k=0..23），
-    #                目标仅通道 i
+    #                目标仅通道 i（其余通道的目标列置零：零目标列对任意 alpha 得零 ridge
+    #                列，不影响 alpha 选择，也不影响通道 i 的拟合）
     # horizon      : 对每个 h，特征 r_full[o-h-k, h]（k=0..horizon_realized_lags-1）；
     #                实现为逐 h 的独立 ridge（见下）
-    # total        : 上述全部特征的并集（channel 坐标也并入）
+    # kind 为 total/hgroup 时抛 ValueError：聚合统计量走 fit_greedy/corrector_gain
 
 @dataclass(frozen=True)
 class GainReport:
     coordinate: Coordinate
     delta: float            # eval 段实现增益（正=改进）
-    lcb: float              # HAC+t 解析置信下界（Bonferroni 由调用方调整或在此处见参数）
+    lcb: float              # HAC+t 解析置信下界（在下方 level 处计算）
     ucb: float
+    level: float            # lcb/ucb 的置信水平；certify 逐项校验它等于 certify_level
     by_horizon: np.ndarray  # [H] 逐 h 的增益
     mu2: float               # eval 段 (mean r)²
     n_eval: int
 
 def coordinate_gain(coord: Coordinate, seg_a: SegmentData, seg_b: SegmentData,
                     cfg: HeadroomConfig, level: float = 0.95) -> GainReport
-    # A 段：特征内部再按时间 8:2 切分（间隔 H）选 ridge alpha，然后全 A 重拟合；
+    # 单坐标增益。A 段：特征内部再按时间 8:2 切分（间隔 H）选 ridge alpha，然后全 A 重拟合；
     # B 段：评估逐起点损失差 d_o = mean_{h,c}(r² - (r-ĝ)²)，delta=mean(d)，
     # lcb/ucb = inference.mean_ci(d, bandwidth, level)。
-    # horizon 坐标：逐 h 拟合/评估，delta = mean over h。
-    # hgroup[h1,h2]：用 total 的特征拟合，d 只对 h∈[h1,h2] 求平均。
+    # horizon 坐标：逐 h 拟合/评估，delta = mean over h。channel 坐标：d 只对通道 i 求平均。
+    # total/hgroup 不是单坐标，不走本函数（build_features 已拒绝）。
 
-def all_gains(seg_a, seg_b, cfg, period_peaks) -> list[GainReport]
-    # total + 全部坐标 + hgroup[1, H//2] + hgroup[H//2+1, H]
+def _fit_ridge(x: np.ndarray, y: np.ndarray, alphas: tuple[float, ...],
+               embargo: int) -> tuple[np.ndarray, np.ndarray]
+    # 带截距 ridge（私有；coordinate_gain 与 fit_greedy 的最终重拟合共用）：
+    # 列按拟合部分均值中心化；alpha 在时间序 80/20 切分（fit 与 eval 行间隔 embargo，
+    # 调用方传 H）上按验证 MSE 选，胜出 alpha 用全部行重拟合。
+    # 均值/标准差标准化不在本函数——fit_greedy 的贪心块已提前做好。
+
+@dataclass(frozen=True)
+class FittedCorrector:
+    coordinates: tuple[Coordinate, ...]  # 贪心选中的坐标（按选择顺序）
+    means: np.ndarray     # [F] A 内拟合行的特征均值（标准化参数）
+    stds: np.ndarray      # [F] A 内拟合行的特征标准差（0 记 1）
+    coef: np.ndarray      # [F, H*C] 标准化空间中的 ridge 系数
+    intercept: np.ndarray # [H*C]
+    label: str = "total"
+
+def fit_greedy(seg_a: SegmentData, cfg: HeadroomConfig, period_peaks: list[int],
+               *, max_steps: int = 4) -> FittedCorrector
+    # total = 坐标的**贪心前向选择**，不再是全部特征的并集（并集 ridge 在低信号任务上
+    # 过参数化、样本外负迁移，已废弃）。候选池 = enumerate_coordinates 去掉 horizon；
+    # 每个坐标的特征块按 A 内拟合行（前 80%）的均值/标准差标准化，只预计算一次；
+    # 在 A 内 80/20 时间切分（间隔 H embargo）上以验证 MSE 逐个加入最能改进的坐标
+    # （alpha 在 cfg.ridge_alphas 中取最优），至多 max_steps 步、无改进即停
+    # （空选择 = 仅截距基线）；选中的坐标集最后用 _fit_ridge 在全部 A 行上重拟合，
+    # 标准化参数存入 FittedCorrector。选择只看 A，eval 段（B/cert/test）全程干净。
+
+def corrector_gain(fitted: FittedCorrector, seg_b: SegmentData, cfg: HeadroomConfig,
+                   level: float = 0.95, *, h_scope: tuple[int, int] | None = None,
+                   label: str | None = None) -> GainReport
+    # 把拟合好的校正器应用到 eval 段（各坐标特征按 means/stds 标准化后过 coef+intercept），
+    # d_o 同上。h_scope=(h1,h2) 时 d 只对 h∈[h1,h2] 求平均，Coordinate 记 kind="hgroup"
+    # （hgroup 统计量 = 同一 greedy 校正器、限定步长区间的 scope）。
+
+def all_gains(seg_a, seg_b, cfg, period_peaks, level: float = 0.95) -> list[GainReport]
+    # greedy total + 全部坐标 + hgroup[1, H//2] + hgroup[H//2+1, H]；
+    # total 与两个 hgroup 共享同一个在 A 上拟合的 greedy 校正器，hgroup 只把评估
+    # 限制到各自步长区间（与认证语义一致）
+
+def certification_family(cfg, period_peaks: list[int], n_channels: int) -> list[Coordinate]
+    # 认证统计量族 K：total + enumerate_coordinates 的全部坐标 + 两个 hgroup；
+    # total/hgroup 的 spec["periods"] 携带 A 上选出的周期峰
+
+def certify_level(cfg, j_max: int, period_peaks: list[int], n_channels: int) -> float
+    # 认证增益的逐统计量 Bonferroni 水平 1 - (certify_alpha / j_max) / |K|（见 §7）
+
+def card_level(cfg, period_peaks: list[int], n_channels: int) -> float
+    # 卡片坐标增益的 Bonferroni 水平 1 - acceptance_alpha / |坐标数|（见 §9）
 ```
 
 ## 6. `headroom/inference.py`
@@ -171,14 +229,11 @@ def auto_bandwidth(d: np.ndarray, min_bw: int) -> int
 
 def mean_ci(d: np.ndarray, bandwidth: int, level: float) -> tuple[float, float, float]
     # (mean, lcb, ucb)：HAC 标准误 + t(n-1) 临界值，带 HLN 小样本因子
-    # sqrt((n+1-2K+K(K-1)/n))，K=bandwidth
+    # sqrt((n + 1 - 2K + K(K-1)/n) / n)，K=bandwidth（注意外层的 /n；
+    # n >> K 时略小于 1，使区间略变宽、检验保守）
 
 def dm_one_sided_p(d: np.ndarray, bandwidth: int) -> float
     # H0: mean(d) <= 0（无改进）；HLN 修正后的单侧 p 值
-
-def block_bootstrap_ci(d: np.ndarray, block: int, runs: int, level: float,
-                       rng: np.random.Generator) -> tuple[float, float]
-    # moving-block bootstrap 的均值置信区间（仅展示用）
 ```
 
 ## 7. `headroom/certify.py`
@@ -194,8 +249,16 @@ class CertReport:
 def certify(gains: list[GainReport], mse_by_group: dict[str, float],
             cfg: HeadroomConfig, j: int, j_max: int) -> CertReport
     # K = gains 列表；alpha_j = certify_alpha / j_max（均匀，只在 incumbent 改变时消耗，
-    # 由调用方保证 j 的计数）；判停条件：所有项 ucb < certify_epsilon * mse_by_group[label]
-    # mse_by_group：cert 段上按项（total 或 hgroup）的平均残差 MSE
+    # 由调用方保证 j 的计数）。
+    # gains 必须已按 correctors.certify_level(cfg, j_max, period_peaks, n_channels) 的
+    # Bonferroni 水平预先计算；certify 逐项校验 gain.level 与该水平一致，
+    # 不一致抛 RuntimeError（水平不对，Bonferroni 族界就不成立）。
+    # mean_ci 是双侧区间，因此每个 UCB 实际是单侧 1 - alpha_j/(2K) 置信界：
+    # 族误停概率 <= alpha/2，比命题 2 的 alpha 界更保守。
+    # 判停条件：所有项 ucb < certify_epsilon * mse_by_group[label]。
+    # mse_by_group：cert 段上按每项 scope 的平均残差 MSE——total→全部 (o,h,c) cell，
+    # hgroup[h1,h2]→其步长区间，channel->i→通道 i，其余坐标→全部 cell
+    # （experiments/evaluate.py::mse_by_group 实现该 scope）
 ```
 
 ## 8. `headroom/synthetic.py`
@@ -248,9 +311,13 @@ def render_feedback(arm: str, incumbent: dict, gains: list[GainReport],
     # 返回 markdown。外框四臂一致：标题、incumbent diag MSE、按 hgroup 的 MSE、
     # 历史候选表（round, id, accepted, diagMse）。
     # scalar：无附加内容。
-    # bj：1 步残差 ACF 前 48 阶（按 lag 顺序）、Ljung–Box (Q,p)、周期图前 5 峰；不含任何增益/排序。
-    # card：按 Bonferroni 调整后 LCB 降序的坐标增益（点估计 + block bootstrap 展示区间）、
-    #        total 的 delta 与 LCB、μ²、各坐标 by_horizon 的峰值区间；使用 Coordinate.aspect 措辞。
+    # bj：1 步残差 ACF 前 48 阶（按 lag 顺序）、逐通道 Ljung–Box（按 lag 渲染 Q 与跨通道
+    #     最小 p）、周期图前 5 峰；不含任何增益/排序。
+    # card：坐标增益行 = 点估计 + 解析置信下界，按调用方传入的 LCB 降序排列——调用方在
+    #        correctors.card_level(cfg, period_peaks, n_channels) 的 Bonferroni 水平上计算
+    #        卡片增益，本函数只排序、不重算区间；另附 total 的 delta 与 LCB、μ²、
+    #        各坐标 by_horizon 的峰值区间；使用 Coordinate.aspect 措辞。
+    #        hgroup 增益不进卡片（保留给认证）。
     # placebo：与 card 完全同构，但用 placebo_perm 固定置换坐标行（内容取自同一张卡片）。
     # incumbent dict：{"diagMse": float, "mseByHGroup": {...}, "round": int, "budgetLeft": int,
     #                 "eFull": np.ndarray}（eFull = diag 段 e_full，bj 臂据此自算 ACF/Ljung–Box/周期图）

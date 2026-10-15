@@ -279,8 +279,9 @@ def test_truncation_invariance_of_features() -> None:
         Coordinate("beyond_l", "beyond_l", "long-range-beyond-window", {}),
         Coordinate("channel", "channel->0", "cross-channel", {"target_channel": 0}),
         Coordinate("horizon", "horizon", "horizon-range", {}),
-        Coordinate("total", "total", "other", {"periods": (12, 24)}),
-        Coordinate("hgroup", "hgroup[1,4]", "other", {"h1": 1, "h2": 4, "periods": (12,)}),
+        # total/hgroup gains come from the greedy FittedCorrector, not
+        # build_features (which now rejects those kinds); every feature block
+        # the greedy corrector can use is covered by the kinds above.
     ]
     x_full = {c.label: build_features(seg, c, cfg)[0] for c in coords}
     rows = [0, len(seg.origins) // 3, len(seg.origins) - 1]
@@ -315,3 +316,82 @@ def test_build_features_rejects_unknown_kind() -> None:
     seg = zero_model_segment(np.zeros((T_LEN, N_CHANNELS)), cfg)
     with pytest.raises(ValueError, match="unknown coordinate kind"):
         build_features(seg, Coordinate("nope", "nope", "other", {}), cfg)
+
+
+def test_band_filter_passes_target_period_at_production_scale() -> None:
+    """Regression for the missing firwin Nyquist factor: at the default
+    fir_len_cap the band(P=24) filter must actually pass period 24."""
+    from scipy.signal import firwin, freqz
+
+    period = 24
+    taps = min(256, 4 * period)
+    if taps % 2 == 0:
+        taps += 1
+    fir = firwin(
+        taps,
+        cutoff=(2.0 / (1.2 * period), 2.0 / (0.8 * period)),
+        window="hamming",
+        pass_zero=False,
+    )
+    freqs, response = freqz(fir, worN=8000)
+    target = 2.0 * np.pi / period
+    gain = np.interp(target, freqs, np.abs(response))
+    assert gain >= 0.9, f"band filter gain at period {period} is only {gain:.3f}"
+
+
+def test_greedy_total_recovers_planted_ar1_and_not_noise() -> None:
+    """The greedy aggregate (replacing the union ridge) must capture a planted
+    AR(1) defect and stay near zero on white noise."""
+    from harnessing_ts.headroom.correctors import card_level, certify_level, corrector_gain, fit_greedy
+
+    cfg = wide_cfg()
+    # Planted AR(1) on the values themselves (m == 0, so the residuals are
+    # the future values).  The chain must be generated recursively — the
+    # vectorized one-liner would mix two independent white noises instead.
+    rng = np.random.default_rng(11)
+    phi = 0.6
+    values = np.empty((T_LEN, N_CHANNELS))
+    values[0] = rng.normal(size=N_CHANNELS)
+    for t in range(1, T_LEN):
+        values[t] = phi * values[t - 1] + rng.normal(size=N_CHANNELS)
+    seg = zero_model_segment(values, cfg)
+    seg_a, seg_b = split_ab(seg, cfg)
+    peaks = select_period_peaks(seg.e_full, seg_a.origins, cfg)
+    fitted = fit_greedy(seg_a, cfg, peaks)
+    total = corrector_gain(fitted, seg_b, cfg)
+    var_x = 1.0 / (1.0 - phi**2)
+    # delta averages over H horizons with decaying phi^(2h) gains; the ideal
+    # is ~0.11 and ridge shrinkage on 24 collinear lags keeps about half.
+    # A broken greedy (empty selection or sign flip) lands near zero.
+    assert total.delta > 0.3 * phi**2 * var_x / cfg.horizon, (total.delta, phi**2 * var_x)
+    assert total.level == 0.95
+    # The greedy corrector selected something (not the empty intercept fit).
+    assert len(fitted.coordinates) >= 1
+
+    # White noise: nothing to select, total must stay near zero.
+    values_w = rng.normal(0.0, 2.0, size=(T_LEN, N_CHANNELS))
+    seg_w = zero_model_segment(values_w, cfg)
+    seg_wa, seg_wb = split_ab(seg_w, cfg)
+    peaks_w = select_period_peaks(seg_w.e_full, seg_wa.origins, cfg)
+    total_w = corrector_gain(fit_greedy(seg_wa, cfg, peaks_w), seg_wb, cfg)
+    assert abs(total_w.delta) < 0.08 * 4.0, total_w.delta
+
+
+def test_channel_coordinate_excluded_for_univariate_series() -> None:
+    cfg = wide_cfg()
+    coords = enumerate_coordinates(cfg, [12], 1, cfg.horizon)
+    assert all(c.kind != "channel" for c in coords)
+    assert all(c.kind != "channel" for c in enumerate_coordinates(cfg, [], 1, cfg.horizon))
+
+
+def test_level_helpers_are_stricter_than_95pct() -> None:
+    from harnessing_ts.headroom.correctors import card_level, certify_level
+
+    cfg = wide_cfg()
+    peaks = [24, 168]
+    j_max = 26
+    cert = certify_level(cfg, j_max, peaks, N_CHANNELS)
+    card = card_level(cfg, peaks, N_CHANNELS)
+    assert 0.95 < card < cert < 1.0
+    # Uniform spending: doubling the certification budget lowers the level.
+    assert certify_level(cfg, j_max * 2, peaks, N_CHANNELS) > cert

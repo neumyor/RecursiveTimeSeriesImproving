@@ -7,6 +7,7 @@ at target-realized origins, paired oracle gaps, and segment assembly.
 """
 
 from dataclasses import replace
+import importlib.util
 from pathlib import Path
 import sys
 from typing import Any, Protocol
@@ -21,7 +22,7 @@ if _BACKEND not in sys.path:
 from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.correctors import GainReport
 from harnessing_ts.headroom.residuals import SegmentData, segment_data
-from harnessing_ts.headroom.timeidx import segment_origins, windows
+from harnessing_ts.headroom.timeidx import ab_split, segment_origins, windows
 
 
 class Adapter(Protocol):
@@ -89,16 +90,8 @@ def restrict(seg: SegmentData, origins_subset: np.ndarray) -> SegmentData:
 
 def split_ab(seg: SegmentData, cfg: HeadroomConfig) -> tuple[SegmentData, SegmentData]:
     """diag-A (fit) / diag-B (evaluate) halves with an H-step gap."""
-    from harnessing_ts.headroom.timeidx import ab_split
-
     a_origins, b_origins = ab_split(seg.origins, cfg.diag_a_ratio, cfg.horizon)
     return restrict(seg, a_origins), restrict(seg, b_origins)
-
-
-def mean_se(values: np.ndarray, origins: np.ndarray, pred: np.ndarray, cfg: HeadroomConfig) -> float:
-    """Mean squared error over all (origin, h, channel) cells."""
-    _, y = windows(values, origins, cfg)
-    return float(np.mean(np.square(y - pred)))
 
 
 def paired_gap(

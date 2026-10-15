@@ -5,7 +5,6 @@ from scipy import stats
 
 from harnessing_ts.headroom.inference import (
     auto_bandwidth,
-    block_bootstrap_ci,
     dm_one_sided_p,
     hac_variance,
     mean_ci,
@@ -57,18 +56,6 @@ def test_dm_pvalue_detects_real_improvement() -> None:
     rng = np.random.default_rng(4)
     d = rng.normal(0.5, 1.0, size=300)
     assert dm_one_sided_p(d, bandwidth=4) < 1e-6
-
-
-def test_block_bootstrap_ci_covers_true_mean() -> None:
-    rng = np.random.default_rng(5)
-    covered = 0
-    reps = 300
-    for _ in range(reps):
-        eps = rng.normal(0.0, 1.0, size=260)
-        d = eps[1:] + 0.5 * eps[:-1] + 1.0
-        lo, hi = block_bootstrap_ci(d, block=8, runs=200, level=0.95, rng=rng)
-        covered += lo <= 1.0 <= hi
-    assert 0.90 <= covered / reps <= 0.99
 
 
 def test_auto_bandwidth_respects_minimum() -> None:

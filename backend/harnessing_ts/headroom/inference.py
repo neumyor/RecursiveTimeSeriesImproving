@@ -70,33 +70,10 @@ def dm_one_sided_p(d: np.ndarray, bandwidth: int) -> float:
     if n < 3:
         raise ValueError(f"need at least 3 observations for a DM test, got {n}")
     mean = float(d.mean())
-    se = float(np.sqrt(max(hac_variance(d, bandwidth), np.finfo(float).tiny)))
-    if se == np.finfo(float).tiny:
+    variance = hac_variance(d, bandwidth)
+    if variance <= 0.0:
+        # Degenerate constant series: an improvement is certain (or absent).
         return 0.0 if mean > 0 else 1.0
+    se = float(np.sqrt(variance))
     t_stat = mean / se * _hln_factor(n, bandwidth)
     return float(stats.t.sf(t_stat, df=n - 1))
-
-
-def block_bootstrap_ci(
-    d: np.ndarray,
-    block: int,
-    runs: int,
-    level: float,
-    rng: np.random.Generator,
-) -> tuple[float, float]:
-    """Moving-block bootstrap CI for the mean; used for display intervals only."""
-    d = np.asarray(d, dtype=np.float64)
-    n = d.size
-    if not 1 <= block <= n:
-        raise ValueError(f"block must be in [1, {n}], got {block}")
-    if runs <= 0:
-        raise ValueError(f"runs must be positive, got {runs}")
-    if not 0.0 < level < 1.0:
-        raise ValueError(f"level must be in (0, 1), got {level}")
-    n_blocks = int(np.ceil(n / block))
-    starts = rng.integers(0, n - block + 1, size=(runs, n_blocks))
-    offsets = np.arange(block, dtype=np.int64)
-    samples = d[starts[:, :, None] + offsets[None, None, :]].reshape(runs, -1)[:, :n]
-    means = samples.mean(axis=1)
-    tail = (1.0 - level) / 2.0
-    return float(np.quantile(means, tail)), float(np.quantile(means, 1.0 - tail))
