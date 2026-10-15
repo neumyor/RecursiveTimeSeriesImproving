@@ -458,18 +458,21 @@ class LastValueOracle:
 
 
 def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
-    """C=4 LGSSM: a slow level, exact 24- and 168-period oscillators, colored noise.
+    """C=4 LGSSM: a slow level, damped 24- and 168-period oscillators, colored noise.
 
-    Latent state (5): an AR(1) level with phi = 0.995, plus a sin/cos rotation pair
-    for each period.  The oscillators carry no process noise, so the periods stay
-    exactly 24 and 168 forever (a rotation of a random initial draw — stationary
-    because the isotropic prior is rotation-invariant).  Each channel observes a
-    different linear mix of the latents plus its own AR(1) channel noise and white
-    observation noise; channel 3 sees no level (partial observation).  All
-    parameters are known, so a Kalman filter run from segment index 0 with the
-    exact stationary prior followed by h-step mean propagation is the exact
-    conditional mean.  Channels are scaled to unit variance through the known
-    theoretical per-channel variance.
+    Latent state (5): an AR(1) level with phi = 0.995, plus a lightly damped
+    sin/cos rotation pair for each period (rho = 0.999, re-excited by small
+    isotropic process noise).  With rho = 1 and no noise the oscillator
+    amplitude is fixed per realization, which makes Delta(g_hat) realization-
+    dependent and uncertifiable across segments; the damping keeps the
+    seasonal peaks sharp while making the process ergodic, so the same
+    corrector gain is a stable population quantity across realizations.
+    Each channel observes a different linear mix of the latents plus its own
+    AR(1) channel noise and white observation noise; channel 3 sees no level
+    (partial observation).  All parameters are known, so a Kalman filter run
+    from segment index 0 with the exact stationary prior followed by h-step
+    mean propagation is the exact conditional mean.  Channels are scaled to
+    unit variance through the known theoretical per-channel variance.
     """
     sizes = _merge_sizes(sizes)
     rng_main, rng_cert, rng_test = _spawn(seed)
@@ -477,7 +480,9 @@ def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> Synthet
     phi_level = 0.995
     sigma_level = 0.03
     periods = (24, 168)
-    oscillator_var = 0.25  # prior variance of each sin/cos component
+    oscillator_var = 0.25  # stationary variance of each sin/cos component
+    rho_osc = 0.999  # amplitude half-life ~ 700 steps: sharp but ergodic peaks
+    sigma_osc = math.sqrt(oscillator_var * (1.0 - rho_osc**2))
     psi_noise = np.array([0.6, 0.8, 0.75, 0.5])
     sigma_noise = np.array([0.3, 0.25, 0.35, 0.4])
     sigma_obs = np.full(4, 0.1)
@@ -494,10 +499,10 @@ def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> Synthet
     for slot, period in enumerate(periods):
         angle = 2.0 * np.pi / period
         r, c = 1 + 2 * slot, 2 + 2 * slot
-        a_latent[r, r] = math.cos(angle)
-        a_latent[r, c] = math.sin(angle)
-        a_latent[c, r] = -math.sin(angle)
-        a_latent[c, c] = math.cos(angle)
+        a_latent[r, r] = rho_osc * math.cos(angle)
+        a_latent[r, c] = rho_osc * math.sin(angle)
+        a_latent[c, r] = -rho_osc * math.sin(angle)
+        a_latent[c, c] = rho_osc * math.cos(angle)
     latent_var = np.array([
         sigma_level**2 / (1.0 - phi_level**2), oscillator_var, oscillator_var,
         oscillator_var, oscillator_var,
@@ -514,6 +519,7 @@ def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> Synthet
     A[5:, 5:] = np.diag(psi_noise)
     Q = np.zeros((n, n))
     Q[0, 0] = sigma_level**2
+    Q[1:5, 1:5] = np.eye(4) * sigma_osc**2
     Q[5:, 5:] = np.diag(sigma_noise**2)
     H = np.zeros((4, n))
     H[:, :5] = scale[:, None] * h_latent
