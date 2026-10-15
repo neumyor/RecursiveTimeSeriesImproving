@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -11,6 +12,9 @@ def _load_stage0():
     spec = importlib.util.spec_from_file_location("stage0_experiment", source)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves string annotations through sys.modules[cls.__module__],
+    # so the module must be registered before execution.
+    sys.modules["stage0_experiment"] = module
     spec.loader.exec_module(module)
     return module
 
