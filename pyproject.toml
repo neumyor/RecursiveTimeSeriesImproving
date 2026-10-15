@@ -20,6 +20,13 @@ training = [
   "agentlightning>=0.1.0",
   "openai>=1.100.0",
 ]
+research = [
+  "numpy>=2.0",
+  "scipy>=1.14",
+  "zstandard>=0.22",
+  "torch>=2.5,<3",
+  "statsforecast>=1.7",
+]
 
 [dependency-groups]
 dev = [
