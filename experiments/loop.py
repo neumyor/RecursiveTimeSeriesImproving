@@ -718,7 +718,18 @@ class _SdkRoundRunner:
         self._runner = runner
 
     async def send(self, prompt: str) -> list[Any]:
-        return await self._runner.send(prompt)
+        parts = await self._runner.send(prompt)
+        if not parts:
+            # A turn that produced nothing is a billing/auth failure (the
+            # observed failure mode: the endpoint rejects every request and
+            # the runtime ends the turn as an empty error turn).  Burning
+            # the whole budget as silent no-op rounds is the exact bug that
+            # voided the first P2 attempt — classify and raise instead.
+            raise RuntimeError(
+                "DSH turn returned no parts: the LLM endpoint rejected the request "
+                "(check the API account balance and credentials)"
+            )
+        return parts
 
     async def close(self) -> None:
         await self._runner.close()

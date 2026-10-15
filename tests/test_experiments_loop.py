@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 import numpy as np
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -239,3 +240,37 @@ def test_loop_heldout_records_and_isolation(tmp_path: Path) -> None:
     # The heldout directory lives outside the agent-visible workspace.
     assert heldout.resolve().is_relative_to(Path.home())
     assert not heldout.resolve().is_relative_to(run_dir.resolve())
+
+
+def test_empty_dsh_turn_is_fatal_not_silent(tmp_path: Path) -> None:
+    """A turn that produces no parts (billing/auth rejection) must raise
+    after the retries, not burn the budget as silent no-op rounds."""
+    loop_module = _load_loop()
+
+    class _EmptySdkRunner:
+        """A duck-typed SdkRunner whose turns produce nothing (the observed
+        billing-death signature: the endpoint rejects every request)."""
+
+        async def send(self, prompt: str) -> list[Any]:
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
+        # Route through the real DSH wrapper: the emptiness check lives there.
+        return loop_module._SdkRoundRunner(_EmptySdkRunner())
+
+    loop = loop_module.HeadroomLoop(
+        run_dir=tmp_path / "run5",
+        task_name="lgssm_xchannel",
+        arm="card",
+        seed=0,
+        cfg=_small_cfg(loop_module),
+        sizes=SMALL_SIZES,
+        runner_factory=factory,
+    )
+    with pytest.raises(RuntimeError, match="DSH runtime failed") as excinfo:
+        asyncio.run(loop.run())
+    # The root cause must name the empty-turn billing signature.
+    assert "no parts" in str(excinfo.value.__cause__)

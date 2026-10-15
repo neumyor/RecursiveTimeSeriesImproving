@@ -347,6 +347,11 @@ def spawn_cell(cmd: list[str], run_dir: Path, log_path: Path, attempt: int) -> t
 
 
 @dataclass
+class SystemicFailure(RuntimeError):
+    """Consecutive cell failures that indicate a batch-wide fault."""
+
+
+@dataclass(frozen=True)
 class CellOutcome:
     cell: Cell
     attempt: int
@@ -405,10 +410,20 @@ class BatchDriver:
         pool = ThreadPoolExecutor(max_workers=self.workers)
         try:
             futures = [pool.submit(self._attempt, cell, attempt) for cell in cells]
+            consecutive_failures = 0
             for future in as_completed(futures):
                 outcome = future.result()
                 outcomes.append(outcome)
                 self._report(outcome, done=len(outcomes), total=len(cells))
+                consecutive_failures = 0 if outcome.ok else consecutive_failures + 1
+                if consecutive_failures >= max(6, self.workers):
+                    # A billing/auth failure kills every cell identically;
+                    # running the rest of the matrix would only burn time.
+                    kill_live_cells()
+                    raise SystemicFailure(
+                        f"{consecutive_failures} consecutive cell failures "
+                        "(suspect billing/auth); aborting the pass"
+                    )
         except KeyboardInterrupt:
             kill_live_cells()
             pool.shutdown(wait=True, cancel_futures=True)
@@ -480,6 +495,9 @@ def main(argv: list[str] | None = None) -> int:
     except BatchError as exc:
         print(f"[batch] fatal: {exc}", file=sys.stderr, flush=True)
         return 2
+    except SystemicFailure as exc:
+        print(f"[batch] aborted: {exc}", file=sys.stderr, flush=True)
+        return 3
     except KeyboardInterrupt:
         print(
             "[batch] interrupted; unfinished cells resume on the next start "
