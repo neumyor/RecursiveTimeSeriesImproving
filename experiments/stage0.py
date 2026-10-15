@@ -72,7 +72,9 @@ REPORT_DIR = _REPO_ROOT / "experiments" / "runs" / "stage0"
 EXPECTED_ASPECTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("lgssm_multiperiod", "m0-linear"): ("periodicity", "long-range-beyond-window"),
     ("lgssm_multiperiod", "m0-short-lookback"): ("periodicity", "long-range-beyond-window"),
-    ("lgssm_xchannel", "m0-linear"): ("cross-channel",),
+    # xchannel coupling lives at lags 3-7: it reaches every channel's own
+    # history, so the lag coordinate legitimately sees it first (review C).
+    ("lgssm_xchannel", "m0-linear"): ("cross-channel", "lag-structure"),
     ("lgssm_xchannel", "m0-short-lookback"): ("cross-channel", "lag-structure", "long-range-beyond-window"),
     ("arfima", "m0-linear"): ("lag-structure",),
     ("hmm_ar_switch", "m0-linear"): ("lag-structure", "periodicity"),

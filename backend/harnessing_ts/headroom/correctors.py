@@ -354,7 +354,7 @@ def coordinate_gain(
         else slice(None)
     )
     d = gains[:, steps, channels].mean(axis=(1, 2))
-    mean, lcb, ucb = mean_ci(d, bandwidth=auto_bandwidth(d, cfg.horizon), level=level)
+    mean, lcb, ucb = mean_ci(d, bandwidth=auto_bandwidth(d, _min_bandwidth(cfg)), level=level)
     return GainReport(
         coordinate=coord,
         delta=mean,
@@ -398,6 +398,16 @@ def _pool_coordinates(
         c for c in enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon)
         if c.kind != "horizon"
     ]
+
+
+def _min_bandwidth(cfg: HeadroomConfig) -> int:
+    """HAC bandwidth floor: the gain series inherits the residual memory.
+
+    The corrector reads lags up to max_lag and targets overlap over H steps,
+    so d_o can be autocorrelated out to max_lag + H (a seasonal task with
+    period 168 otherwise gets a bandwidth-24 CI that is far too narrow).
+    """
+    return cfg.max_lag + cfg.horizon
 
 
 def _internal_split(n: int, embargo: int) -> tuple[int, int]:
@@ -515,7 +525,7 @@ def corrector_gain(
     gains = r * r - (r - y_hat) ** 2
     steps = slice(h_scope[0] - 1, h_scope[1]) if h_scope else slice(None)
     d = gains[:, steps, :].mean(axis=(1, 2))
-    mean, lcb, ucb = mean_ci(d, bandwidth=auto_bandwidth(d, cfg.horizon), level=level)
+    mean, lcb, ucb = mean_ci(d, bandwidth=auto_bandwidth(d, _min_bandwidth(cfg)), level=level)
     return GainReport(
         coordinate=Coordinate(
             "hgroup" if h_scope else "total",

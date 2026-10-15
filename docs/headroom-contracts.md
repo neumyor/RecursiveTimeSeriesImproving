@@ -165,7 +165,8 @@ def coordinate_gain(coord: Coordinate, seg_a: SegmentData, seg_b: SegmentData,
                     cfg: HeadroomConfig, level: float = 0.95) -> GainReport
     # 单坐标增益。A 段：特征内部再按时间 8:2 切分（间隔 H）选 ridge alpha，然后全 A 重拟合；
     # B 段：评估逐起点损失差 d_o = mean_{h,c}(r² - (r-ĝ)²)，delta=mean(d)，
-    # lcb/ucb = inference.mean_ci(d, bandwidth, level)。
+    # lcb/ucb = inference.mean_ci(d, bandwidth, level)，带宽下限 = max_lag + H
+    # （增益序列继承残差过程的记忆：季节任务的 d_o 自相关可延伸到周期长度）。
     # horizon 坐标：逐 h 拟合/评估，delta = mean over h。channel 坐标：d 只对通道 i 求平均。
     # total/hgroup 不是单坐标，不走本函数（build_features 已拒绝）。
 
