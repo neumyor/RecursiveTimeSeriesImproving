@@ -22,6 +22,7 @@ from harnessing_ts.headroom.candidate import (
     check_source,
     evaluate_candidate,
     load_adapter,
+    smoke_candidate,
     smoke_test,
 )
 from harnessing_ts.headroom.config import HeadroomConfig
@@ -266,7 +267,8 @@ def test_candidate_id_pattern() -> None:
 
 
 # ---------------------------------------------------------------------------
-# load_adapter and smoke_test (trusted in-process path)
+# load_adapter (trusted in-process path, tests only) and smoke_test
+# (isolated worker subprocess)
 # ---------------------------------------------------------------------------
 
 
@@ -319,6 +321,32 @@ def test_smoke_test_reports_shape_and_no_metrics(tmp_path: Path) -> None:
     assert bad["ok"] is False
     assert bad["predict_shape"] is None
     assert "model_id" in str(bad["error"])
+
+
+def test_smoke_hang_is_bounded_by_the_subprocess(tmp_path: Path) -> None:
+    """A candidate that hangs in fit must never hang the parent: the smoke
+    runs under the worker's killpg timeout, so `while True: pass` costs the
+    smoke budget, not the whole unattended run."""
+    source = tmp_path / "model.py"
+    source.write_text(SLOW_SOURCE, encoding="utf-8")
+    train = ar_series(400)
+    hung_cfg = HeadroomConfig(input_length=L, horizon=H, candidate_timeout_seconds=5.0)
+
+    start = time.perf_counter()
+    with pytest.raises(CandidateTimeout, match="5s"):
+        smoke_candidate(source, "slow-timeout", train, make_meta(), hung_cfg)
+    elapsed = time.perf_counter() - start
+    # If killpg failed, communicate() would block on the busy-waiting child
+    # forever; finishing near the 5s smoke budget is the proof the whole
+    # process group died and no leftover process is still spinning.
+    assert elapsed < 8.0
+
+    # The public wrapper records the hang as repair text, distinctly from a
+    # crash, so the loop's smoke path can never raise into the run.
+    result = smoke_test(source, "slow-timeout", train, make_meta(), hung_cfg)
+    assert result["ok"] is False
+    assert result["predict_shape"] is None
+    assert "hung" in str(result["error"])
 
 
 # ---------------------------------------------------------------------------

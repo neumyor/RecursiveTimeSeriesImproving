@@ -121,7 +121,7 @@ def _make_history(entries: int = 2) -> list[dict[str, Any]]:
 def _card_rows(text: str) -> list[str]:
     """Data rows of the defect-card table, in rendered order."""
     section = text.split("## Remaining improvement by coordinate", 1)[1]
-    section = section.split("## Candidate history", 1)[0]
+    section = section  # the shared scaffold no longer renders history (round.md owns it)
     return [
         line
         for line in section.splitlines()
@@ -138,8 +138,6 @@ def test_scalar_is_exactly_the_scaffold() -> None:
     assert "| group | mse |" in out
     assert "| hgroup[1,12] | 0.4012 |" in out
     assert "| hgroup[13,24] | 0.4234 |" in out
-    assert "| round | candidate | accepted | diagnostic mse |" in out
-    assert "| 1 | c01 | yes | 0.4300 |" in out
     # No middle block of any other arm leaks in.
     assert "autocorrelation" not in out
     assert "aspect" not in out
@@ -151,12 +149,11 @@ def test_all_arms_share_the_identical_scaffold() -> None:
     history = _make_history(3)
     gains = _make_gains()
     scalar = render_feedback("scalar", incumbent, gains, history, HeadroomConfig())
-    # The three contiguous scaffold pieces, extracted from the scalar render.
+    # The scaffold pieces, extracted from the scalar render: the header and
+    # the horizon-group table must appear verbatim in every arm.
     head, sep, rest = scalar.partition("## MSE by horizon group")
     assert sep
-    groups, sep, tail = ("## MSE by horizon group" + rest).partition("## Candidate history")
-    assert sep
-    chunks = (head, groups, sep + tail)
+    chunks = (head, "## MSE by horizon group" + rest)
     for arm in ARMS:
         out = render_feedback(arm, incumbent, gains, history, HeadroomConfig())
         for chunk in chunks:
@@ -295,14 +292,13 @@ def test_no_forbidden_words_in_any_arm() -> None:
             assert word not in lowered, (arm, word)
 
 
-def test_history_shows_only_the_last_ten_rows() -> None:
-    history = _make_history(15)
-    history[6]["diagMse"] = float("nan")  # round 7 falls inside the last ten
-    out = render_feedback("scalar", _make_incumbent(), [], history, HeadroomConfig())
-    assert "| 6 | c06 |" in out  # first row of the last ten (rounds 6..15)
-    assert "| 15 | c15 |" in out
-    assert "| 5 | c05 |" not in out  # older rounds are dropped
-    assert "| 7 | c07 | yes | n/a |" in out  # NaN renders as n/a
+def test_history_table_is_owned_by_round_md() -> None:
+    """round.md renders the candidate history; the feedback scaffold no longer
+    duplicates it (one table in the prompt, byte-identical across arms)."""
+    out = render_feedback("card", _make_incumbent(), _make_gains(), _make_history(15), HeadroomConfig())
+    assert "| 15 | c15 |" not in out
+    assert "## Candidate history" not in out
+
 
 
 def test_ljung_box_white_noise_keeps_p_above_threshold() -> None:

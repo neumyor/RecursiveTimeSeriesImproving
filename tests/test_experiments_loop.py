@@ -226,12 +226,14 @@ def test_loop_heldout_records_and_isolation(tmp_path: Path) -> None:
     n_accepted = sum(1 for row in rounds if row["accepted"])
     heldout = loop.heldout
     cert_path = heldout / "certification.jsonl"
-    if n_accepted:
-        assert cert_path.is_file()
-        cert_lines = [json.loads(line) for line in cert_path.read_text().splitlines()]
-        assert len(cert_lines) == n_accepted
-        for row in cert_lines:
-            assert "saturated" in row and "level" in row
+    # Round-0 certification of m0 must exist even when nothing is accepted —
+    # otherwise a zero-acceptance run would have no stop point at all.
+    assert cert_path.is_file()
+    cert_lines = [json.loads(line) for line in cert_path.read_text().splitlines()]
+    assert len(cert_lines) == n_accepted + 1
+    assert cert_lines[0]["incumbentId"] == "m0"
+    for row in cert_lines:
+        assert "saturated" in row and "level" in row
     posthoc_files = list((heldout / "posthoc").glob("*.json"))
     assert len(posthoc_files) >= sum(1 for row in rounds if row["status"] == "evaluated")
     # The heldout directory lives outside the agent-visible workspace.

@@ -1,16 +1,17 @@
-"""Subprocess worker spawned by ``candidate.evaluate_candidate``; never run by hand.
+"""Subprocess worker spawned by ``candidate.evaluate_candidate`` and
+``candidate.smoke_candidate``; never run by hand.
 
 Reads npz_in (train, meta, x_diag, x_cert, batch_ids_diag, single_check_idx,
-source_path — the binding key contract lives in candidate.py's docstring),
-fits the candidate, and writes pred_diag/pred_cert/batch_invariant/
-fit_seconds/predict_seconds to npz_out.  The result file is the only channel
-out: the parent merges the worker's stdout into stderr, so nothing a candidate
-prints can corrupt the channel.
+source_path, and the smoke-only candidate_id — the binding key contract lives
+in candidate.py's docstring), fits the candidate, and writes pred_diag/
+pred_cert/batch_invariant/fit_seconds/predict_seconds to npz_out.  The result
+file is the only channel out: the parent merges the worker's stdout into
+stderr, so nothing a candidate prints can corrupt the channel.
 
 The parent already AST-vetted the source, so this module does not re-check:
-the rejection message would only be duplicated, and the smoke phase
-(``candidate.load_adapter`` + ``smoke_test``) has already executed the module
-once in-process.
+the rejection message would only be duplicated.  The smoke phase runs through
+this same worker (a minimal npz_in), so importing the module here is the
+first and only place candidate code executes.
 
 The worker stays numpy-only on purpose.  torch, if the candidate uses it, is
 imported by the candidate itself, inside the pinned-thread environment the
@@ -83,7 +84,11 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
             f"{x_diag.shape[0]} rows"
         )
 
-    adapter = _load_adapter(source_path)
+    # candidate_id is written only by the smoke npz, so the worker can hold
+    # the adapter to the documented model_id contract there; the evaluation
+    # npz predates the key, so it stays optional and unchecked on that path.
+    expected_id = str(data["candidate_id"].item()) if "candidate_id" in data else None
+    adapter = _load_adapter(source_path, expected_id)
     start = time.perf_counter()
     adapter.fit(train, meta)
     fit_seconds = time.perf_counter() - start
@@ -124,7 +129,7 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
     )
 
 
-def _load_adapter(source_path: Path) -> Any:
+def _load_adapter(source_path: Path, expected_id: str | None = None) -> Any:
     """Import the vetted candidate module and instantiate its adapter."""
     spec = importlib.util.spec_from_file_location("_headroom_candidate_worker", source_path)
     if spec is None or spec.loader is None:
@@ -153,6 +158,13 @@ def _load_adapter(source_path: Path) -> Any:
             raise _ContractError(
                 f"adapter must expose a callable {method}(), found "
                 f"{type(adapter).__name__} without one"
+            )
+    if expected_id is not None:
+        model_id = getattr(adapter, "model_id", None)
+        if model_id != expected_id:
+            raise _ContractError(
+                f"adapter model_id must equal the candidate id, "
+                f"expected {expected_id!r}, got {model_id!r}"
             )
     return adapter
 

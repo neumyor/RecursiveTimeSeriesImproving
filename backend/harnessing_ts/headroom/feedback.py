@@ -24,7 +24,6 @@ _BJ_ACF_LAGS = 48
 _BJ_LB_LAGS = (12, 24, 48)
 _BJ_TOP_PEAKS = 5
 _BJ_PER_CHANNEL_MAX = 4  # above this channel count the ACF table shows the mean
-_HISTORY_ROWS = 10
 
 
 def _fmt(value: Any) -> str:
@@ -123,7 +122,7 @@ def render_feedback(
     arm: str,
     incumbent: dict[str, Any],
     gains: list[GainReport],
-    history: list[dict[str, Any]],
+    history: list[dict[str, Any]],  # unused: round.md owns the history table
     cfg: HeadroomConfig,
     placebo_perm: tuple[int, ...] | None = None,
 ) -> str:
@@ -168,7 +167,6 @@ def render_feedback(
         else:
             perm = None
         blocks.append(_card_table(ordered, total, perm))
-    blocks.append(_scaffold_history(history))
     return "\n\n".join(blocks) + "\n"
 
 
@@ -188,21 +186,6 @@ def _scaffold_groups(incumbent: dict[str, Any]) -> str:
         lines.append(f"| {group} | {_fmt(mse)} |")
     return "\n".join(lines)
 
-
-def _scaffold_history(history: list[dict[str, Any]]) -> str:
-    """Candidate history table, capped to the last 10 entries."""
-    lines = [
-        "## Candidate history",
-        "",
-        "| round | candidate | accepted | diagnostic mse |",
-        "| --- | --- | --- | --- |",
-    ]
-    for row in history[-_HISTORY_ROWS:]:
-        accepted = "yes" if row["accepted"] else "no"
-        lines.append(
-            f"| {int(row['round'])} | {row['candidateId']} | {accepted} | {_fmt(row['diagMse'])} |"
-        )
-    return "\n".join(lines)
 
 
 def _bj_block(incumbent: dict[str, Any]) -> str:
