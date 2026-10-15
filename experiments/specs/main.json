@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "registeredAt": "2026-10-16",
+  "name": "p2-main",
+  "description": "Pre-registered main experiment: factorial feedback-arm comparison on forecasting architecture discovery. Frozen before any P2 run; changes after first run require a new spec version and disclosure in the paper.",
+
+  "tasks": [
+    {"name": "hmm_ar_switch", "kind": "synthetic", "rationale": "G0-6 qualified: nonlinear regime switching leaves 91% of the gap after one-shot m0+g"},
+    {"name": "nonlinear_xchannel", "kind": "synthetic", "rationale": "G0-6 qualified: tanh cross-channel coupling leaves 54%; linear realized-history correctors cannot cash it"},
+    {"name": "lgssm_xchannel", "kind": "synthetic", "rationale": "G0-6 qualified: cross-channel linear coupling at lags 3-7 leaves 46%"},
+    {"name": "real-ett", "kind": "real", "csv": "experiments/data/ETTh1.csv", "rationale": "de-identified real task; endpoint is relative MSE (no oracle)"}
+  ],
+  "arms": ["scalar", "bj", "card"],
+  "seeds": [0, 1, 2, 3, 4, 5, 6, 7],
+  "armSeedSharing": "the three arms share the same seed set within each task: (task, seed) is a natural block for the seed-blocked permutation test",
+
+  "budget": 25,
+  "jMax": 26,
+  "sizes": {"train": 20000, "diag": 10000, "cert": 30000, "test": 52000},
+  "config": {
+    "inputLength": 96,
+    "horizon": 24,
+    "acceptanceAlpha": 0.05,
+    "certifyAlpha": 0.05,
+    "certifyEpsilon": 0.02,
+    "candidateTimeoutSeconds": 600,
+    "maxRepairs": 2
+  },
+
+  "negativeControls": [
+    {"name": "lgssm_multiperiod", "role": "RQ1 certificate demonstration only (screened out of RQ2/RQ4: m0+g captures 80%)"},
+    {"name": "arfima", "role": "boundary task: certificate reports ~0 at the resolution floor (screened: remaining gap unreachable within L=96)"},
+    {"name": "exchange-rate", "role": "near-random-walk: round-0 certificate must saturate"}
+  ],
+
+  "primaryEndpoints": {
+    "E1": "normalized test optimality gap of the final incumbent after uniform m0+g postprocessing: ngap = gap(final)/gap(m0); real task: relative MSE ratio MSE(final)/MSE(m0) (both after postprocessing)",
+    "E2": "AUC of ngap over candidate index 1..budget (mean over the incumbent chain)",
+    "primaryContrast": "card vs scalar on E1",
+    "secondaryContrasts": ["bj vs scalar", "card vs bj"]
+  },
+
+  "statistics": {
+    "test": "seed-blocked sign-flip permutation within (task, seed) blocks across arms; two-sided, alpha=0.05; 10000 Monte Carlo permutations",
+    "center": "median over runs per (task, arm), IQR reported",
+    "preregistrationNote": "test re-fits each accepted incumbent on train offline and evaluates the test segment exactly once per incumbent; cert and oracle are never visible to the loop"
+  },
+
+  "diagnostics": {
+    "directedRate": "fraction of evaluated candidates whose proposal.targetAspect equals the parent incumbent's top posthoc card aspect",
+    "offTargetRate": "fraction of ACCEPTED candidates whose proposal.targetAspect differs from the parent's top card aspect",
+    "lcbGapCorrelation": "per run, correlation between accepted incumbents' cert-level total LCB and true test gap (null below 3 accepted)",
+    "stopPoint": "first saturated certification entry (round-0 included); post-stop gain reported as |ngap(stop)| - |ngap(final)|",
+    "audit": "out-of-workspace read paths in agent tool logs; diag-gain >> cert-gain candidates; per-arm token and wall-clock accounting"
+  },
+
+  "acceptanceGateFromG1": {
+    "g1Pass": "card arm unattended 10 candidates: failure rate < 30% (<=2/10); done.json within 24h",
+    "ifG1Fails": "prompt iteration is allowed until this spec's runs begin; after the first P2 run, prompts are frozen"
+  }
+}
