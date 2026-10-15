@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Synthetic tasks whose full-information optimal forecasters are exactly computable (contract §8)."""
 
+import collections
 import math
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
@@ -801,6 +802,413 @@ def random_walk(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask
     )
 
 
+# --- nonlinear cross-channel task -------------------------------------------------
+#
+# G0-6 screening showed lgssm_xchannel is linear-Gaussian: a linear corrector
+# over realized history cashes its whole gap.  This task adds tanh couplings so
+# part of the cross-channel dependence is only reachable by writing the
+# nonlinear structure down.
+
+_NLX_LAG_CHOICES = (3, 5, 7)
+_NLX_CHANNELS = 4
+_NLX_SOURCES_PER_CHANNEL = 2  # active cross pairs each channel receives (no self pairs)
+_NLX_MAG_RANGE = (0.7, 1.3)  # relative per-pair magnitude spread; rescaling sets the level
+# |b| / |a| per pair, drawn with a's sign (b_ij = ratio_ij * a_ij).  The contract
+# asks the tanh terms to carry roughly half of the cross-channel dependence; at
+# the unit channel variance this task is built to, tanh saturates
+# (var(tanh(y)) = 0.394 var(y)) and the same-sign tanh term co-moves with the
+# linear one (cov = 0.602 a b), so the variance share works out to
+# 0.394 r^2 / (1 + 0.394 r^2 + 1.204 r).  This band centers it near 0.5; the
+# naive 0.3-0.5 band would leave it near 5%.
+_NLX_RATIO_RANGE = (2.8, 4.2)
+# The one-step map linearized at the origin is a + b (tanh'(0) = 1); the joint
+# rescale below puts its companion spectral radius exactly at this value.  Away
+# from the origin tanh saturation only lowers the slopes, and the uniformly
+# bounded tanh term keeps the process bounded whenever the linear part alone is
+# stable, so this is the binding stability quantity.
+_NLX_RADIUS_TARGET = 0.92
+_NLX_LINEAR_RADIUS_CAP = 0.95  # contract-mandated cap on rho(companion(a))
+# E[y tanh(y)] for y ~ N(0, 1): the slope of tanh's best linear approximation at
+# unit scale (numerically integrated); linearizes the sigma-calibration proxy.
+_NLX_TANH_SLOPE = 0.602
+_NLX_BURN_IN = 2_000  # rows simulated and discarded in front of every stream
+_NLX_PROBE_ROWS = 12_000  # sigma-calibration probe length (own burn-in included)
+_NLX_PROBE_ROUNDS = 3
+_NLX_MC_PATHS = 1_000  # default forward paths per origin for h > 1
+_NLX_MC_PATH_CAP = 250_000  # path-origin cells per MC chunk; bounds memory only
+
+
+def _nlx_coeff_by_lag(
+    lags: np.ndarray, a: np.ndarray, b: np.ndarray
+) -> list[tuple[int, np.ndarray, np.ndarray]]:
+    """One (lag, linear, nonlinear) matrix group per distinct active lag.
+
+    Inactive pairs carry lag 0 with zero coefficients, so they never reach the
+    output; grouping by lag lets every consumer below touch each realized row
+    exactly once per (linear, tanh) pair of terms.
+    """
+    return [
+        (int(lag), a * (lags == lag), b * (lags == lag))
+        for lag in np.unique(lags[lags > 0])
+    ]
+
+
+def _nlx_cross_mean(
+    values_by_lag: list[np.ndarray],
+    coeff: list[tuple[int, np.ndarray, np.ndarray]],
+) -> np.ndarray:
+    """Conditional-mean cross-channel sum_j a_ij y_j(t-lag_ij) + b_ij tanh(y_j(t-lag_ij)).
+
+    ``values_by_lag[k]`` holds the [..., C] realized or simulated values at the
+    k-th distinct lag of ``coeff``; the channel axis is last and any leading
+    axes (single rows, origin batches, path batches) broadcast through the
+    [C, C] matmuls, which is what keeps the simulator, the closed form and the
+    Monte Carlo on one code path.
+    """
+    mean = None
+    for values, (_, a_l, b_l) in zip(values_by_lag, coeff):
+        term = values @ a_l.T + np.tanh(values) @ b_l.T
+        mean = term if mean is None else mean + term
+    return np.asarray(mean)
+
+
+def _nlx_companion(coeff: list[tuple[int, np.ndarray, np.ndarray]]) -> np.ndarray:
+    """Companion matrix of the lag-block VAR; state is the last max_lag rows of y."""
+    n_channels = coeff[0][1].shape[0]
+    max_lag = max(lag for lag, _, _ in coeff)
+    companion = np.zeros((n_channels * max_lag, n_channels * max_lag))
+    for lag, a_l, _ in coeff:
+        companion[:n_channels, (lag - 1) * n_channels : lag * n_channels] = a_l
+    for block in range(1, max_lag):
+        rows = slice(block * n_channels, (block + 1) * n_channels)
+        companion[rows, (block - 1) * n_channels : block * n_channels] = np.eye(n_channels)
+    return companion
+
+
+def _nlx_rescale(
+    lags: np.ndarray, a: np.ndarray, b: np.ndarray, target: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Common scale k for (a, b) so the companion of k*(a+b) has spectral radius == target.
+
+    The radius is NOT linear in k (a lag-p term enters like k^(1/p)), so the
+    scale is found by bisection; the dominant root grows monotonically in k.
+    Scaling a and b together leaves every b_ij / a_ij ratio — and hence the
+    designed nonlinear share — unchanged.
+    """
+    total = a + b
+    coeff = _nlx_coeff_by_lag(lags, total, np.zeros_like(total))
+
+    def radius_at(scale: float) -> float:
+        scaled = [(lag, a_l * scale, b_l) for lag, a_l, b_l in coeff]
+        return float(np.abs(np.linalg.eigvals(_nlx_companion(scaled))).max())
+
+    lo, hi = 0.0, 1.0
+    while radius_at(hi) < target:
+        hi *= 2.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if radius_at(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    scale = 0.5 * (lo + hi)
+    return a * scale, b * scale
+
+
+def _nlx_simulate(
+    rng: np.random.Generator,
+    coeff: list[tuple[int, np.ndarray, np.ndarray]],
+    sigma: np.ndarray,
+    rows: int,
+) -> np.ndarray:
+    """One stationary stream of ``rows`` content rows of the exact dynamics.
+
+    A max_lag zero pre-history plus a _NLX_BURN_IN burn-in prefix is simulated
+    and discarded in front; the burn-in is >= 2000 rows and the system contracts
+    at rate _NLX_RADIUS_TARGET per step, so the transient is long dead by row 0.
+    """
+    n_channels = sigma.shape[0]
+    max_lag = max(lag for lag, _, _ in coeff)
+    total = _NLX_BURN_IN + rows
+    y = np.zeros((total + max_lag, n_channels))
+    eps = rng.standard_normal((total, n_channels)) * sigma
+    lags = [lag for lag, _, _ in coeff]
+    for t in range(max_lag, total + max_lag):
+        y[t] = _nlx_cross_mean([y[t - lag] for lag in lags], coeff) + eps[t - max_lag]
+    return y[max_lag + _NLX_BURN_IN :]
+
+
+class NonlinearXChannelOracle:
+    """Exact 1-step / Monte-Carlo h-step conditional mean of the tanh-coupled VAR.
+
+    h = 1 is closed form (tanh of realized values).  For h > 1 the tanh composes
+    across steps and no closed form exists, so every origin gets ``n_paths``
+    forward simulations of the exact dynamics, vectorized over paths, and the
+    forecast is the path mean.  The MC standard error of one forecast entry is
+    sd(y_{o+h}) / sqrt(n_paths) ~ 0.03 at the default 1000 paths (conditional
+    sd ~ 0.7-1.0, mean-reverting), so the oracle's own MSE carries an inflation
+    of about sd^2 / n_paths ~ 1e-3 on a unit-variance channel — the tiny
+    residual 'gap' a stage-0 check will attribute to the oracle; noted here per
+    the contract.  The MC generator is rebuilt from the immutable ``mc_seq`` on
+    every forecast call, so forecasts are bitwise reproducible under the same
+    seed and idempotent under repeated calls.
+    """
+
+    def __init__(
+        self,
+        lags: np.ndarray,
+        a: np.ndarray,
+        b: np.ndarray,
+        sigma: np.ndarray,
+        n_paths: int = _NLX_MC_PATHS,
+        mc_seq: np.random.SeedSequence | None = None,
+    ) -> None:
+        self.lags = np.asarray(lags, dtype=np.int64)
+        self.a = np.asarray(a, dtype=np.float64)
+        self.b = np.asarray(b, dtype=np.float64)
+        self.sigma = np.asarray(sigma, dtype=np.float64)
+        if not (self.lags.shape == self.a.shape == self.b.shape and self.lags.ndim == 2):
+            raise ValueError(
+                f"lags/a/b must share one [C, C] shape, got {self.lags.shape}, "
+                f"{self.a.shape}, {self.b.shape}")
+        if self.sigma.shape != (self.a.shape[0],):
+            raise ValueError(
+                f"sigma must be [{self.a.shape[0]}], got shape {self.sigma.shape}")
+        if (self.lags < 0).any() or (self.lags > 0).sum() == 0:
+            raise ValueError("lags must be zero for inactive pairs and positive elsewhere")
+        # A coefficient on a lag-0 pair would read the target's own time row.
+        if ((self.lags == 0) & ((self.a != 0) | (self.b != 0))).any():
+            raise ValueError("inactive (lag-0) pairs must carry zero coefficients")
+        if isinstance(n_paths, bool) or not isinstance(n_paths, (int, np.integer)) or n_paths <= 0:
+            raise ValueError(f"n_paths must be a positive int, got {n_paths!r}")
+        self.n_paths = int(n_paths)
+        self.max_lag = int(self.lags.max())
+        self._coeff = _nlx_coeff_by_lag(self.lags, self.a, self.b)
+        self.mc_seq = mc_seq if mc_seq is not None else np.random.SeedSequence(0)
+
+    def one_step_mean(self, seg: np.ndarray, times: np.ndarray) -> np.ndarray:
+        """Exact E[y_t | seg[0..t-1]] at each t in ``times``; returns [T, C]."""
+        seg = np.asarray(seg, dtype=np.float64)
+        times = np.asarray(times, dtype=np.int64)
+        if seg.ndim != 2 or seg.shape[1] != self.a.shape[0]:
+            raise ValueError(f"seg must be [T, {self.a.shape[0]}], got shape {seg.shape}")
+        if times.ndim != 1:
+            raise ValueError(f"times must be 1-D, got shape {times.shape}")
+        out = np.empty((times.size, seg.shape[1]))
+        if times.size == 0:
+            return out
+        if times.min() < self.max_lag:
+            raise ValueError(f"time {times.min()} lacks the max_lag={self.max_lag} realized rows")
+        if times.max() > seg.shape[0] - 1:
+            raise ValueError(f"time {times.max()} lies beyond the end of seg")
+        values = [seg[times - lag] for lag, _, _ in self._coeff]
+        return _nlx_cross_mean(values, self._coeff)
+
+    def path_means(
+        self,
+        seg: np.ndarray,
+        origins: np.ndarray,
+        horizon: int,
+        n_paths: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """Raw MC path means of the simulated steps 1..horizon; [B, horizon, C].
+
+        ``forecast`` uses this for h >= 2 and overwrites h = 1 with the closed
+        form; the method is public so tests can build independent brute-force
+        estimates with their own rng and path count.
+        """
+        seg = np.asarray(seg, dtype=np.float64)
+        origins = np.asarray(origins, dtype=np.int64)
+        if isinstance(horizon, bool) or not isinstance(horizon, (int, np.integer)) or horizon < 1:
+            raise ValueError(f"horizon must be a positive int, got {horizon!r}")
+        if isinstance(n_paths, bool) or not isinstance(n_paths, (int, np.integer)) or n_paths <= 0:
+            raise ValueError(f"n_paths must be a positive int, got {n_paths!r}")
+        if seg.ndim != 2 or seg.shape[1] != self.a.shape[0]:
+            raise ValueError(f"seg must be [T, {self.a.shape[0]}], got shape {seg.shape}")
+        if origins.ndim != 1:
+            raise ValueError(f"origins must be 1-D, got shape {origins.shape}")
+        out = np.empty((origins.size, int(horizon), seg.shape[1]))
+        if origins.size == 0:
+            return out
+        if origins.min() < self.max_lag - 1:
+            raise ValueError(
+                f"origin {origins.min()} lacks the max_lag={self.max_lag} realized rows")
+        if origins.max() + int(horizon) > seg.shape[0] - 1:
+            raise ValueError(f"origin {origins.max()} has targets beyond the end of seg")
+        # Chunk so each block's path tensor stays ~250k cells; accuracy is
+        # unaffected (every origin still gets its own independent draws).
+        chunk = max(1, _NLX_MC_PATH_CAP // int(n_paths))
+        for start in range(0, origins.size, chunk):
+            sel = origins[start : start + chunk]
+            history = seg[sel[:, None] - np.arange(self.max_lag)]  # [B, max_lag, C], newest first
+            # One deque entry per lag row, newest first: entry lag-1 is
+            # y[o + step - lag] whatever the step, because maxlen drops the
+            # oldest realized row exactly when the simulated window covers it.
+            paths = collections.deque(
+                [np.broadcast_to(history[:, k][:, None, :], (sel.size, n_paths, seg.shape[1]))
+                 for k in range(self.max_lag)],
+                maxlen=self.max_lag,
+            )
+            for step in range(1, int(horizon) + 1):
+                values = [paths[lag - 1] for lag, _, _ in self._coeff]
+                draws = _nlx_cross_mean(values, self._coeff) + rng.standard_normal(
+                    (sel.size, n_paths, seg.shape[1])) * self.sigma
+                out[start : start + sel.size, step - 1, :] = draws.mean(axis=1)
+                paths.appendleft(draws)
+        return out
+
+    def forecast(self, seg: np.ndarray, origins: np.ndarray, cfg: HeadroomConfig) -> np.ndarray:
+        seg, origins = _check_forecast_args(seg, origins, cfg)
+        if cfg.horizon < 1:
+            raise ValueError(f"horizon must be positive, got {cfg.horizon}")
+        if seg.shape[1] != self.a.shape[0]:
+            raise ValueError(f"seg has {seg.shape[1]} channels, model has {self.a.shape[0]}")
+        out = np.empty((origins.size, cfg.horizon, seg.shape[1]))
+        if origins.size == 0:
+            return out
+        if origins.min() < self.max_lag - 1:
+            raise ValueError(
+                f"origin {origins.min()} lacks the max_lag={self.max_lag} realized rows")
+        # h = 1 exactly; the MC below also produces a step-1 mean, but the
+        # closed form carries no sampling noise, so it wins.
+        out[:, 0, :] = self.one_step_mean(seg, origins + 1)
+        if cfg.horizon > 1:
+            means = self.path_means(
+                seg, origins, cfg.horizon, self.n_paths, np.random.default_rng(self.mc_seq))
+            out[:, 1:, :] = means[:, 1:, :]
+        return out
+
+    def mse_theoretical(self) -> np.ndarray | None:
+        # The h-step conditional variance composes tanh across steps (E[tanh] of
+        # a Gaussian mixture is not a mixture of E[tanh]), so no closed form
+        # exists; per the contract we return None rather than a surrogate.
+        return None
+
+
+def nonlinear_xchannel(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+    """C=4 nonlinear cross-channel VAR: tanh couplings at per-pair lags 3/5/7 (contract §8).
+
+    Dynamics: y_{i,t} = sum_j a_ij y_{j,t-lag_ij} + sum_j b_ij tanh(y_{j,t-lag_ij})
+    + eps_{i,t} with independent N(0, sigma_i^2) innovations.  Each channel
+    receives _NLX_SOURCES_PER_CHANNEL randomly drawn cross pairs (no self
+    pairs); every pair has its own lag from {3, 5, 7}, its own sign and
+    magnitude, and its own b/a ratio drawn from _NLX_RATIO_RANGE with the same
+    sign as a_ij (b_ij = ratio_ij * a_ij), which centers the tanh share of the
+    1-step conditional mean's cross-channel contribution near one half.
+
+    Stability: the tanh term is uniformly bounded, so rho(companion(a)) < 1
+    makes the nonlinear process bounded no matter what b is; the construction
+    instead rescales (a, b) jointly so the origin-linearized system
+    companion(a + b) (tanh'(0) = 1) has spectral radius exactly
+    _NLX_RADIUS_TARGET — the binding quantity for a centred stationary
+    distribution — and additionally checks the contract's linear-part cap
+    rho(companion(a)) <= _NLX_LINEAR_RADIUS_CAP (RuntimeError beyond it; the
+    same-sign construction keeps rho(a) below rho(a+b) = target < cap).
+
+    Channel scale: per-channel innovation sd is calibrated to roughly unit
+    channel variance.  A linear proxy (tanh ~ _NLX_TANH_SLOPE * y at unit scale)
+    gives a closed-form diagonal solve, and _NLX_PROBE_ROUNDS probe simulations
+    (re-seeded every round, so sd(sigma) is a smooth deterministic function)
+    correct for the curvature the proxy ignores; measured content sd lands
+    within a few percent of 1 across seeds.
+
+    Oracle: h=1 closed form, h>1 per-origin Monte Carlo through the exact
+    dynamics (NonlinearXChannelOracle; MC standard error documented there).
+    mse_theoretical() is None — no closed form exists.  Every stream is
+    simulated with a _NLX_BURN_IN burn-in prefix discarded in front, then the
+    usual train_diag / cert / test layout (cert/test fresh spawns with the
+    standard _PREFIX), bitwise reproducible under the same seed.
+    """
+    sizes = _merge_sizes(sizes)
+    rng_main, rng_cert, rng_test = _spawn(seed)
+    # Children 0-2 are the same simulation streams _spawn hands out; 3-5 are
+    # this task's own design / calibration / MC streams.
+    children = np.random.SeedSequence(int(seed)).spawn(6)
+    design = np.random.default_rng(children[3])
+    probe_seq = children[4]
+    mc_seq = children[5]
+
+    lags = np.zeros((_NLX_CHANNELS, _NLX_CHANNELS), dtype=np.int64)
+    a = np.zeros((_NLX_CHANNELS, _NLX_CHANNELS))
+    b = np.zeros((_NLX_CHANNELS, _NLX_CHANNELS))
+    for target_channel in range(_NLX_CHANNELS):
+        sources = design.choice(
+            [j for j in range(_NLX_CHANNELS) if j != target_channel],
+            size=_NLX_SOURCES_PER_CHANNEL, replace=False)
+        for source in sources:
+            lags[target_channel, source] = design.choice(_NLX_LAG_CHOICES)
+            magnitude = design.uniform(*_NLX_MAG_RANGE)
+            sign = design.choice((-1.0, 1.0))
+            a[target_channel, source] = magnitude * sign
+            b[target_channel, source] = (
+                design.uniform(*_NLX_RATIO_RANGE) * magnitude * sign)
+
+    a, b = _nlx_rescale(lags, a, b, _NLX_RADIUS_TARGET)
+    coeff = _nlx_coeff_by_lag(lags, a, b)
+    linear_radius = float(np.abs(np.linalg.eigvals(_nlx_companion(coeff))).max())
+    if linear_radius > _NLX_LINEAR_RADIUS_CAP:
+        raise RuntimeError(
+            f"linear part spectral radius {linear_radius:.3f} exceeds the "
+            f"{_NLX_LINEAR_RADIUS_CAP} cap; redesign the coefficient draw")
+
+    # Innovation sd, proxy first: with tanh linearized at unit scale the system
+    # is a plain VAR whose stationary covariance scales exactly with the
+    # innovation sd, so one Lyapunov solve gives unit marginals in the proxy.
+    proxy = _nlx_coeff_by_lag(lags, a + _NLX_TANH_SLOPE * b, np.zeros_like(b))
+    proxy_companion = _nlx_companion(proxy)
+    noise = np.zeros_like(proxy_companion)
+    noise[:_NLX_CHANNELS, :_NLX_CHANNELS] = np.eye(_NLX_CHANNELS)
+    sigma = 1.0 / np.sqrt(np.diag(_stationary_cov(proxy_companion, noise))[:_NLX_CHANNELS])
+    for _ in range(_NLX_PROBE_ROUNDS):
+        probe = _nlx_simulate(np.random.default_rng(probe_seq), coeff, sigma, _NLX_PROBE_ROWS)
+        sigma = sigma / probe.std(axis=0)
+    if not np.isfinite(sigma).all() or (sigma <= 0).any():
+        raise RuntimeError(
+            f"innovation-sd calibration diverged (sigma={sigma.tolist()}); "
+            "the drawn couplings are unstable")
+
+    def simulate(rng: np.random.Generator, rows: int) -> np.ndarray:
+        return _nlx_simulate(rng, coeff, sigma, rows)
+
+    train_diag = simulate(rng_main, sizes["train"] + sizes["diag"])
+    oracle = NonlinearXChannelOracle(lags, a, b, sigma, mc_seq=mc_seq)
+
+    # Measured share of the 1-step conditional mean's cross-channel part carried
+    # by the tanh terms, pooled over channels and time on train_diag.
+    times = np.arange(int(lags.max()), train_diag.shape[0])
+    values = [train_diag[times - lag] for lag, _, _ in coeff]
+    linear_part = _nlx_cross_mean(
+        values, [(lag, a_l, np.zeros_like(b_l)) for lag, a_l, b_l in coeff])
+    nonlinear_part = _nlx_cross_mean(
+        values, [(lag, np.zeros_like(a_l), b_l) for lag, a_l, b_l in coeff])
+    nonlinear_fraction = float(nonlinear_part.var() / (linear_part + nonlinear_part).var())
+
+    active = list(zip(*np.nonzero(lags)))
+    return SyntheticTask(
+        name="nonlinear_xchannel",
+        train_diag=train_diag,
+        diag_start=sizes["train"],
+        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
+        test=simulate(rng_test, _PREFIX + sizes["test"]),
+        oracle=oracle,
+        structure={
+            "n_channels": _NLX_CHANNELS,
+            "max_lag": int(lags.max()),
+            "cross_lags": {
+                f"{int(i)}->{int(j)}": int(lags[i, j]) for i, j in active
+            },
+            "couplings": [
+                {"target": int(i), "source": int(j), "lag": int(lags[i, j]),
+                 "linear": float(a[i, j]), "nonlinear": float(b[i, j])}
+                for i, j in active
+            ],
+            "nonlinear_fraction": nonlinear_fraction,
+            "channel_innovation_sd": sigma.tolist(),
+        },
+    )
+
+
 REGISTRY: dict[str, Callable[..., SyntheticTask]] = {
     "lgssm_multiperiod": lgssm_multiperiod,
     "lgssm_xchannel": lgssm_xchannel,
@@ -808,4 +1216,5 @@ REGISTRY: dict[str, Callable[..., SyntheticTask]] = {
     "arfima": arfima,
     "garch": garch,
     "random_walk": random_walk,
+    "nonlinear_xchannel": nonlinear_xchannel,
 }

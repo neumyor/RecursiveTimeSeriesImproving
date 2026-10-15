@@ -85,7 +85,7 @@ if "nonlinear_xchannel" in REGISTRY:
 # truth; arfima stresses HAC under long memory).
 CALIBRATION_PAIRS = ("lgssm_multiperiod", "arfima", "hmm_ar_switch")
 # G0-6 screening tasks (garch / random_walk are negative controls by design).
-SCREENING_TASKS = ("lgssm_multiperiod", "lgssm_xchannel", "hmm_ar_switch", "arfima")
+SCREENING_TASKS = ("lgssm_multiperiod", "lgssm_xchannel", "nonlinear_xchannel", "hmm_ar_switch", "arfima")
 ALL_TASKS = ("lgssm_multiperiod", "lgssm_xchannel", "hmm_ar_switch", "arfima", "garch", "random_walk")
 
 

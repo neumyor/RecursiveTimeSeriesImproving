@@ -14,6 +14,7 @@ from harnessing_ts.headroom.synthetic import (
     _PREFIX,
     DEFAULT_SIZES,
     REGISTRY,
+    NonlinearXChannelOracle,
     SyntheticTask,
     _arfima_gamma,
     _hmm_forecast,
@@ -27,6 +28,7 @@ CHANNELS = {
     "arfima": 1,
     "garch": 1,
     "random_walk": 1,
+    "nonlinear_xchannel": 4,
 }
 CFG = HeadroomConfig()  # horizon 24, burn_in 591
 CFG_TINY = HeadroomConfig(input_length=8, horizon=6)
@@ -360,3 +362,115 @@ def test_forecast_rejects_bad_arguments() -> None:
     multiperiod = small_task("lgssm_multiperiod")
     with pytest.raises(ValueError, match="channels"):
         multiperiod.oracle.forecast(multiperiod.cert[:, :2], np.array([_PREFIX]), CFG)
+
+
+# --- nonlinear_xchannel (tanh-coupled cross-channel VAR) -------------------------
+
+NLX_MC_SIZES = tuple(sorted({"train": 50, "diag": 50, "cert": 2_500, "test": 50}.items()))
+CFG_H8 = HeadroomConfig(input_length=8, horizon=8)
+CFG_H6 = HeadroomConfig(input_length=8, horizon=6)
+
+
+def nlx_mc_task(seed: int = 7) -> SyntheticTask:
+    """Cert-heavy build shared by the exactness checks (h > 1 costs MC time)."""
+    return build("nonlinear_xchannel", NLX_MC_SIZES, seed)
+
+
+def test_nonlinear_xchannel_same_seed_reproducible_forecasts() -> None:
+    first = small_task("nonlinear_xchannel")
+    second = REGISTRY["nonlinear_xchannel"](0, SMALL)
+    origins = np.array([_PREFIX + 5, _PREFIX + 61, _PREFIX + 130])
+    left = first.oracle.forecast(first.cert, origins, CFG_H8)
+    right = second.oracle.forecast(second.cert, origins, CFG_H8)
+    np.testing.assert_array_equal(left, right)
+    # the MC generator is rebuilt from the task's immutable mc_seq on every call,
+    # so repeated forecasts on one task are bitwise identical as well
+    np.testing.assert_array_equal(left, first.oracle.forecast(first.cert, origins, CFG_H8))
+    # the h=1 slice is the closed form and carries no MC noise
+    np.testing.assert_array_equal(left[:, 0, :], first.oracle.one_step_mean(
+        first.cert, origins + 1))
+
+
+def test_nonlinear_xchannel_one_step_oracle_is_exact() -> None:
+    task = nlx_mc_task()
+    oracle = task.oracle
+    seg = task.cert
+    origins = np.array([_PREFIX + 10, _PREFIX + 200, _PREFIX + 900])
+    closed = oracle.one_step_mean(seg, origins + 1)
+    mc = oracle.path_means(seg, origins, 1, 200_000, np.random.default_rng(11))
+    # expected MS gap = sigma^2 / n_paths ~ 4e-6 (the MC noise floor); 1e-4
+    # leaves an order of magnitude of headroom while still catching any
+    # lag-indexing slip, which would err at O(0.1)
+    assert float(((closed - mc[:, 0, :]) ** 2).mean()) < 1e-4
+
+    times = np.arange(_PREFIX, _PREFIX + 1_600)
+    resid = seg[times + 1] - oracle.one_step_mean(seg, times + 1)
+    # exact 1-step residuals are the innovations themselves; corr se ~
+    # 1/sqrt(1600) = 0.025, so 0.1 is ~4 sigma per pair (the max over the 32
+    # checked pairs sits near 2.2 sigma)
+    for k in range(1, 9):
+        for channel in range(seg.shape[1]):
+            corr = np.corrcoef(resid[:, channel], seg[times + 1 - k, channel])[0, 1]
+            assert abs(corr) < 0.1
+
+
+def test_nonlinear_xchannel_h_step_matches_independent_mc() -> None:
+    task = nlx_mc_task()
+    seg = task.cert
+    origins = np.array([_PREFIX + 33, _PREFIX + 133, _PREFIX + 533, _PREFIX + 1_033])
+    got = task.oracle.forecast(seg, origins, CFG_H6)
+    # brute force with a different seed and 200x the oracle's 1000 paths
+    brute = task.oracle.path_means(seg, origins, 6, 200_000, np.random.default_rng(4_242))
+    # combined MC se ~ sqrt(sd^2/1000 + sd^2/200000) <= 0.033 (sd(y_{o+h}) <= 1.05,
+    # mean-reverting); 0.2 is ~6 sigma
+    assert float(np.abs(got[:, 1:, :] - brute[:, 1:, :]).max()) < 0.2
+    # h=1: closed form vs brute MC, only the brute's own ~0.002 se remains
+    assert float(np.abs(got[:, 0, :] - brute[:, 0, :]).max()) < 0.05
+
+
+def test_nonlinear_xchannel_default_seed_stays_bounded() -> None:
+    task = REGISTRY["nonlinear_xchannel"](0)  # default sizes, default seed
+    for arr in (task.train_diag, task.cert, task.test):
+        assert np.isfinite(arr).all()
+        assert float(np.abs(arr).max()) < 50
+    # the sigma calibration's contract: channels roughly unit variance
+    np.testing.assert_allclose(task.cert[_PREFIX:].std(axis=0), 1.0, rtol=0.1)
+
+
+def test_nonlinear_xchannel_tanh_carries_conditional_mean_variance() -> None:
+    task = small_task("nonlinear_xchannel")
+    oracle = task.oracle
+    c = CHANNELS["nonlinear_xchannel"]
+    lags = np.zeros((c, c), dtype=np.int64)
+    a = np.zeros((c, c))
+    b = np.zeros((c, c))
+    for entry in task.structure["couplings"]:
+        i, j = entry["target"], entry["source"]
+        lags[i, j] = entry["lag"]
+        a[i, j] = entry["linear"]
+        b[i, j] = entry["nonlinear"]
+
+    # decompose the 1-step conditional mean's cross-channel contribution on
+    # train_diag into its linear and tanh parts, entry by entry
+    y = task.train_diag
+    t = np.arange(task.structure["max_lag"], y.shape[0])
+    lin = np.zeros((t.size, c))
+    non = np.zeros((t.size, c))
+    for i, j in zip(*np.nonzero(lags)):
+        lin[:, i] += a[i, j] * y[t - lags[i, j], j]
+        non[:, i] += b[i, j] * np.tanh(y[t - lags[i, j], j])
+    fraction = float(non.var() / (lin + non).var())
+    assert fraction > 0.2  # the contract's floor; the design centers it near 0.5
+    assert task.structure["nonlinear_fraction"] == pytest.approx(fraction, rel=1e-6)
+
+    # a model with b zeroed misses exactly the tanh part, so its 1-step MSE
+    # exceeds the oracle's by ~var(non) — the "measurable difference" between
+    # explaining the linear part alone and linear+tanh
+    linear_only = NonlinearXChannelOracle(lags, a, np.zeros_like(b), oracle.sigma)
+    seg = task.cert
+    times = np.arange(_PREFIX, seg.shape[0] - 1)
+    realized = seg[times + 1]
+    mse_full = float(((realized - oracle.one_step_mean(seg, times + 1)) ** 2).mean())
+    mse_linear = float(((realized - linear_only.one_step_mean(seg, times + 1)) ** 2).mean())
+    assert mse_linear - mse_full > 0.02  # ~var(non) ~ 0.076 (seed 0, measured)
+    assert (mse_linear - mse_full) / mse_linear > 0.03
