@@ -81,6 +81,12 @@ class HeadroomConfig:
         errors: list[str] = []
         if self.input_length <= 0:
             errors.append("inputLength must be positive")
+        if self.lag_segments and self.input_length > 0 and self.burn_in < self.input_length:
+            # Standalone cert/test arrays index windows from the segment start,
+            # so the burn-in must cover at least the full lookback.
+            errors.append(
+                f"burnIn (maxLag + firLenCap = {self.burn_in}) must be >= inputLength ({self.input_length})"
+            )
         if self.horizon <= 0:
             errors.append("horizon must be positive")
         if self.arm not in ARM_VALUES:
