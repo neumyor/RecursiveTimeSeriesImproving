@@ -26,8 +26,7 @@
 class HeadroomConfig:
     input_length: int = 96                  # L
     horizon: int = 24                       # H（主实验 H=24）
-    arm: str = "fixed"                      # scalar | fixed | self-built | placebo（§12 修订）
-    evolution: bool = True                  # 残差签名演化引导，三臂共用（§12.3）
+    evolution: bool = True                  # 多样性裁决（演化引导），三臂共用；arm 是循环参数，不是配置字段
     budget_candidates: int = 25
     candidate_timeout_seconds: float = 600.0
     acceptance_alpha: float = 0.05          # DM 接受检验
@@ -59,7 +58,7 @@ class HeadroomConfig:
     def from_json(cls, path: Path) -> "HeadroomConfig"            # 解析失败/校验失败 ValueError
 ```
 
-除各字段的取值范围外，`validate` 还强制以下特征深度约束（汇总报告，任一违反即不合法）：
+`validate` 只保留违反后会**静默污染结果**的规则（不做逐字段区间防御）：
 
 - `burn_in >= input_length`：独立 cert/test 段的输入窗口从段首起算，burn-in 必须盖住整个 lookback；
 - `burn_in >= input_length + 16*(beyond_l_lags - 1)`：beyond-L 特征的最深滞后不得越出段内已实现范围（否则 numpy 负下标会静默绕到未来行）；

@@ -25,9 +25,9 @@ isolation — plus candidates whose diag card gain dwarfs their cert gain
 (ratio > 5), the overfit-to-diagnostic signature.
 
 Arm level: per-(task, arm) median+IQR of E1/E2 and the seed-blocked
-sign-flip permutation test for the three pre-registered contrasts (card vs
-scalar, bj vs scalar, card vs bj), exact up to 8192 patterns and Monte
-Carlo (10k, fixed seed) beyond.
+sign-flip permutation test for the three pre-registered contrasts
+(self-built vs fixed, fixed vs scalar, self-built vs scalar), exact up to
+8192 patterns and Monte Carlo (10k, fixed seed) beyond.
 
 Usage:
     uv run --extra research python experiments/posthoc.py \
@@ -44,8 +44,6 @@ CSV: the loop never stores the path anywhere the agent could see it.
 
 import argparse
 from dataclasses import replace
-import hashlib
-import importlib.util
 import itertools
 import json
 import math
@@ -63,6 +61,7 @@ if _BACKEND not in sys.path:
 sys.path.insert(0, str(_REPO_ROOT / "experiments"))
 
 import baselines
+import common
 import evaluate as ev
 import realdata
 from harnessing_ts.headroom.candidate import SourceRejected, check_source
@@ -80,8 +79,8 @@ from harnessing_ts.headroom.timeidx import segment_origins, windows
 # m0's source is the repo template: the loop copies it into
 # ws/models/incumbent/model.py at prepare(), but every acceptance overwrites
 # that file, so only the template still holds m0 verbatim.  The v2 default is
-# the PatchTST-lite template (plan §12.2); --m0-template overrides it for
-# analyzing runs made with the linear template.
+# the PatchTST-lite template; --m0-template overrides it for analyzing
+# runs made with the linear template.
 _DEFAULT_M0_TEMPLATE = "m0_deep.py"
 # The only absolute roots a well-behaved agent may touch besides its own ws.
 _ALLOWED_ROOTS = (_REPO_ROOT / "experiments" / "templates", _REPO_ROOT / "backend")
@@ -99,47 +98,10 @@ class _RunError(Exception):
 # --- JSON / module helpers (the loop's own disciplines) --------------------------------
 
 
-def _json_safe(value: Any) -> Any:
-    """Non-finite floats -> None; numpy scalars -> plain Python for strict JSON.
-
-    Unlike the loop's ledger writer this also drops infinities: a divergent
-    candidate can leave an inf test MSE in a report, and json.dumps with
-    allow_nan=False would refuse to write it.
-    """
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, (np.floating, float)):
-        number = float(value)
-        return number if math.isfinite(number) else None
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    return value
-
-
-def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Tolerant ledger read: a torn LAST line (kill mid-append) is dropped."""
-    if not path.is_file():
-        return []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    records: list[dict[str, Any]] = []
-    for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            if index == len(lines) - 1:
-                return records  # torn tail from an interrupted append
-            raise ValueError(f"{path} is corrupted at line {index + 1}") from None
-    return records
+_json_safe = common.json_safe
+_read_json = common.read_json
+_read_jsonl = common.read_jsonl
+_load_module = common.load_module
 
 
 def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
@@ -153,20 +115,6 @@ def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
             continue
         if isinstance(obj, dict):
             yield obj
-
-
-def _load_module(name: str, source: Path) -> Any:
-    """Load a repo/candidate file that is not an installed package.
-
-    Registered in sys.modules before exec so dataclasses inside candidate
-    sources can resolve string annotations (baselines' loader discipline).
-    """
-    spec = importlib.util.spec_from_file_location(name, source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _gain_row(gain: Any) -> dict[str, Any]:
@@ -298,28 +246,11 @@ class _Replay:
             if cand_id == "m0":
                 # A wrong template silently recomputes every gap baseline
                 # (ngap divides by gap(m0)).  The run's heldout side recorded
-                # the sha of m0 as first copied, so the digest selects the
-                # template; --m0-template stays as an explicit override but is
-                # still verified, and no match fails loudly.
-                recorded = _read_json(self.heldout / "incumbent-reference.json")["sha"]
-                if hashlib.sha256(source.read_bytes()).hexdigest() != recorded:
-                    match = next(
-                        (
-                            path
-                            for path in sorted(
-                                (_REPO_ROOT / "experiments" / "templates").glob("m0*.py")
-                            )
-                            if hashlib.sha256(path.read_bytes()).hexdigest() == recorded
-                        ),
-                        None,
-                    )
-                    if match is None:
-                        raise _RunError(
-                            "no template under experiments/templates matches this run's "
-                            "incumbent reference sha; pass --m0-template with the exact "
-                            "template the loop used"
-                        )
-                    source = match
+                # the template NAME the loop copied, so the replay loads that
+                # exact file; --m0-template stays as an explicit override.
+                recorded = _read_json(self.heldout / "incumbent-reference.json").get("template")
+                if recorded:
+                    source = _REPO_ROOT / "experiments" / "templates" / recorded
             if not source.is_file():
                 raise _RunError(f"candidate source is missing: {source}")
             text = source.read_text(encoding="utf-8")
@@ -713,8 +644,8 @@ def _diagnostic_attribution(
     child_card: list[dict[str, Any]] | None, parent_card: list[dict[str, Any]] | None
 ) -> tuple[str, ...]:
     """Diagnostic-only direction attribution: the aspect whose remaining-
-    improvement bound dropped the most.  The MECHANISM is the LLM judge
-    (revision III); this single rule exists so postSwitchDiversity keeps its
+    improvement bound dropped the most.  The live mechanism is the LLM
+    judge; this single rule exists so postSwitchDiversity keeps its
     pre-registered meaning as a measurement."""
     parent_lcb = _aspect_lcb(parent_card)
     child_lcb = _aspect_lcb(child_card)

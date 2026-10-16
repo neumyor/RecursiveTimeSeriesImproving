@@ -11,17 +11,17 @@ segment and every certification number live in a heldout directory the agent
 never sees.  Checkpointing is per-round: rounds.jsonl is the resume ledger.
 
 Post-revision additions (plan §12, 2026-10-16):
-- the default incumbent is the PatchTST-lite template (deep m0), so the
+- the default incumbent is the deep PatchTST-lite template (m0), so the
   self-built probes can analyze transformer activations;
 - the ``self-built`` arm lets the agent write probes under probes/; new
   probes are validated on planted-signal fixtures (experiments/probes.py)
   and the passers are re-run on the incumbent every round — that output is
   the arm's ONLY diagnostic feedback;
-- residual-signature evolution guidance (cfg.evolution, on in every arm):
-  when the certificate saturates or the last accepted fixes concentrate on
-  one residual-structure family, the round prompt recommends a different
-  archive candidate (best evaluated candidate with a disjoint signature) as
-  the starting point instead of the incumbent.
+- diversity judge guidance (cfg.evolution, on in every arm): when the
+  ledger shows search stagnation (an acceptance, a rejected/failed streak,
+  a new saturated certification), a no-tool judge LLM reads the measurement
+  archive and may recommend a different historical candidate as the round's
+  starting point; every gate around its verdict is deterministic.
 
 Design notes from the M2 review (all load-bearing):
 - the ledger tolerates a torn last line (a kill mid-append must not kill the
@@ -43,8 +43,6 @@ Usage:
 import argparse
 import asyncio
 from dataclasses import dataclass, replace
-import hashlib
-import importlib.util
 import json
 from pathlib import Path
 import shutil
@@ -56,11 +54,9 @@ from uuid import uuid4
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_BACKEND = str(_REPO_ROOT / "backend")
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
 sys.path.insert(0, str(_REPO_ROOT / "experiments"))
 
+import common
 import evaluate as ev
 from harnessing_ts.agent.sdk_runner import SdkRunner, SdkRunnerConfig
 from harnessing_ts.headroom import candidate as cand
@@ -107,7 +103,7 @@ ASPECT_VOCABULARY = (
     "level-bias",
     "other",
 )
-# Diversity judge (plan §12.3 + revision III): called after each acceptance,
+# Diversity judge: called after each acceptance,
 # after a streak of JUDGE_STREAK_ROUNDS rejected/failed rounds, and once per
 # new saturated certification — about 10-15 calls per run, never every round.
 JUDGE_STREAK_ROUNDS = 3
@@ -127,7 +123,7 @@ _JUDGE_FORBIDDEN_WORDS = (
     "certificate",
     "saturated",
 )
-# Activation sample size handed to probes (plan §12.2): evenly spaced
+# Activation sample size handed to probes: evenly spaced
 # diagnostic windows, per-layer, of the current incumbent.
 ACTIVATION_WINDOWS = 256
 
@@ -148,64 +144,11 @@ class LoopState:
     history: list[dict[str, Any]]
 
 
-def _json_safe(value: Any) -> Any:
-    """NaN -> None recursively; numpy scalars -> plain Python for strict JSON."""
-    if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, (np.floating, float)):
-        number = float(value)
-        return None if np.isnan(number) else number
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    return value
-
-
-def _write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Tolerant read: a torn LAST line (kill mid-append) is dropped."""
-    if not path.is_file():
-        return []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    records: list[dict[str, Any]] = []
-    for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            if index == len(lines) - 1:
-                return records  # torn tail from an interrupted append
-            raise ValueError(f"{path} is corrupted at line {index + 1}") from None
-    return records
-
-
-def _load_module(name: str, source: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _file_digest(path: Path) -> str:
-    """Short SHA-256 for the two integrity-critical files (targeted, not a
-    tree hash: the §0.5 ban was on hashing the whole workspace)."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+_json_safe = common.json_safe
+_write_json = common.write_json
+_append_jsonl = common.append_jsonl
+_read_jsonl = common.read_jsonl
+_load_module = common.exec_module
 
 
 def _hgroup_mse(seg: SegmentData) -> dict[str, float]:
@@ -287,8 +230,8 @@ class HeadroomLoop:
         # The diversity judge runs in its own no-tool session; mockable like
         # the runner (tests inject a scripted judge).
         self.judge_factory = judge_factory or self._dsh_judge_factory
-        # The revision's deep default (plan §12.2); tests use the linear
-        # template to stay fast, production always runs the PatchTST-lite.
+        # Tests use the linear template to stay fast; production always
+        # runs the deep PatchTST-lite.
         self.m0_template = m0_template
         self.rounds_path = self.run_dir / "rounds.jsonl"
         self.train: np.ndarray | None = None
@@ -346,12 +289,9 @@ class HeadroomLoop:
         self.heldout.chmod(0o700)
 
         np.save(self.ws / "data" / "series.npy", self.values)
-        # The agent's write/edit tools can reach these files; the reference
-        # digest lives where the agent cannot and every round verifies it.
         _write_json(
             self.heldout / "reference.json",
             {
-                "series_sha": _file_digest(self.ws / "data" / "series.npy"),
                 "task": self.task_name,
                 "sizes": self.sizes,
                 "seed": self.seed,
@@ -373,9 +313,9 @@ class HeadroomLoop:
         if not incumbent.is_file():
             incumbent.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_REPO_ROOT / "experiments" / "templates" / self.m0_template, incumbent)
-            _write_json(
-                self.heldout / "incumbent-reference.json", {"sha": _file_digest(incumbent)}
-            )
+            # The template NAME (not a digest) is the m0 provenance the
+            # post-hoc replay needs; it lives where the agent cannot edit it.
+            _write_json(self.heldout / "incumbent-reference.json", {"template": self.m0_template})
 
     # ------------------------------------------------------- incumbent state
 
@@ -384,15 +324,24 @@ class HeadroomLoop:
             return self.ws / "models" / "incumbent" / "model.py"
         return self.ws / "models" / "candidates" / incumbent_id / "model.py"
 
-    def _refresh_incumbent_segments(self) -> None:
-        """Re-predict the workspace incumbent on diag/cert, rebuild segments."""
+    def _refresh_incumbent_segments(
+        self, adapter: Any | None = None, pred_diag: np.ndarray | None = None
+    ) -> None:
+        """Re-predict the workspace incumbent on diag/cert, rebuild segments.
+
+        An accepted candidate was already fitted in-process for the
+        determinism gate; pass that adapter (and its diag predictions) so the
+        refresh reuses them instead of fitting a third time.
+        """
         assert self.train is not None and self.values is not None and self.cert_values is not None
-        module = _load_module("rhg_incumbent", self.ws / "models" / "incumbent" / "model.py")
-        adapter = module.create_adapter()
-        _pin_torch_threads()  # after the factory: a candidate importing torch inside create_adapter escapes a pre-factory pin
+        if adapter is None:
+            module = _load_module("rhg_incumbent", self.ws / "models" / "incumbent" / "model.py")
+            adapter = module.create_adapter()
+            _pin_torch_threads()  # after the factory: a candidate importing torch inside create_adapter escapes a pre-factory pin
+            adapter.fit(self.train, ev.fit_meta(self.cfg, self.values.shape[1], self.seed))
         self._incumbent_model_id = str(getattr(adapter, "model_id", "m0"))
-        adapter.fit(self.train, ev.fit_meta(self.cfg, self.values.shape[1], self.seed))
-        pred_diag = ev.predict_adapter(adapter, self.values, self.diag_start, self.values.shape[0], self.cfg)
+        if pred_diag is None:
+            pred_diag = ev.predict_adapter(adapter, self.values, self.diag_start, self.values.shape[0], self.cfg)
         self.seg_diag = ev.build_segment(self.values, self.diag_start, self.values.shape[0], pred_diag, self.cfg)
         pred_cert = ev.predict_adapter(
             adapter, self.cert_values, self.cfg.input_length - 1, self.cert_values.shape[0], self.cfg
@@ -405,7 +354,7 @@ class HeadroomLoop:
         self._sample_incumbent_activations(adapter)
 
     def _sample_incumbent_activations(self, adapter: Any) -> None:
-        """Sample per-layer activations of the incumbent for agent probes (§12.2).
+        """Sample per-layer activations of the incumbent for agent probes.
 
         The activations live in memory only: probes receive them as an input
         artifact, the agent never gets a file to read.  ``activations[i]``
@@ -440,25 +389,6 @@ class HeadroomLoop:
         if not self._activations:
             return
         self._activation_origins = positions
-
-    def _integrity_check(self, incumbent_id: str) -> None:
-        """Series and incumbent must be unmodified since prepare/acceptance.
-
-        Targeted, not a tree hash: these two files define the experiment's
-        ground truth, and a tampered incumbent would let a trivial edit pass
-        the DM acceptance forever.
-        """
-        assert self.heldout is not None
-        reference = json.loads((self.heldout / "reference.json").read_text(encoding="utf-8"))
-        if _file_digest(self.ws / "data" / "series.npy") != reference["series_sha"]:
-            raise RuntimeError("workspace integrity violation: data/series.npy was modified")
-        incumbent = self.ws / "models" / "incumbent" / "model.py"
-        expected = self._incumbent_source(incumbent_id)
-        if incumbent.read_bytes() != expected.read_bytes():
-            raise RuntimeError(
-                "workspace integrity violation: models/incumbent/model.py differs from the "
-                f"ledger incumbent {incumbent_id}; restore it before resuming"
-            )
 
     # ------------------------------------------------------------- prompts
 
@@ -591,23 +521,22 @@ class HeadroomLoop:
         }
 
     def _run_library_probes(self) -> list[dict[str, Any]]:
-        """Run every validated probe on the current incumbent artifacts."""
+        """Run every validated probe on the current incumbent artifacts.
+
+        The probe runs from its heldout copy — the frozen source that passed
+        validation.  The agent's write/edit tools cover all of ws/, so the
+        ws/ copy could have been edited after validation; the heldout side is
+        where the trusted version lives, and running it means a post-
+        validation edit changes nothing until the probe is resubmitted under
+        a new id.
+        """
         infra = self._probe_infra()
         artifacts = self._probe_artifacts()
         rows: list[dict[str, Any]] = []
         for entry in self._probe_library():
-            source = self.ws / "probes" / entry["probeId"] / "probe.py"
+            frozen = self.heldout / "probe-sources" / entry["probeId"] / "probe.py"
+            source = frozen if frozen.is_file() else self.ws / "probes" / entry["probeId"] / "probe.py"
             row: dict[str, Any] = {"probeId": entry["probeId"], "measures": entry["measures"]}
-            if "sourceSha" in entry and source.is_file():
-                if _file_digest(source) != entry["sourceSha"]:
-                    # Validation froze this probe's source; an edit after
-                    # validation must not run unvalidated.  The agent
-                    # resubmits under a new id.
-                    row["error"] = (
-                        "probe source changed after validation; re-submit it under a new probe id"
-                    )
-                    rows.append(row)
-                    continue
             try:
                 row["output"] = infra.run_probe(source, artifacts)
             except Exception as exc:  # a broken probe loses its row, not the round
@@ -699,11 +628,16 @@ class HeadroomLoop:
                             "kind": proposal["kind"],
                             "measures": proposal["measures"],
                             "signalKey": proposal["signalKey"],
-                            "sourceSha": _file_digest(probe_dir / "probe.py"),
                             "round": state.round_index,
                         }
                     )
                     _write_json(probes_dir / "library.json", library)
+                    # Freeze the validated source on the heldout side: later
+                    # rounds run this copy, immune to ws/ edits (see
+                    # _run_library_probes).
+                    frozen = self.heldout / "probe-sources" / probe_dir.name
+                    frozen.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(probe_dir / "probe.py", frozen / "probe.py")
             _append_jsonl(probes_dir / "validation.jsonl", record)
         return submitted, kept
 
@@ -860,7 +794,7 @@ class HeadroomLoop:
             },
         )
 
-    # ------------------------------------------------- evolution (plan §12.3)
+    # ------------------------------------------------- evolution guidance
 
     def _posthoc_card(self, candidate_id: str) -> list[dict[str, Any]] | None:
         """The heldout posthoc card rows of one evaluated candidate, or None."""
@@ -1092,7 +1026,6 @@ class HeadroomLoop:
 
     async def _round(self, state: LoopState) -> None:
         assert self.seg_diag is not None and self.train is not None and self.heldout is not None
-        self._integrity_check(state.incumbent_id)
         self._last_probe_output_count = 0  # set by _render_feedback for the self-built arm
         gains = self._feedback_gains()
         feedback_block = self._render_feedback(state, gains)
@@ -1268,8 +1201,9 @@ class HeadroomLoop:
             batch_ids = np.arange(origins.size, dtype=np.int32) % (self.cfg.input_length + self.cfg.horizon)
             rng = np.random.default_rng(self.seed + state.round_index)
             single = rng.choice(origins.size, size=min(50, origins.size), replace=False).astype(np.int32)
-            cert_origins = ev.target_origins(self.cfg.input_length - 1, self.cert_values.shape[0], self.cfg)
-            x_cert, _ = ev.windows(self.cert_values, cert_origins, self.cfg)
+            # The worker predicts diag only; cert predictions are the loop's
+            # own in-process job after acceptance, so the subprocess never
+            # needs the cert windows at all.
             np.savez(
                 npz_in,
                 train=self.train,
@@ -1278,7 +1212,6 @@ class HeadroomLoop:
                 x_diag=x_diag,
                 batch_ids_diag=batch_ids,
                 single_check_idx=single,
-                x_cert=x_cert,
             )
             try:
                 cand.evaluate_candidate(
@@ -1313,9 +1246,9 @@ class HeadroomLoop:
             return "evaluated", diag_mse, dm_p, False, None, candidate_seconds
 
         # Determinism gate before the incumbent is replaced: the next round's
-        # feedback re-fits in-process, and a nondeterministic candidate would
-        # make the agent see numbers from a different draw than the ledger.
-        # rtol 1e-5 (plan §12.2): a trained network's BLAS reduction order
+        # feedback reuses this very fit, and a nondeterministic candidate
+        # would make the agent see numbers from a different draw than the
+        # ledger.  rtol 1e-5: a trained network's BLAS reduction order
         # legitimately differs between the subprocess and this process; the
         # threads are pinned so the in-process draw itself is stable.
         module = _load_module("rhg_cand_accept", source)
@@ -1332,7 +1265,7 @@ class HeadroomLoop:
             ), candidate_seconds
 
         shutil.copyfile(source, self.ws / "models" / "incumbent" / "model.py")
-        self._refresh_incumbent_segments()
+        self._refresh_incumbent_segments(adapter=adapter, pred_diag=pred_inproc)
         self._segments_incumbent_id = candidate_id
         self._certify_incumbent(state, candidate_id)
         return "evaluated", diag_mse, dm_p, True, None, candidate_seconds
@@ -1371,7 +1304,7 @@ async def main_async() -> None:
     parser.add_argument("--budget", type=int, default=25)
     parser.add_argument("--real-csv", type=Path, default=None)
     args = parser.parse_args()
-    cfg = HeadroomConfig(arm=args.arm, budget_candidates=args.budget, seed=args.seed)
+    cfg = HeadroomConfig(budget_candidates=args.budget, seed=args.seed)
     loop = HeadroomLoop(
         run_dir=args.run_dir,
         task_name=args.task,

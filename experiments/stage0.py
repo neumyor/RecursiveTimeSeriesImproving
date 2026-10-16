@@ -22,7 +22,6 @@ the conservative binomial quantile and the exact numbers are reported.
 
 import argparse
 from dataclasses import dataclass, field
-import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -36,18 +35,11 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 
-def _load_module(name: str, source: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # dataclasses resolves string annotations via sys.modules[cls.__module__],
-    # so the module must be registered before execution.
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import common
 
-ev = _load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
+ev = common.load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
 
 from harnessing_ts.headroom.certify import certify
 from harnessing_ts.headroom.config import HeadroomConfig
@@ -219,13 +211,13 @@ class Cell:
 
 
 def _load_m0(model_id: str) -> Any:
-    return _load_module("m0_template_" + model_id.replace("-", "_"), _REPO_ROOT / "experiments" / "templates" / "m0.py").variant(model_id)
+    return common.load_module("m0_template_" + model_id.replace("-", "_"), _REPO_ROOT / "experiments" / "templates" / "m0.py").variant(model_id)
 
 
 def _load_model(model_id: str) -> Any:
     """The linear family from m0.py, the patchtst family from m0_deep.py."""
     if model_id.startswith("m0-patchtst"):
-        return _load_module(
+        return common.load_module(
             "m0_deep_template_" + model_id.replace("-", "_"),
             _REPO_ROOT / "experiments" / "templates" / "m0_deep.py",
         ).variant(model_id)

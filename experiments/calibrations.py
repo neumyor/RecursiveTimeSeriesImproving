@@ -37,8 +37,6 @@ Usage:
 """
 
 import argparse
-import importlib.util
-import json
 from pathlib import Path
 import sys
 import time
@@ -53,27 +51,13 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 
-def _load_module(name: str, source: Path) -> Any:
-    """Load a repo file that is not an installed package (baselines' pattern).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-    An already-registered module is reused, so loading this file after stage0
-    or the tests (same canonical names) shares one module object.
-    """
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+import common
 
-
-# evaluate.py holds the shared Adapter contract and segment/gap helpers; the
-# experiments/ files are deliberately not on the repo pythonpath.
-ev = _load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
-realdata = _load_module("rhg_realdata", _REPO_ROOT / "experiments" / "realdata.py")
-m0 = _load_module("rhg_m0_template", _REPO_ROOT / "experiments" / "templates" / "m0.py")
+ev = common.load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
+realdata = common.load_module("rhg_realdata", _REPO_ROOT / "experiments" / "realdata.py")
+m0 = common.load_module("rhg_m0_template", _REPO_ROOT / "experiments" / "templates" / "m0.py")
 
 from harnessing_ts.headroom.certify import certify
 from harnessing_ts.headroom.config import HeadroomConfig
@@ -114,25 +98,8 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _json_safe(value: Any) -> Any:
-    """NaN -> None recursively; numpy scalars -> plain Python for strict JSON."""
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, (np.floating, float)):
-        number = float(value)
-        return None if np.isnan(number) else number
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.ndarray):
-        return _json_safe(value.tolist())
-    return value
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_safe(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+_json_safe = common.json_safe
+_write_json = common.write_json
 
 
 # --- shared pieces -------------------------------------------------------------------

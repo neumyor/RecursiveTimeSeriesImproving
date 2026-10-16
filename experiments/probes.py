@@ -149,11 +149,11 @@ than raised, because a rejected probe is a budgeted outcome for the loop.
 
 Execution (``run_probe``)
 -------------------------
-Same subprocess protocol as candidate.py: the source passes
-``check_probe_source`` first, then runs under ``cand.build_env()`` in a fresh
-temp cwd, stdout merged into stderr, ``start_new_session`` + SIGKILL of the
-whole process group on timeout, results via a JSON file (the only channel
-out).  The worker is this module itself, spawned through ``python -c`` with
+Same subprocess protocol as candidate.py — literally the same helper,
+``cand.run_isolated``: the source passes ``check_probe_source`` first, then
+runs under ``cand.build_env()`` in a fresh temp cwd, stdout merged into
+stderr, ``start_new_session`` + SIGKILL of the whole process group on
+timeout, results via a JSON file (the only channel out).  The worker is this module itself, spawned through ``python -c`` with
 the module path as argv so the child's sys.path never sees experiments/
 (whose loop.py/batch.py must not shadow anything); artifacts travel via a
 temp npz (e/r/origins float64/int64, activations float32, meta as JSON).
@@ -170,9 +170,6 @@ import ast
 import importlib.util
 import json
 import math
-import os
-import signal
-import subprocess
 import sys
 import tempfile
 import traceback
@@ -203,7 +200,6 @@ RELATIVE_MARGIN = 0.05
 # in the module docstring).
 _N_CONTROLS = 2
 _TINY = 1e-12  # guards the margin denominator against two zeros
-_STDERR_TAIL_CHARS = 1200
 _PAIRS_PER_FAMILY = 2
 
 # --- fixture design constants (documented in the module docstring) ----------
@@ -460,11 +456,6 @@ def _load_probe(source_path: Path) -> tuple[Any, str]:
 # --- isolated execution (parent side) ---------------------------------------
 
 
-def _tail(output: str) -> str:
-    """Last 1200 chars: enough to carry a traceback, small enough for the loop log."""
-    return output[-_STDERR_TAIL_CHARS:] if output else "(no output captured)"
-
-
 def _write_artifacts_npz(path: Path, artifacts: dict[str, Any], source_path: Path) -> None:
     """Flatten one artifacts dict into the worker's npz contract.
 
@@ -538,40 +529,19 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
         npz_in, json_out = Path(run_dir) / "probe-in.npz", Path(run_dir) / "probe-out.json"
         _write_artifacts_npz(npz_in, artifacts, source_path)
         command = [sys.executable, "-c", _WORKER_BOOTSTRAP, str(_PROBES_SOURCE), str(npz_in), str(json_out)]
-        process = subprocess.Popen(
+        code, tail = cand.run_isolated(
             command,
-            cwd=run_dir,
-            env=cand.build_env(),
-            # Both child streams share one pipe, exactly like evaluate_candidate:
-            # a chatty probe cannot corrupt the result channel (the JSON file).
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            start_new_session=True,
+            Path(run_dir),
+            timeout,
+            lambda message: ProbeTimeout(f"probe {display_id!r} {message}"),
         )
-        try:
-            output, _ = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # start_new_session made the child a session leader, so its pid is
-            # the process group id: one SIGKILL reaps the worker and anything
-            # it spawned (torch threads included).
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # already dead; the reap below still collects it
-            process.communicate()
-            raise ProbeTimeout(
-                f"probe {display_id!r} exceeded the {timeout:g}s budget "
-                f"and its process group was killed"
-            ) from None
-        if process.returncode == _WORKER_CONTRACT_EXIT:
+        if code == _WORKER_CONTRACT_EXIT:
             raise ProbeContractViolation(
-                f"probe {display_id!r} broke the probe contract inside the worker:\n{_tail(output)}"
+                f"probe {display_id!r} broke the probe contract inside the worker:\n{tail}"
             )
-        if process.returncode != 0:
+        if code != 0:
             raise ProbeCrash(
-                f"probe {display_id!r} crashed in the worker (exit code {process.returncode}):\n{_tail(output)}"
+                f"probe {display_id!r} crashed in the worker (exit code {code}):\n{tail}"
             )
         try:
             wrapper = json.loads(json_out.read_text(encoding="utf-8"))
@@ -598,7 +568,7 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
                 f"probe {display_id!r} serialized output is {size} bytes, "
                 f"expected at most {OUTPUT_CAP_BYTES} bytes"
             )
-    return wrapper
+        return wrapper
 
 
 def run_probe(source_path: Path, artifacts: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:

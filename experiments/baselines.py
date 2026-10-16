@@ -18,7 +18,6 @@ evaluate.py's Adapter contract and segment assembly; nothing here reimplements
 segment construction.
 """
 
-import importlib.util
 from pathlib import Path
 import sys
 from dataclasses import replace
@@ -43,30 +42,16 @@ from harnessing_ts.headroom.synthetic import REGISTRY, SyntheticTask
 from harnessing_ts.headroom.timeidx import Splits, segment_origins, windows
 
 
-def _load_module(name: str, source: Path) -> Any:
-    """Load a repo file that is not an installed package (stage0's pattern).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-    An already-registered module is reused, so loading this file twice (or
-    after stage0, which uses the same canonical names) shares one object.
-    """
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, source)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # Register before execution: dataclasses resolve string annotations via
-    # sys.modules[cls.__module__].
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
+import common
 
 # evaluate.py holds the shared Adapter contract and segment/gap helpers.
-ev = _load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
+ev = common.load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
 # The m0 template is the ridge core every rule fix extends; experiments/ is
 # deliberately not on the repo pythonpath, so it is loaded by file path the
 # same way tests/test_experiments_m0.py loads it.
-m0 = _load_module("rhg_m0_template", _REPO_ROOT / "experiments" / "templates" / "m0.py")
+m0 = common.load_module("rhg_m0_template", _REPO_ROOT / "experiments" / "templates" / "m0.py")
 
 RULE_FOURIER = "rule-fourier"
 RULE_LOWFREQ = "rule-lowfreq"

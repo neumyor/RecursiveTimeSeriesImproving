@@ -1,10 +1,10 @@
 """Subprocess worker spawned by ``candidate.evaluate_candidate`` and
-``candidate.smoke_candidate``; never run by hand.
+``candidate.smoke_test``; never run by hand.
 
-Reads npz_in (train, meta, x_diag, x_cert, batch_ids_diag, single_check_idx,
+Reads npz_in (train, meta, x_diag, batch_ids_diag, single_check_idx,
 source_path, and the smoke-only candidate_id — the binding key contract lives
 in candidate.py's docstring), fits the candidate, and writes pred_diag/
-pred_cert/batch_invariant/fit_seconds/predict_seconds to npz_out.  The result
+batch_invariant/fit_seconds/predict_seconds to npz_out.  The result
 file is the only channel out: the parent merges the worker's stdout into
 stderr, so nothing a candidate prints can corrupt the channel.
 
@@ -45,12 +45,6 @@ CONTRACT_EXIT = 3
 # while batch-statistics peeking produces O(1) gaps.
 _SINGLE_ATOL = 1e-9
 
-# cert predictions are gathered in slices of this many rows (memory bound:
-# one call over the full cert segment transiently allocates multi-GB
-# activations for a deep fp64 model; slice boundaries are result-neutral
-# under the row-independence contract).
-_CERT_CHUNK = 4096
-
 
 class _ContractError(Exception):
     """Adapter-contract failure inside the worker; maps to exit code 3."""
@@ -76,7 +70,6 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
     meta = json.loads(data["meta"].item())
     train = np.asarray(data["train"], dtype=np.float64)
     x_diag = np.asarray(data["x_diag"], dtype=np.float64)
-    x_cert = np.asarray(data["x_cert"], dtype=np.float64)
     batch_ids = np.asarray(data["batch_ids_diag"]).astype(np.int64).ravel()
     single_idx = np.asarray(data["single_check_idx"]).astype(np.int64).ravel()
     source_path = Path(data["source_path"].item())
@@ -103,7 +96,8 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
     # One predict_batch call per interleaved batch, predictions reassembled in
     # the original row order.  Intra-batch spacing is the caller's structural
     # anti-peeking guarantee (candidate.py docstring); this loop just honors
-    # the batch ids, whichever rows they select.
+    # the batch ids, whichever rows they select.  cert/test predictions are
+    # the loop's own in-process job — the worker never sees those windows.
     pred_diag = np.empty((x_diag.shape[0], horizon, channels), dtype=np.float64)
     for batch_id in np.unique(batch_ids):
         rows = np.flatnonzero(batch_ids == batch_id)
@@ -117,26 +111,11 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
         if not np.allclose(single[0], pred_diag[i], atol=_SINGLE_ATOL):
             batch_invariant = False
             break
-    # cert has no batch ids by contract: batched in fixed-size slices (the
-    # row-independence contract makes slice boundaries result-neutral; one
-    # call would transiently allocate multi-GB activations for a deep model
-    # over the full cert segment).  Cheaters are flagged on diag before the
-    # loop can trust their cert numbers.
-    if x_cert.shape[0]:
-        pred_cert = np.empty((x_cert.shape[0], horizon, channels), dtype=np.float64)
-        for begin in range(0, x_cert.shape[0], _CERT_CHUNK):
-            block = x_cert[begin : begin + _CERT_CHUNK]
-            pred_cert[begin : begin + block.shape[0]] = _predict(
-                adapter, block, (block.shape[0], horizon, channels)
-            )
-    else:
-        pred_cert = np.empty((0, horizon, channels), dtype=np.float64)
     predict_seconds = time.perf_counter() - start
 
     np.savez(
         npz_out,
         pred_diag=pred_diag,
-        pred_cert=pred_cert,
         batch_invariant=np.array(batch_invariant),
         fit_seconds=np.array(fit_seconds),
         predict_seconds=np.array(predict_seconds),

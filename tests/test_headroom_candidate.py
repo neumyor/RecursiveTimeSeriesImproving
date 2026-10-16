@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -21,8 +23,6 @@ from harnessing_ts.headroom.candidate import (
     build_env,
     check_source,
     evaluate_candidate,
-    load_adapter,
-    smoke_candidate,
     smoke_test,
 )
 from harnessing_ts.headroom.config import HeadroomConfig
@@ -170,18 +170,15 @@ def write_npz_input(
     train_end: int,
     diag_origins: np.ndarray,
     diag_batch_ids: np.ndarray,
-    cert_origins: np.ndarray,
     single_check: np.ndarray,
 ) -> None:
     """Build npz_in exactly as the loop will (candidate.py docstring contract)."""
     x_diag, _ = windows(series, diag_origins, CFG)
-    x_cert, _ = windows(series, cert_origins, CFG)
     np.savez(
         path,
         train=series[:train_end],
         meta=np.array(json.dumps(make_meta())),
         x_diag=x_diag,
-        x_cert=x_cert,
         batch_ids_diag=diag_batch_ids.astype(np.int32),
         single_check_idx=single_check.astype(np.int32),
         source_path=np.array(str(source_path)),
@@ -189,26 +186,22 @@ def write_npz_input(
 
 
 def write_standard_inputs(source: Path, series: np.ndarray, source_text: str, tmp_path: Path) -> tuple[Path, Path, np.ndarray, np.ndarray]:
-    """e2e-shaped inputs: 60 diag rows in 3 interleaved batches, 10 probe rows, 12 cert rows."""
+    """e2e-shaped inputs: 60 diag rows in 3 interleaved batches, 10 single-check rows."""
     source.write_text(source_text, encoding="utf-8")
     diag_origins, batch_ids = interleaved(3, 20, TRAIN_END, L + H)
-    cert_origins = np.arange(1516, 1528, dtype=np.int64)
     single_check = np.arange(0, 60, 6, dtype=np.int64)
     npz_in, npz_out = tmp_path / "in.npz", tmp_path / "out.npz"
-    write_npz_input(npz_in, source, series, TRAIN_END, diag_origins, batch_ids, cert_origins, single_check)
+    write_npz_input(npz_in, source, series, TRAIN_END, diag_origins, batch_ids, single_check)
     return npz_in, npz_out, diag_origins, batch_ids
 
 
 def write_small_inputs(source: Path, series: np.ndarray, source_text: str, tmp_path: Path) -> tuple[Path, Path]:
-    """Minimal inputs for failure-path tests: 6 diag rows, 2 probe rows, no cert rows."""
+    """Minimal inputs for failure-path tests: 6 diag rows, 2 single-check rows."""
     source.write_text(source_text, encoding="utf-8")
     diag_origins, batch_ids = interleaved(2, 3, 50, L + H)
     single_check = np.asarray([0, 3], dtype=np.int64)
     npz_in, npz_out = tmp_path / "in.npz", tmp_path / "out.npz"
-    write_npz_input(
-        npz_in, source, series, 100, diag_origins, batch_ids,
-        np.asarray([], dtype=np.int64), single_check,
-    )
+    write_npz_input(npz_in, source, series, 100, diag_origins, batch_ids, single_check)
     return npz_in, npz_out
 
 
@@ -267,45 +260,8 @@ def test_candidate_id_pattern() -> None:
 
 
 # ---------------------------------------------------------------------------
-# load_adapter (trusted in-process path, tests only) and smoke_test
-# (isolated worker subprocess)
+# smoke_test (isolated worker subprocess)
 # ---------------------------------------------------------------------------
-
-
-def test_load_adapter_happy_path(tmp_path: Path) -> None:
-    source = tmp_path / "model.py"
-    source.write_text(RIDGE_SOURCE, encoding="utf-8")
-    adapter = load_adapter(source, "ridge-e2e")
-    assert adapter.model_id == "ridge-e2e"
-    assert callable(adapter.fit)
-    assert callable(adapter.predict_batch)
-
-
-def test_load_adapter_rejects_contract_breaks(tmp_path: Path) -> None:
-    source = tmp_path / "model.py"
-    source.write_text(RIDGE_SOURCE, encoding="utf-8")
-    with pytest.raises(ContractViolation) as exc_info:
-        load_adapter(source, "not-ridge")
-    message = str(exc_info.value)
-    assert "model_id" in message
-    assert "'not-ridge'" in message and "'ridge-e2e'" in message  # expected vs actual
-    with pytest.raises(ValueError):
-        load_adapter(source, "Bad_ID")
-
-    no_factory = tmp_path / "no_factory.py"
-    no_factory.write_text("import numpy as np\n\n\nclass Adapter:\n    pass\n", encoding="utf-8")
-    with pytest.raises(ContractViolation, match="create_adapter"):
-        load_adapter(no_factory, "no-factory")
-
-    no_predict = tmp_path / "no_predict.py"
-    no_predict.write_text(
-        "import numpy as np\n\n\ndef create_adapter():\n    return A()\n\n\n"
-        "class A:\n    def __init__(self):\n        self.model_id = 'no-predict'\n\n"
-        "    def fit(self, train, meta):\n        pass\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ContractViolation, match="predict_batch"):
-        load_adapter(no_predict, "no-predict")
 
 
 def test_smoke_test_reports_shape_and_no_metrics(tmp_path: Path) -> None:
@@ -323,6 +279,27 @@ def test_smoke_test_reports_shape_and_no_metrics(tmp_path: Path) -> None:
     assert "model_id" in str(bad["error"])
 
 
+def test_smoke_reports_contract_breaks_as_repair_text(tmp_path: Path) -> None:
+    train = ar_series(400)
+
+    no_factory = tmp_path / "no_factory.py"
+    no_factory.write_text("import numpy as np\n\n\nclass Adapter:\n    pass\n", encoding="utf-8")
+    result = smoke_test(no_factory, "no-factory", train, make_meta(), CFG)
+    assert result["ok"] is False
+    assert "create_adapter" in str(result["error"])
+
+    no_predict = tmp_path / "no_predict.py"
+    no_predict.write_text(
+        "import numpy as np\n\n\ndef create_adapter():\n    return A()\n\n\n"
+        "class A:\n    def __init__(self):\n        self.model_id = 'no-predict'\n\n"
+        "    def fit(self, train, meta):\n        pass\n",
+        encoding="utf-8",
+    )
+    result = smoke_test(no_predict, "no-predict", train, make_meta(), CFG)
+    assert result["ok"] is False
+    assert "predict_batch" in str(result["error"])
+
+
 def test_smoke_hang_is_bounded_by_the_subprocess(tmp_path: Path) -> None:
     """A candidate that hangs in fit must never hang the parent: the smoke
     runs under the worker's killpg timeout, so `while True: pass` costs the
@@ -333,19 +310,16 @@ def test_smoke_hang_is_bounded_by_the_subprocess(tmp_path: Path) -> None:
     hung_cfg = HeadroomConfig(input_length=L, horizon=H, candidate_timeout_seconds=5.0)
 
     start = time.perf_counter()
-    with pytest.raises(CandidateTimeout, match="5s"):
-        smoke_candidate(source, "slow-timeout", train, make_meta(), hung_cfg)
+    result = smoke_test(source, "slow-timeout", train, make_meta(), hung_cfg)
     elapsed = time.perf_counter() - start
     # If killpg failed, communicate() would block on the busy-waiting child
     # forever; finishing near the 5s smoke budget is the proof the whole
     # process group died and no leftover process is still spinning.
     assert elapsed < 8.0
-
-    # The public wrapper records the hang as repair text, distinctly from a
-    # crash, so the loop's smoke path can never raise into the run.
-    result = smoke_test(source, "slow-timeout", train, make_meta(), hung_cfg)
     assert result["ok"] is False
     assert result["predict_shape"] is None
+    # The hang is recorded as repair text, distinctly from a crash, so the
+    # loop's smoke path can never raise into the run.
     assert "hung" in str(result["error"])
 
 
@@ -371,17 +345,20 @@ def test_evaluate_end_to_end_ridge(tmp_path: Path) -> None:
 
     with np.load(npz_out) as out:
         pred_diag = out["pred_diag"]
-        pred_cert = out["pred_cert"]
         assert pred_diag.shape == (60, H, C)
-        assert pred_cert.shape == (12, H, C)
-        assert pred_diag.dtype == np.float64 and pred_cert.dtype == np.float64
+        assert pred_diag.dtype == np.float64
         assert bool(out["batch_invariant"]) is True
         assert float(out["fit_seconds"]) >= 0.0
         assert float(out["predict_seconds"]) >= 0.0
     # Sane predictions, checked the cheap way: the model fit on train must
     # beat the zero predictor on train windows, and the predictions that came
     # back through the subprocess must beat it on the diag windows too.
-    adapter = load_adapter(source, "ridge-e2e")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ridge_e2e_test", source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    adapter = module.create_adapter()
     adapter.fit(series[:TRAIN_END], make_meta())
     train_x, train_y = windows(series[:TRAIN_END], np.arange(700, 796, dtype=np.int64), CFG)
     train_pred = np.asarray(adapter.predict_batch(train_x))
@@ -396,7 +373,7 @@ def test_timeout_kills_process_group_quickly(tmp_path: Path) -> None:
     npz_in, npz_out = write_small_inputs(source, series, SLOW_SOURCE, tmp_path)
 
     start = time.perf_counter()
-    with pytest.raises(CandidateTimeout, match="3s evaluation budget"):
+    with pytest.raises(CandidateTimeout, match="exceeded the 3s budget"):
         evaluate_candidate(source, "slow-timeout", npz_in, npz_out, CFG, timeout_seconds=3.0)
     elapsed = time.perf_counter() - start
     # If killpg failed, communicate() would block until the busy-waiting child

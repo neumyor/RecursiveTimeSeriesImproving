@@ -26,7 +26,6 @@ def _load_loop():
 
 def _small_cfg(loop_module: Any, evolution: bool = False):
     return loop_module.HeadroomConfig(
-        arm="fixed",
         input_length=48,
         horizon=8,
         lag_segments=((0, 7), (8, 15), (16, 31)),
@@ -400,6 +399,65 @@ def test_self_built_arm_validates_and_runs_probes(tmp_path: Path) -> None:
     assert rounds[0]["probesSeconds"] > 0
     # The candidate side of the round is untouched by probe writing.
     assert all(row["status"] == "evaluated" for row in rounds)
+
+
+def test_validated_probe_runs_from_the_heldout_frozen_copy(tmp_path: Path) -> None:
+    """The library runs the source that passed validation, not whatever the
+    agent's write tools later left in ws/probes/<id>/probe.py."""
+    loop_module = _load_loop()
+    script_pos = {"pos": 0}
+
+    def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
+        class _Runner(ScriptedRunner):
+            async def send(self, prompt: str) -> list[Any]:
+                pos = script_pos["pos"]
+                script_pos["pos"] += 1
+                model_source, proposal = _better_candidate(ws, pos)
+                candidate_dir = ws / "models" / "candidates" / proposal["candidateId"]
+                candidate_dir.mkdir(parents=True, exist_ok=True)
+                (candidate_dir / "model.py").write_text(model_source, encoding="utf-8")
+                (candidate_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
+                if pos == 0:
+                    pdir = ws / "probes" / "p-ac24"
+                    pdir.mkdir(parents=True, exist_ok=True)
+                    (pdir / "probe.py").write_text(
+                        _AC24_PROBE.replace("__PID__", "p-ac24"), encoding="utf-8"
+                    )
+                    (pdir / "probe_proposal.json").write_text(
+                        json.dumps(_probe_proposal("p-ac24", "higher")), encoding="utf-8"
+                    )
+                return []
+
+        return _Runner()
+
+    run_dir = tmp_path / "run-freeze"
+    loop = loop_module.HeadroomLoop(
+        run_dir=run_dir,
+        task_name="lgssm_xchannel",
+        arm="self-built",
+        seed=0,
+        cfg=_small_cfg(loop_module),
+        sizes=SMALL_SIZES,
+        runner_factory=factory,
+        m0_template="m0.py",
+    )
+    asyncio.run(loop.run())
+
+    ws_source = run_dir / "ws" / "probes" / "p-ac24" / "probe.py"
+    frozen = Path(
+        json.loads((run_dir / "heldout.json").read_text(encoding="utf-8"))["path"]
+    ) / "probe-sources" / "p-ac24" / "probe.py"
+    assert frozen.is_file()
+    # Tamper with the workspace copy after validation.
+    ws_source.write_text(
+        (run_dir / "ws" / "probes" / "p-ac24" / "probe.py").read_text(encoding="utf-8").replace(
+            "ac24", "tampered"
+        ),
+        encoding="utf-8",
+    )
+    artifacts = loop._probe_artifacts()
+    output = loop._probe_infra().run_probe(frozen, artifacts)
+    assert "ac24" in output  # the frozen source, not the tampered ws copy
 
 
 def test_self_built_samples_activations_with_alignment(tmp_path: Path) -> None:

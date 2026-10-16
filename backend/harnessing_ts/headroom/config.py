@@ -12,14 +12,12 @@ from pathlib import Path
 from typing import Any
 
 
-# Arms after the 2026-10-16 revision: the fixed card (backend-built tools) vs
-# self-built probes (agent-built tools) is the core contrast; bj is retired.
+# Feedback arms; the run's arm is a loop argument, not a config field.
 ARM_VALUES = ("scalar", "fixed", "self-built", "placebo")
 
 _FIELD_ALIASES: dict[str, str] = {
     "input_length": "inputLength",
     "horizon": "horizon",
-    "arm": "arm",
     "budget_candidates": "budgetCandidates",
     "candidate_timeout_seconds": "candidateTimeoutSeconds",
     "acceptance_alpha": "acceptanceAlpha",
@@ -49,9 +47,8 @@ class HeadroomConfig:
 
     input_length: int = 96
     horizon: int = 24
-    arm: str = "fixed"
-    # Residual-signature evolution guidance (plan §12.3): identical across the
-    # feedback arms so the arm contrast stays clean; off only in an ablation.
+    # Diversity judge (evolution guidance): identical in every arm so the arm
+    # contrast stays clean; off only in the evolution=false ablation.
     evolution: bool = True
     budget_candidates: int = 25
     candidate_timeout_seconds: float = 600.0
@@ -82,80 +79,31 @@ class HeadroomConfig:
         return self.max_lag + self.fir_len_cap
 
     def validate(self) -> list[str]:
+        """Only the rules whose violation would silently corrupt results.
+
+        Feature depths beyond the burn-in would make numpy negative indexing
+        wrap around to future rows; overlapping lag segments would double-count
+        features; split ratios that leave no test segment break the layout.
+        """
         errors: list[str] = []
-        if self.input_length <= 0:
-            errors.append("inputLength must be positive")
-        if self.lag_segments and self.input_length > 0 and self.burn_in < self.input_length:
-            # Standalone cert/test arrays index windows from the segment start,
-            # so the burn-in must cover at least the full lookback.
-            errors.append(
-                f"burnIn (maxLag + firLenCap = {self.burn_in}) must be >= inputLength ({self.input_length})"
-            )
-        if self.horizon <= 0:
-            errors.append("horizon must be positive")
-        if self.lag_segments:
-            # Feature depths must stay inside the burn-in, or numpy negative
-            # indexing would silently wrap around to future rows.
-            beyond_depth = self.input_length + 16 * (self.beyond_l_lags - 1)
-            if self.burn_in < beyond_depth:
-                errors.append(
-                    f"burnIn ({self.burn_in}) must be >= the beyond-l feature depth ({beyond_depth})"
-                )
-            horizon_depth = self.horizon + self.horizon_realized_lags - 1
-            if self.burn_in < horizon_depth:
-                errors.append(
-                    f"burnIn ({self.burn_in}) must be >= the horizon feature depth ({horizon_depth})"
-                )
-            band_lag = self.band_period_range[1] // 4
-            if band_lag > self.max_lag:
-                errors.append(
-                    f"band period range implies a band lag of {band_lag} > maxLag ({self.max_lag})"
-                )
-        if self.arm not in ARM_VALUES:
-            errors.append(f"arm must be one of {ARM_VALUES}")
-        if not 1 <= self.budget_candidates <= 500:
-            errors.append("budgetCandidates must be in [1, 500]")
-        if self.candidate_timeout_seconds <= 0:
-            errors.append("candidateTimeoutSeconds must be positive")
-        for name, value in (("acceptanceAlpha", self.acceptance_alpha), ("certifyAlpha", self.certify_alpha)):
-            if not 0.0 < value < 1.0:
-                errors.append(f"{name} must be in (0, 1)")
-        if self.certify_epsilon <= 0:
-            errors.append("certifyEpsilon must be positive")
-        if not self.lag_segments:
-            errors.append("lagSegments must not be empty")
-        else:
-            previous_end = -1
-            for k1, k2 in self.lag_segments:
-                if not 0 <= k1 <= k2:
-                    errors.append(f"lagSegments entries must satisfy 0 <= k1 <= k2, got ({k1}, {k2})")
-                if k1 <= previous_end:
-                    errors.append("lagSegments must be sorted and non-overlapping")
-                previous_end = k2
-        if not 1 <= self.horizon_realized_lags <= 16:
-            errors.append("horizonRealizedLags must be in [1, 16]")
-        if not 1 <= self.max_period_peaks <= 10:
-            errors.append("maxPeriodPeaks must be in [1, 10]")
-        lo, hi = self.band_period_range
-        if not 2 <= lo < hi <= 5000:
-            errors.append("bandPeriodRange must satisfy 2 <= lo < hi <= 5000")
-        if self.fir_len_cap < 16:
-            errors.append("firLenCap must be >= 16")
-        if not 1 <= self.beyond_l_lags <= 64:
-            errors.append("beyondLLags must be in [1, 64]")
-        if not 1 <= self.channel_max <= 64:
-            errors.append("channelMax must be in [1, 64]")
-        if not self.ridge_alphas or any(alpha <= 0 for alpha in self.ridge_alphas):
-            errors.append("ridgeAlphas must be a non-empty list of positive values")
-        for name, value in (("trainRatio", self.train_ratio), ("diagRatio", self.diag_ratio), ("certRatio", self.cert_ratio)):
-            if not 0.0 < value < 1.0:
-                errors.append(f"{name} must be in (0, 1)")
+        depths = {
+            "inputLength": self.input_length,
+            "beyond-l feature depth": self.input_length + 16 * (self.beyond_l_lags - 1),
+            "horizon feature depth": self.horizon + self.horizon_realized_lags - 1,
+        }
+        for name, depth in depths.items():
+            if self.burn_in < depth:
+                errors.append(f"burnIn (maxLag + firLenCap = {self.burn_in}) must be >= the {name} ({depth})")
+        band_lag = self.band_period_range[1] // 4
+        if band_lag > self.max_lag:
+            errors.append(f"band period range implies a band lag of {band_lag} > maxLag ({self.max_lag})")
+        previous_end = -1
+        for k1, k2 in self.lag_segments:
+            if not previous_end < k1 <= k2:
+                errors.append(f"lagSegments must be sorted, non-overlapping, k1 <= k2; got ({k1}, {k2})")
+            previous_end = k2
         if self.train_ratio + self.diag_ratio + self.cert_ratio >= 1.0:
             errors.append("trainRatio + diagRatio + certRatio must be < 1 (the rest is test)")
-        if not 0.0 < self.diag_a_ratio < 1.0:
-            errors.append("diagARatio must be in (0, 1)")
-        if self.seed < 0:
-            errors.append("seed must be >= 0")
         return errors
 
     def to_dict(self) -> dict[str, Any]:

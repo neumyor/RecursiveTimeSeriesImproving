@@ -24,7 +24,6 @@ Subprocess npz contract — ``npz_in``, written by the loop:
     train             [T, C]     float64  training series (train segment only)
     meta              0-d str    JSON dict {"L", "H", "C", "seed", ...}
     x_diag            [B, L, C]  float64  diag input windows, interleaved order
-    x_cert            [B2, L, C] float64  cert input windows (predicted as one batch)
     batch_ids_diag    [B] int32  interleaved batch id of each x_diag row
     single_check_idx  [S] int32  x_diag row indices also predicted one-by-one
     source_path       0-d str    absolute path of the candidate model.py
@@ -33,8 +32,8 @@ Subprocess npz contract — ``npz_in``, written by the loop:
 No targets are ever written into npz_in; the loop keeps them and computes
 every metric itself.  ``npz_out``, written by the worker:
 
-    pred_diag [B, H, C] float64, pred_cert [B2, H, C] float64,
-    batch_invariant (bool), fit_seconds and predict_seconds (float64).
+    pred_diag [B, H, C] float64, batch_invariant (bool),
+    fit_seconds and predict_seconds (float64).
 
 Interleaved batching — the loop constructs it, the worker honors it: x_diag
 rows are ordered so any two rows sharing a batch id have origins at least
@@ -57,7 +56,6 @@ run.
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 import os
 import re
@@ -66,7 +64,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -106,7 +104,8 @@ _SMOKE_WINDOWS = 4
 # finish on four windows within a minute is a hang, not a slow model.
 _SMOKE_TIMEOUT_CAP = 60.0
 _STDERR_TAIL_CHARS = 1200
-_RESULT_KEYS = ("pred_diag", "pred_cert", "batch_invariant", "fit_seconds", "predict_seconds")
+_RESULT_KEYS = ("pred_diag", "batch_invariant", "fit_seconds", "predict_seconds")
+
 
 
 class CandidateError(RuntimeError):
@@ -222,78 +221,29 @@ def build_env() -> dict[str, str]:
     return env
 
 
-def load_adapter(source_path: Path, candidate_id: str) -> Any:
-    """Import the candidate module and return its adapter (trusted path).
-
-    This executes candidate top-level code in the parent process, so the
-    unattended pipeline never calls it anymore — the smoke and the evaluation
-    both run inside the killpg-protected worker.  It stays for tests and
-    interactive debugging, where in-process failure with a precise message is
-    the point; only call it on sources that passed ``check_source``.
-    """
-    _check_candidate_id(candidate_id)
-    module_name = f"_headroom_candidate_{candidate_id.replace('-', '_')}"
-    spec = importlib.util.spec_from_file_location(module_name, source_path)
-    if spec is None or spec.loader is None:
-        raise ContractViolation(f"cannot import candidate module from {source_path}")
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec: dataclass and pickle-adjacent code inside the
-    # candidate resolves modules by name.
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        raise ContractViolation(
-            f"importing candidate {candidate_id!r} from {source_path} raised {type(exc).__name__}: {exc}"
-        ) from exc
-    factory = getattr(module, "create_adapter", None)
-    if not callable(factory):
-        raise ContractViolation(
-            f"candidate {candidate_id!r} must define a top-level create_adapter() function, "
-            f"found {type(factory).__name__ if factory is not None else 'nothing'}"
-        )
-    try:
-        adapter = factory()
-    except Exception as exc:
-        raise ContractViolation(
-            f"create_adapter() of candidate {candidate_id!r} raised {type(exc).__name__}: {exc}"
-        ) from exc
-    model_id = getattr(adapter, "model_id", None)
-    if model_id != candidate_id:
-        raise ContractViolation(
-            f"candidate {candidate_id!r}: adapter model_id must equal the candidate id, "
-            f"expected {candidate_id!r}, got {model_id!r}"
-        )
-    for method in ("fit", "predict_batch"):
-        if not callable(getattr(adapter, method, None)):
-            raise ContractViolation(
-                f"candidate {candidate_id!r}: adapter must expose a callable {method}(), "
-                f"found {type(adapter).__name__} without one"
-            )
-    return adapter
-
-
-def smoke_candidate(
+def smoke_test(
     source_path: Path,
     candidate_id: str,
     train: np.ndarray,
     meta: dict[str, Any],
     cfg: HeadroomConfig,
 ) -> dict[str, Any]:
-    """Smoke-check one candidate inside the isolated worker subprocess.
+    """Fit + predict on a train slice in the isolated worker; shape and error text only.
 
-    Same worker, same npz protocol, same killpg timeout as the real
-    evaluation — only the inputs are minimal: the first ``_SMOKE_TRAIN_CAP``
-    train rows and ``_SMOKE_WINDOWS`` diag windows cut from TRAIN ONLY (diag
-    data does not exist yet at smoke time, and the smoke must never carry a
-    performance signal back).  The budget is
-    ``min(_SMOKE_TIMEOUT_CAP, cfg.candidate_timeout_seconds)``.
-
-    Outcome mapping: success -> ``ok=True`` with the observed predict shape;
-    crash/contract/cheat -> ``ok=False`` with the classified error text for
-    the repair turn; timeout -> the ``CandidateTimeout`` propagates unchanged
-    so the caller can record "hung in smoke" — a hang needs different repair
-    advice than a crash (infinite loop, not a raised exception).
+    This is the repair-turn instrument: the loop feeds ``error`` back to the
+    agent verbatim, so it must carry no performance signal (no MSE, no
+    residual statistics) — the agent must not be able to tune on it.  The
+    inputs are minimal — the first ``_SMOKE_TRAIN_CAP`` train rows and
+    ``_SMOKE_WINDOWS`` diag windows cut from TRAIN ONLY (diag data does not
+    exist yet at smoke time, and the smoke must never carry a performance
+    signal back) — and the budget is ``min(_SMOKE_TIMEOUT_CAP,
+    cfg.candidate_timeout_seconds)``.  Any candidate-side failure is captured
+    as text instead of raised, because a failing smoke run is an expected,
+    budgeted outcome, not a harness bug.  That includes a hang: the smoke runs
+    under the worker's killpg timeout, so ``while True: pass`` in fit costs
+    the smoke budget and comes back as "hung in smoke" text — repair advice
+    pointing at infinite loops, distinct from a crash's traceback — never as a
+    parent-process stall.  Only a misconfigured harness raises (ValueError).
     """
     train = np.asarray(train, dtype=np.float64)
     if train.ndim != 2:
@@ -307,10 +257,9 @@ def smoke_candidate(
             f"smoke_test needs at least input_length + horizon + {_SMOKE_WINDOWS - 1} = "
             f"{cfg.input_length + cfg.horizon + _SMOKE_WINDOWS - 1} train rows, got {seg.shape[0]}"
         )
-    result: dict[str, Any] = {"ok": False, "error": None, "predict_shape": None}
     origins = np.arange(first_origin, seg.shape[0] - cfg.horizon, dtype=np.int64)
     x_diag, _ = windows(seg, origins, cfg)
-    timeout_seconds = min(_SMOKE_TIMEOUT_CAP, cfg.candidate_timeout_seconds)
+    result: dict[str, Any] = {"ok": False, "error": None, "predict_shape": None}
     with tempfile.TemporaryDirectory(prefix="headroom-smoke-") as run_dir:
         npz_in, npz_out = Path(run_dir) / "smoke-in.npz", Path(run_dir) / "smoke-out.npz"
         np.savez(
@@ -318,27 +267,31 @@ def smoke_candidate(
             train=seg,
             meta=np.array(json.dumps(meta)),
             x_diag=x_diag,
-            x_cert=np.zeros((0, cfg.input_length, train.shape[1]), dtype=np.float64),
-            # One batch and no single-row probe: the smoke checks shape and
-            # error text only; the anti-cheat probes run in the real
-            # evaluation, on the real diag windows.
             batch_ids_diag=np.zeros(x_diag.shape[0], dtype=np.int32),
             single_check_idx=np.zeros(0, dtype=np.int32),
             source_path=np.array(str(Path(source_path).resolve())),
             # Smoke-only key: holds the adapter to the model_id contract
             # inside the worker (the evaluation npz has no id to check
-            # against, exactly as before the smoke moved into the worker).
+            # against).
             candidate_id=np.array(candidate_id),
         )
         try:
             evaluate_candidate(
-                source_path, candidate_id, npz_in, npz_out, cfg, timeout_seconds=timeout_seconds
+                source_path, candidate_id, npz_in, npz_out, cfg,
+                timeout_seconds=min(_SMOKE_TIMEOUT_CAP, cfg.candidate_timeout_seconds),
             )
         except (CandidateCrash, ContractViolation, CheatDetected) as exc:
             result["error"] = str(exc)
             return result
-        # CandidateTimeout is deliberately NOT caught: a hang is the one
-        # outcome the caller must be able to tell apart from a crash.
+        except CandidateTimeout as exc:
+            # A hang is qualitatively different from a crash — no exception, no
+            # output, no progress — so the error string says so and points the
+            # repair turn at infinite loops instead of raised errors.
+            result["error"] = (
+                f"hung in smoke: {exc} (no crash and no output; look for an "
+                f"infinite loop in fit/predict_batch rather than a raised exception)"
+            )
+            return result
         with np.load(npz_out, allow_pickle=False) as out:
             # The worker's predictions are read for their shape only — the
             # smoke never surfaces numbers the agent could tune on.
@@ -347,38 +300,43 @@ def smoke_candidate(
     return result
 
 
-def smoke_test(
-    source_path: Path,
-    candidate_id: str,
-    train: np.ndarray,
-    meta: dict[str, Any],
-    cfg: HeadroomConfig,
-) -> dict[str, Any]:
-    """Fit + predict on a train slice in the isolated worker; shape and error text only.
+def run_isolated(
+    command: list[str],
+    run_dir: Path,
+    timeout_seconds: float,
+    timeout_error: Callable[[str], CandidateError],
+) -> tuple[int, str]:
+    """Run ``command`` in a fresh cwd under ``build_env()``; return (exit code, output tail).
 
-    This is the repair-turn instrument: the loop feeds ``error`` back to the
-    agent verbatim, so it must carry no performance signal (no MSE, no
-    residual statistics) — the agent must not be able to tune on it.  Any
-    candidate-side failure is captured as text instead of raised, because a
-    failing smoke run is an expected, budgeted outcome, not a harness bug.
-    That includes a hang: the smoke runs under the worker's killpg timeout,
-    so ``while True: pass`` in fit costs the smoke budget and comes back as
-    text, never as a parent-process stall.
+    The shared isolation pattern for every untrusted-subprocess run (candidate
+    and probe workers alike): both child streams share one pipe (a chatty
+    child cannot corrupt any channel — the result file is the only channel
+    out), and ``start_new_session`` makes the child a session leader whose pid
+    is the process group id, so one SIGKILL reaps the worker and anything it
+    spawned.  SIGKILL, not SIGTERM — code wedged in native code must die, not
+    negotiate.  On timeout, ``timeout_error`` receives the budget for the
+    message and is raised.
     """
+    process = subprocess.Popen(
+        command,
+        cwd=run_dir,
+        env=build_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
     try:
-        return smoke_candidate(source_path, candidate_id, train, meta, cfg)
-    except CandidateTimeout as exc:
-        # A hang is qualitatively different from a crash — no exception, no
-        # output, no progress — so the error string says so and points the
-        # repair turn at infinite loops instead of raised errors.
-        return {
-            "ok": False,
-            "error": (
-                f"hung in smoke: {exc} (no crash and no output; look for an "
-                f"infinite loop in fit/predict_batch rather than a raised exception)"
-            ),
-            "predict_shape": None,
-        }
+        output, _ = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already dead; the reap below still collects it
+        process.communicate()
+        raise timeout_error(f"exceeded the {timeout_seconds:g}s budget and its process group was killed") from None
+    return process.returncode, _tail(output)
 
 
 def evaluate_candidate(
@@ -418,44 +376,19 @@ def evaluate_candidate(
         str(npz_in), str(npz_out),
     ]
     with tempfile.TemporaryDirectory(prefix="headroom-candidate-") as run_dir:
-        # The child's two output streams share one pipe (stderr=STDOUT merges
-        # them; the STDOUT constant is only valid as the stderr argument, not
-        # for stdout): a chatty candidate cannot corrupt any channel, because
-        # the only channel out is the result file, and everything it prints
-        # lands in one captured pipe for the error tails below.
-        process = subprocess.Popen(
+        code, tail = run_isolated(
             command,
-            cwd=run_dir,
-            env=build_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            start_new_session=True,
+            Path(run_dir),
+            timeout_seconds,
+            lambda message: CandidateTimeout(f"candidate {candidate_id!r} {message}"),
         )
-        try:
-            output, _ = process.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            # start_new_session made the child a session leader, so its pid
-            # is the process group id: one killpg reaps the worker and
-            # anything it spawned.  SIGKILL, not SIGTERM — a candidate wedged
-            # in native code must die, not negotiate.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # already dead; the reap below still collects it
-            process.communicate()
-            raise CandidateTimeout(
-                f"candidate {candidate_id!r} exceeded the {timeout_seconds:g}s evaluation budget "
-                f"and its process group was killed"
-            ) from None
-    if process.returncode == WORKER_CONTRACT_EXIT:
+    if code == WORKER_CONTRACT_EXIT:
         raise ContractViolation(
-            f"candidate {candidate_id!r} broke the adapter contract inside the worker:\n{_tail(output)}"
+            f"candidate {candidate_id!r} broke the adapter contract inside the worker:\n{tail}"
         )
-    if process.returncode != 0:
+    if code != 0:
         raise CandidateCrash(
-            f"candidate {candidate_id!r} crashed in the worker (exit code {process.returncode}):\n{_tail(output)}"
+            f"candidate {candidate_id!r} crashed in the worker (exit code {code}):\n{tail}"
         )
     _validate_result(npz_out, npz_in, cfg, candidate_id)
 
@@ -490,7 +423,6 @@ def _validate_result(npz_out: Path, npz_in: Path, cfg: HeadroomConfig, candidate
             channels = int(source["train"].shape[1])
             expected = {
                 "pred_diag": (int(source["x_diag"].shape[0]), cfg.horizon, channels),
-                "pred_cert": (int(source["x_cert"].shape[0]), cfg.horizon, channels),
             }
         missing = sorted((set(_RESULT_KEYS) | set(expected)) - set(result.files))
         if missing:

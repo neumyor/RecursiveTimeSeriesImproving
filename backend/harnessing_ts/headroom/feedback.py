@@ -8,7 +8,7 @@ attributable to that block; see docs/headroom-contracts.md §9 and the
 coding plan §2.5/§3.2 (arm-neutral wording: no dataset or domain
 vocabulary, no status language such as "certified").
 
-Post-revision arms (plan §12): ``fixed``/``placebo`` render the backend
+``fixed``/``placebo`` render the backend
 defect card (placebo = the same card with coordinate rows permuted);
 ``self-built`` renders the outputs of the agent's OWN validated probes —
 the backend never injects diagnostic content into that arm, it only runs

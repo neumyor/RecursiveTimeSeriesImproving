@@ -42,7 +42,6 @@ SMALL_SIZES = {"train": 1500, "diag": 1100, "cert": 1300, "test": 1800}
 
 def _small_cfg(budget: int = 3) -> Any:
     return loop.HeadroomConfig(
-        arm="fixed",
         input_length=48,
         horizon=8,
         lag_segments=((0, 7), (8, 15), (16, 31)),
