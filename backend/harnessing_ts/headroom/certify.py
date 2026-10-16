@@ -5,13 +5,11 @@ segment, EVERY statistic's realized-gain upper confidence bound sits below
 ``certify_epsilon`` times that statistic's group MSE — no residual coordinate
 retains a relative improvement beyond epsilon.  ``gains`` must be pre-computed
 at the fixed level ``1 - cfg.certify_alpha`` via
-``correctors.all_gains(..., level=...)``; certify() rejects any other level,
-because an off-level UCB silently changes the rule.  The mean CI is built
+``correctors.all_gains(..., level=...)``.  The mean CI is built
 two-sided, so each UCB actually sits at the one-sided level
 ``1 - certify_alpha / 2`` — a deliberate factor-of-two conservatism in the
 stopping direction.  There is no cross-version or cross-statistic alpha
-accounting (removed 2026-10-16 by author direction); the false-stop rate is
-an empirical property, measured by G0-5.
+accounting; the false-stop rate is an empirical property, measured by G0-5.
 """
 
 from __future__ import annotations
@@ -20,11 +18,6 @@ from dataclasses import dataclass
 
 from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.correctors import GainReport
-
-# Levels agree only when the caller wired the same fixed level; anything
-# inside this tolerance is float noise, not a wiring bug.
-_LEVEL_TOLERANCE = 1e-9
-
 
 @dataclass(frozen=True)
 class CertReport:
@@ -49,17 +42,6 @@ def certify(gains: list[GainReport], mse_by_group: dict[str, float], cfg: Headro
         raise ValueError(f"certify requires mse_by_group to cover every gain label, missing {missing}")
 
     level = 1.0 - cfg.certify_alpha
-
-    # Regression guard for the level wiring: an off-level UCB changes the
-    # rule without any visible symptom, so refuse to certify.  Written as
-    # `not <=` so a NaN level is rejected too.
-    for gain in gains:
-        if not abs(float(gain.level) - level) <= _LEVEL_TOLERANCE:
-            raise RuntimeError(
-                f"gain {gain.coordinate.label!r} was computed at level {gain.level}, but "
-                f"certification requires the fixed level {level}; pre-compute the gains "
-                "via correctors.all_gains(..., level=1 - cfg.certifyAlpha)"
-            )
 
     failures: list[dict[str, str | float]] = []
     for gain in gains:

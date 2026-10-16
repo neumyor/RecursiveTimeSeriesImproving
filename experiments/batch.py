@@ -154,11 +154,9 @@ def load_spec(path: Path) -> Spec:
     if len(set(arms)) != len(arms) or len(set(seeds)) != len(seeds):
         raise BatchError(f"spec {path}: duplicate arms or seeds would collide in run dirs")
     if raw.get("schemaVersion", 1) >= 2:
-        # Spec v2 froze a precondition: its m0-dependent G0 gates must be
-        # recalibrated with the deep incumbent before any v2 run, and the
-        # alpha-ledger removal (revision 2026-10-16b) requires the gates to be
-        # measured under the new fixed-level stop rule.  Refuse to launch
-        # until both frozen v3 artifacts exist.
+        # Spec v2 froze a precondition: its G0 gates must be measured with
+        # the deep incumbent under the fixed-level stop rule before any v2
+        # run.  Refuse to launch until both frozen artifacts exist.
         missing = [
             str(artifact)
             for artifact in (

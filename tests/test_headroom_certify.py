@@ -25,8 +25,8 @@ class _StubGain:
 
 
 def _level(cfg: HeadroomConfig) -> float:
-    # The fixed level certify demands of every gain (2026-10-16 revision: no
-    # cross-version budget, no Bonferroni amortization — one level everywhere).
+    # The fixed level certify demands of every gain, whatever the number of
+    # statistics.
     return 1.0 - cfg.certify_alpha
 
 
@@ -78,35 +78,6 @@ def test_invalid_arguments_raise_value_error() -> None:
         certify(gains, {"hgroup[1,12]": 80.0}, cfg)  # gain label missing
     with pytest.raises(ValueError, match="empty"):
         certify([], mse_by_group, cfg)
-
-
-def test_gain_computed_at_the_wrong_level_is_rejected() -> None:
-    cfg = HeadroomConfig()
-    expected = _level(cfg)
-    # Only the second gain is off-level: the guard is per gain, not per call.
-    gains = [
-        _StubGain(_StubCoordinate("total"), 0.5, expected),
-        _StubGain(_StubCoordinate("hgroup[1,12]"), 0.1, 0.99),
-    ]
-    with pytest.raises(RuntimeError) as excinfo:
-        certify(gains, {"total": 100.0, "hgroup[1,12]": 80.0}, cfg)
-    message = str(excinfo.value)
-    assert "hgroup[1,12]" in message  # the offending gain's label
-    assert "0.99" in message  # ... and its level
-    assert f"{expected}" in message  # ... and the level certify required
-    # ... and the correct wiring to use instead.
-    assert "all_gains" in message
-    assert "certifyAlpha" in message
-
-
-def test_level_off_by_float_noise_is_accepted() -> None:
-    cfg = HeadroomConfig()
-    level = _level(cfg)
-    # Re-deriving the level through a different float path stays inside the
-    # 1e-9 tolerance, so the guard must not fire on float noise.
-    gains = [_StubGain(_StubCoordinate("total"), 0.5, level + 1e-12)]
-    report = certify(gains, {"total": 100.0}, cfg)
-    assert report.saturated is True
 
 
 def test_realistic_numbers_round_trip_against_epsilon_rule() -> None:

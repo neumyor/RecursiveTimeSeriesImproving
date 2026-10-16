@@ -391,5 +391,5 @@ def test_card_level_is_stricter_than_95pct() -> None:
     peaks = [24, 168]
     card = card_level(cfg, peaks, N_CHANNELS)
     assert 0.95 < card < 1.0
-    # (The certification level is the plain fixed 1 - certifyAlpha since the
-    # 2026-10-16 alpha-ledger removal; only the card keeps a Bonferroni level.)
+    # (The certification level is the plain fixed 1 - certifyAlpha; only the
+    # card keeps a Bonferroni level.)

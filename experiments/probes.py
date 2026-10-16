@@ -217,12 +217,9 @@ _RESIDUAL_STRIDE = 7
 # rationale, the child-seed slots its pairs/controls draw from and the gate
 # evidence that admitted it.  experiments/fixture_gen.py is the
 # development-time pipeline that vets and appends entries; this module only
-# ever READS the registry.  The four "origin": "seed" entries were migrated
-# verbatim from the hand-designed constants this module used to carry, at
-# their historical seed slots, so every fixture — and therefore every
-# validation record ever produced — is bitwise unchanged; generated families
-# append fresh slots (SeedSequence children are keyed by spawn position, so
-# appending never disturbs the earlier slots).
+# ever READS the registry.  Families occupy fixed seed slots in registry
+# order (SeedSequence children are keyed by spawn position), so appending a
+# family never disturbs the draws of the families before it.
 _REGISTRY_PATH = Path(__file__).resolve().parent / "specs" / "probe-fixture-registry.json"
 _REGISTRY: dict[str, Any] | None = None
 

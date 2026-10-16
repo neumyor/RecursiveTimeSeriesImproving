@@ -10,7 +10,7 @@ HAC), and epsilon-saturation certification run OUTSIDE the agent; the cert
 segment and every certification number live in a heldout directory the agent
 never sees.  Checkpointing is per-round: rounds.jsonl is the resume ledger.
 
-Post-revision additions (plan §12, 2026-10-16):
+Beyond the candidate loop itself:
 - the default incumbent is the deep PatchTST-lite template (m0), so the
   self-built probes can analyze transformer activations;
 - the ``self-built`` arm lets the agent write probes under probes/; new
@@ -734,9 +734,8 @@ class HeadroomLoop:
 
         The rule is one sentence: on the cert segment, every statistic's
         realized-gain 95% UCB must sit below epsilon times its group MSE for
-        the incumbent to count as saturated.  The log is a record, not a
-        budget; there is no cross-version alpha accounting (2026-10-16
-        author-directed simplification).
+        the incumbent to count as saturated.  The log records the verdicts
+        for the post-hoc stop-point analysis.
         """
         assert self.heldout is not None and self.seg_diag is not None and self.seg_cert is not None
         level = 1.0 - self.cfg.certify_alpha

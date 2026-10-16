@@ -14,8 +14,9 @@ blind.
 - `<probe-id>` must match `[a-z0-9][a-z0-9-]{0,63}`.
 - Probe ids are never reused or edited in place: to revise a probe, write a
   new one under a new id. Old probes keep running; each round shows the
-  newest 8. Editing a validated probe's file invalidates it — the harness
-  detects the change and refuses to run it.
+  newest 8. A validated probe runs from the copy that passed validation, so
+  later edits to the file have no effect until the probe is resubmitted
+  under a new id.
 
 ## probe.py contract
 

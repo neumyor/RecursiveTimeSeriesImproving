@@ -1,9 +1,8 @@
 """Fixture-family generation pipeline: an LLM proposes, deterministic code gates.
 
-The probe-validation fixture families in experiments/probes.py used to be
-hand-designed constants.  This module is the development-time pipeline that
-replaces that authoring process: an offline LLM flow PROPOSES a family as a
-constrained JSON DSL record — data, never free code — and this module
+This module is the development-time authoring pipeline for the
+probe-validation fixture families: an offline LLM flow PROPOSES a family as
+a constrained JSON DSL record — data, never free code — and this module
 MEASURES the proposal against four deterministic admission gates, each
 reported with numbers.  Nothing here runs during P2: the loop only ever
 sees the frozen registry (experiments/specs/probe-fixture-registry.json)
