@@ -198,7 +198,7 @@ $$P\big(\exists j\le J_{\max},\ k\in\mathcal K:\ \text{在第 }j\text{ 次认证
 **校验协议（信任机制）。** 新探针先在**植入已知信号的合成夹具**上接受检验，通过才入库、才有资格在真实数据上运行：
 - 残差类夹具族：周期成分（如周期 24 正弦，2 对）、跨通道滞后注入（2 对）、**非线性阈值注入**（2 对——线性探针必须检不出，非线性探针必须检出）；每对为“植入 / 干净”配对，另加**无信号负对照**（同分布新种子）。
 - 激活类夹具族：固定小网络上、已知层处的秩一注入（2 对，与残差的时间成分对齐）。
-- 通过规则：至少**完整通过一个族**（该族每对的方向正确、相对裕度 > 5%、且对负对照不误报），并满足确定性（同夹具重跑输出一致）。
+- 通过规则：至少**完整通过一个族**（该族每对：方向正确、相对裕度 > 5% 对干净成员与全部负对照成立、且植入值对无信号簇满足非参数的“间隔大于簇宽”底线），并满足确定性（同夹具重跑输出一致）与 4KB 上限。诚实噪声底：重尾近零探针在可交换性下仍有 ~1–7% 的单次校验误过率（蒙特卡洛实测，文档化）。
 
 这一“生成 → 确定性校验”的信任机制是探针通道的核心：探针不是因为看起来合理而被信任，而是因为在植入信号上可证地检出且不误报。**诚实披露**：该臂相对固定卡臂捆绑了两个差异——工具由谁构建，以及工具可读激活通道（固定卡只有残差坐标）；主对比测量的是这个合并处理。首轮自举延迟（首个探针通过校验前该臂只有标量反馈）与渲染上限（最新 8 个探针、每行 600 字符）作为处理的一部分在附录 D 中披露。
 
@@ -457,13 +457,19 @@ A JSON object with exactly these fields, all non-empty strings:
 ## Validation, then trust
 
 New probes never touch your data first. They are validated on synthetic
-fixtures with KNOWN planted structure — residual fixtures plant periodic
-components and cross-channel lag coupling at undisclosed parameters;
-activation fixtures plant structure at a known layer of a fixed small
-network. Your probe is kept only if its `signalKey` number moves in the
-declared direction on the planted fixtures and the probe is deterministic.
-The verdict appears in your next round's feedback. A validated probe is
-re-run on every future incumbent and its output is shown to you every round.
+fixtures with KNOWN planted structure — three residual families (a periodic
+component, a cross-channel lag injection, and a nonlinear threshold coupling,
+each at two signal draws and undisclosed parameters) and one activation
+family (planted structure at a known layer of a fixed small network, two
+draws). Every fixture pair also carries clean-only negative controls at
+fresh seeds. Your probe is kept only if, for at least ONE complete family:
+on every planted pair its `signalKey` number moves in the declared direction
+against the clean member AND every control, with a clear relative margin,
+and the planted value stands clearly above the whole clean cluster; plus the
+probe is deterministic (same fixture twice, identical output) and within the
+size cap. The verdict appears in your next round's feedback. A validated
+probe is re-run on every future incumbent and its output is shown to you
+every round.
 
 A probe that times out (120 s), crashes, exceeds the output cap, or returns
 nondeterministic results is rejected with the reason in your feedback. Fix it

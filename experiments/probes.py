@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Probe contract: AST source vetting, planted-defect validation, isolated execution.
 
 A probe is a diagnostic script the treatment-arm agent writes against the
@@ -55,37 +53,69 @@ claims to measure (extra keys are tolerated; the loop adds "kind"):
 ``signalKey`` names the output key that carries the validated signal; its
 value must be a finite number.
 
-Validation (``validate_probe``)
--------------------------------
-Deterministic fixture pairs (``make_fixtures``), each (planted, clean):
+Validation (``validate_probe``) — the trust rule
+-----------------------------------------------
+Deterministic fixture families (``make_fixtures``), each pair (planted,
+clean), plus per-pair NEGATIVE CONTROLS (``make_controls``): _N_CONTROLS (2)
+fresh clean-only fixtures of the same family — an empirical null for the
+probe's signalKey.
 
-- residual kind, 4 pairs.  clean = per-channel AR(1) (phi=0.6, innovation sd
-  1.0) plus white noise (sd 0.5), T=2064, C=2; planted = clean plus the
-  defect.  Pairs 0-2: a period-24 sinusoid added to channel 0 at amplitude
-  0.5 * sd(clean channel 0).  Pair 3: a cross-channel lag-3 injection —
-  0.5 * sd(clean channel 0) / sd(clean channel 1) times channel 1 three rows
-  back, added to channel 0.  Artifacts are built by ``artifacts_from_series``
-  with a persistence incumbent, so every injected defect the incumbent cannot
-  predict lands in the residuals; the pair members differ only in residuals.
-- activation kind, 2 pairs.  Both members share one series (channel 0 = a
-  period-24 sinusoid of amplitude 1.0 plus white noise sd 0.5, channel 1 =
-  white noise) and one fixed seeded 3-layer torch-CPU MLP (64->32->16->8,
-  ReLU, threads=1); they differ only in the net variant: planted adds a rank-1
-  signal to layer 2's output — a fixed seeded unit direction scaled by the
-  KNOWN analytic period-24 component of the persistence residual (so a probe
-  reads it from ``r``, never from targets), at per-coordinate sd
-  ``_ACT_INJECT_BETA`` (2.0) times the clean layer-2 sd.  Layer 2 (and only
-  layer 2; layer 1 is upstream) becomes linearly informative about the
-  bandpassed residual; the r rows and activations share their sampled origins
-  and meta["activationOrigins"] is arange, mirroring the loop's alignment.
+- residual kind, three families of two pairs each.  The clean process is
+  per-channel AR(1) (phi=0.6, innovation sd 1.0), T=4096, C=2; channel 1
+  additionally carries white noise (sd 0.5).
+  * ``period24``: planted = clean + a period-24 sinusoid on channel 0 at
+    amplitude 0.5 * sd(clean channel 0).
+  * ``cross-lag3``: planted channel 0 += 0.5 * sd(clean ch0)/sd(clean ch1)
+    times channel 1 three rows back.
+  * ``nonlinear``: planted channel 0 follows the same AR(1) but its
+    innovation is scaled by (1 + gamma * tanh(channel-1 centered level /
+    its sd)), gamma = 0.5/sd(driver) — a threshold-type cross-channel
+    coupling at 0.5 innovation-sd.  Every second moment of the planted
+    channel equals the clean ones up to one common scale factor (the driver
+    is symmetric, zero-mean and independent of channel 0, which kills every
+    cross term), so linear probes see EXACTLY the clean process — measured:
+    a 16-lag linear R^2 probe completes no nonlinear pair at seeds 0-2 —
+    while the conditional variance carries the defect, which a bilinear
+    probe (e0^2 on tanh(e1) lags) reads at R^2 ~ 0.13 against a ~1e-3
+    clean floor.
+  All fixtures are built by ``artifacts_from_series`` with a mean-predictor
+  incumbent, so a defect the incumbent cannot predict lands in the
+  residuals at full strength.
+- activation kind, one family of two pairs.  Both members share one series
+  (channel 0 = a period-24 sinusoid of amplitude 1.0 plus white noise sd
+  0.5, channel 1 = white noise) and one fixed seeded 3-layer torch-CPU MLP
+  (64->32->16->8, ReLU, threads=1); they differ only in the net variant:
+  planted adds a rank-1 signal to layer 2's output — a fixed seeded unit
+  direction scaled by the KNOWN analytic period-24 component of the
+  channel-0 residual at the sampled origins (so a probe reads it from
+  ``r``, never from targets), at per-coordinate sd ``_ACT_INJECT_BETA``
+  (2.0) times the clean layer-2 sd.  Layer 2 (and only layer 2; layer 1 is
+  upstream) becomes linearly informative about the bandpassed residual.
 
-A probe passes validation when the declared direction holds on >= 2 of 4
-residual pairs (>= 1 of 2 activation pairs) with relative margin > 5%
-(|a-b| / max(|a|, |b|, tiny)) — a periodicity probe is not required to fire on
-the cross-channel fixture — the output is deterministic (one fixture run
-twice gives identical output) and within the size cap.  Every failure lands
-in exactly one category with an expected-vs-actual message; probe-side
-failures come back as ``{"ok": False, "reason": ..., "measured": ...}`` rather
+A PAIR passes when the declared direction holds against the pair's clean
+member AND every control, each with relative margin > 5%
+(|a-b| / max(|a|, |b|, tiny)), AND the planted value clears the whole clean
+cluster by more than the cluster's own width (gap > spread: planted -
+max(clean side) > max(clean side) - min(clean side), mirrored for "lower").
+The margin rule alone is what let a near-zero noise signalKey pass
+validation (planted 1.6e-5 vs clean 1.2e-5 is a 29% "margin"): the controls
+turn the clean side into an empirical null and gap > spread is the
+significance floor such noise cannot systematically clear — for
+exchangeable noise draws the pair rule holds only with ordering luck
+(Monte Carlo: 6% per pair for light-tailed noise, ~15% for heavy-tailed
+R^2-like noise, versus ~25% for the pre-review margin rule alone), and the
+two-pair family rule squares it again (~0.4-2% per family).  A FAMILY
+completes when every one of its pairs passes.
+A probe PASSES validation when at least one family completes (a periodicity
+probe completes period24, a lag probe cross-lag3, a nonlinear probe the
+nonlinear family — specialization is the point), the output is
+deterministic (one fixture run twice gives identical output) and within the
+size cap.  Measured at seeds 0-2: the periodicity, lag-3 and bilinear probes
+each complete exactly their own family; a lag-13 cross-channel noise probe
+completes nothing.  Runtime: 25 subprocess runs per residual validation,
+9 per activation (~4s / ~2s measured), against the 15s target.
+
+Probe-side failures come back as ``{"ok": False, "reason": ...}`` rather
 than raised, because a rejected probe is a budgeted outcome for the loop.
 
 Execution (``run_probe``)
@@ -104,6 +134,8 @@ contract violation.
 This is correctness tooling, not a security boundary — the same caveat as
 candidate.py's docstring.
 """
+
+from __future__ import annotations
 
 import ast
 import importlib.util
@@ -135,24 +167,32 @@ OUTPUT_CAP_BYTES = 4096
 DEFAULT_TIMEOUT_SECONDS = 120.0
 # Validation rule: declared direction with relative margin above this floor.
 RELATIVE_MARGIN = 0.05
+# Per-pair negative controls: fresh clean-only fixtures of the same family.
+# 2 (not 1): the gap>spread significance floor needs a clean cluster wide
+# enough to estimate its own spread — with a single control the cluster is
+# two points and near-zero noise passes far more often (false-pass analysis
+# in the module docstring).
+_N_CONTROLS = 2
 _TINY = 1e-12  # guards the margin denominator against two zeros
 _STDERR_TAIL_CHARS = 1200
-# Specialization-friendly pass rule: a periodicity probe must not be forced to
-# fire on the cross-channel fixture, so one miss of four is allowed; one hit
-# of two suffices for the activation kind, whose two fixtures plant the same
-# defect at different data draws.
-_PASS_NEEDED_BY_KIND = {"residual": 2, "activation": 1}
+# Fixture families per kind, in the order make_fixtures emits pairs
+# (family-major, two pairs per residual family).
+_FAMILIES_BY_KIND: dict[str, tuple[str, ...]] = {
+    "residual": ("period24", "cross-lag3", "nonlinear"),
+    "activation": ("activation",),
+}
+_PAIRS_PER_FAMILY = 2
 
 # --- fixture design constants (documented in the module docstring) ----------
 _INPUT_LENGTH = 32
 _HORIZON = 4
-_RESIDUAL_T = 2064
+_RESIDUAL_T = 4096
 _RESIDUAL_C = 2
 _RESIDUAL_PERIOD = 24
 _AR_PHI = 0.6
 _AR_INNOVATION_SD = 1.0
 _WHITE_SD = 0.5
-_INJECTION_SD_FRACTION = 0.5  # defect amplitude = 0.5 * clean channel sd
+_INJECTION_SD_FRACTION = 0.5  # defect amplitude = 0.5 * the reference sd
 _CROSS_LAG = 3
 _N_RESIDUALS = 256
 _RESIDUAL_STRIDE = 7
@@ -588,32 +628,56 @@ def _canonical(output: dict[str, Any]) -> str:
     return json.dumps(output, sort_keys=True)
 
 
+def _pair_passes(direction: str, planted: float, clean_side: list[float]) -> tuple[bool, float]:
+    """The per-pair trust rule; returns (passes, worst relative margin).
+
+    clean_side carries the pair's clean member plus every negative control —
+    an empirical null for the signalKey.  The pair passes when the declared
+    direction holds against EVERY null value with > RELATIVE_MARGIN relative
+    margin (the prescribed rule) AND the planted value clears the whole null
+    cluster by more than the cluster's own width (gap > spread — the
+    nonparametric significance floor that kills near-zero noise passes, which
+    the purely relative margin rule demonstrably let through).
+    """
+    worst = max(clean_side) if direction == "higher" else min(clean_side)
+    gap = (planted - worst) if direction == "higher" else (worst - planted)
+    spread = max(clean_side) - min(clean_side)
+    margins = [abs(planted - value) / max(abs(planted), abs(value), _TINY) for value in clean_side]
+    passes = gap > 0.0 and min(margins) > RELATIVE_MARGIN and gap > spread
+    return passes, min(margins)
+
+
 def validate_probe(
     source_path: Path,
     proposal: dict[str, Any],
     kind: str,
     seed: int = 0,
 ) -> dict[str, Any]:
-    """Validate one probe against deterministic planted-defect fixtures.
+    """Validate one probe against deterministic planted-defect fixture families.
 
-    Returns {"ok": bool, "reason": str | None, "measured": {pair index:
-    {"planted", "clean", "margin", "passes"}}, "pairs_passed": int,
-    "pairs_needed": int, "deterministic": bool} — the loop records it as-is.
-    Probe-side failures (timeout, crash, contract violation, oversized output)
-    come back as ok=False with the classified message, not as raised errors:
-    a rejected probe is a budgeted round outcome, not a harness bug.  A bad
-    ``kind`` is a harness bug and raises ValueError.
+    Returns a JSON-plain record the loop stores as-is: {"ok": bool,
+    "reason": str | None, "families": {family: {"pairsPassed": int,
+    "pairsTotal": int, "complete": bool}}, "pairs_passed": int,
+    "familyComplete": bool, "deterministic": bool, "measured": {pair index:
+    {"family", "planted", "clean", "controls", "margin", "passes"}}}.
+    ok is True iff familyComplete (every pair of at least one family passes
+    the control rule) AND deterministic AND within the size cap.  Probe-side
+    failures (timeout, crash, contract violation, oversized output) come back
+    as ok=False with the classified message, not as raised errors: a rejected
+    probe is a budgeted round outcome, not a harness bug.  A bad ``kind`` is
+    a harness bug and raises ValueError.
     """
-    if kind not in _PASS_NEEDED_BY_KIND:
-        raise ValueError(f"kind must be one of {sorted(_PASS_NEEDED_BY_KIND)}, got {kind!r}")
+    if kind not in _FAMILIES_BY_KIND:
+        raise ValueError(f"kind must be one of {sorted(_FAMILIES_BY_KIND)}, got {kind!r}")
     measured: dict[int, dict[str, Any]] = {}
     result: dict[str, Any] = {
         "ok": False,
         "reason": None,
-        "measured": measured,
+        "families": {},
         "pairs_passed": 0,
-        "pairs_needed": _PASS_NEEDED_BY_KIND[kind],
+        "familyComplete": False,
         "deterministic": False,
+        "measured": measured,
     }
     problems = _proposal_problems(proposal)
     # The loop's proposals carry a sixth key, "kind" (which data the probe
@@ -637,26 +701,37 @@ def validate_probe(
     probe_id = proposal["probeId"]
     signal_key = proposal["signalKey"]
     direction = proposal["expectedDirection"]
+    families = _FAMILIES_BY_KIND[kind]
     fixtures = make_fixtures(kind, seed)
+    controls = make_controls(kind, seed)
     try:
         first_output: dict[str, Any] | None = None
         for index, (planted, clean) in enumerate(fixtures):
             wrapper_planted = _run_probe_subprocess(source_path, planted, DEFAULT_TIMEOUT_SECONDS)
             if index == 0:
                 first_output = wrapper_planted["output"]
-            wrapper_clean = _run_probe_subprocess(source_path, clean, DEFAULT_TIMEOUT_SECONDS)
             value_planted = _signal_value(wrapper_planted, probe_id, signal_key)
-            value_clean = _signal_value(wrapper_clean, probe_id, signal_key)
-            margin = abs(value_planted - value_clean) / max(abs(value_planted), abs(value_clean), _TINY)
-            # "higher" means the planted defect RAISES the declared signal.
-            pair_ok = (
-                value_planted > value_clean if direction == "higher" else value_planted < value_clean
-            ) and margin > RELATIVE_MARGIN
+            value_clean = _signal_value(
+                _run_probe_subprocess(source_path, clean, DEFAULT_TIMEOUT_SECONDS),
+                probe_id,
+                signal_key,
+            )
+            control_values = [
+                _signal_value(
+                    _run_probe_subprocess(source_path, control, DEFAULT_TIMEOUT_SECONDS),
+                    probe_id,
+                    signal_key,
+                )
+                for control in controls[index]
+            ]
+            passes, margin = _pair_passes(direction, value_planted, [value_clean] + control_values)
             measured[index] = {
+                "family": families[index // _PAIRS_PER_FAMILY],
                 "planted": value_planted,
                 "clean": value_clean,
+                "controls": control_values,
                 "margin": margin,
-                "passes": pair_ok,
+                "passes": passes,
             }
         assert first_output is not None
         # Determinism: the same fixture (pair 0, planted) run a second time in
@@ -666,25 +741,30 @@ def validate_probe(
         repeat = _run_probe_subprocess(source_path, fixtures[0][0], DEFAULT_TIMEOUT_SECONDS)
         _signal_value(repeat, probe_id, signal_key)  # same binding checks on the rerun
     except ProbeError as exc:
-        result["pairs_passed"] = sum(1 for entry in measured.values() if entry["passes"])
         result["reason"] = f"{type(exc).__name__}: {exc}"
+        _fill_family_summary(result, families, len(fixtures))
         return result
 
-    pairs_passed = sum(1 for entry in measured.values() if entry["passes"])
-    result["pairs_passed"] = pairs_passed
+    _fill_family_summary(result, families, len(fixtures))
     deterministic = _canonical(first_output) == _canonical(repeat["output"])
     result["deterministic"] = deterministic
-    needed = _PASS_NEEDED_BY_KIND[kind]
-    if pairs_passed < needed:
-        values = ", ".join(
-            f"pair{index}: {entry['planted']:.6g} vs {entry['clean']:.6g} "
-            f"(margin {entry['margin']:.3g}, {'pass' if entry['passes'] else 'fail'})"
+    family_complete = any(summary["complete"] for summary in result["families"].values())
+    result["familyComplete"] = family_complete
+    if not family_complete:
+        by_family = ", ".join(
+            f"{family} {summary['pairsPassed']}/{summary['pairsTotal']}"
+            for family, summary in result["families"].items()
+        )
+        values = "; ".join(
+            f"pair{index} [{entry['family']}]: {entry['planted']:.6g} vs clean {entry['clean']:.6g} "
+            f"(controls {', '.join(f'{value:.6g}' for value in entry['controls'])}, "
+            f"margin {entry['margin']:.3g}, {'pass' if entry['passes'] else 'fail'})"
             for index, entry in sorted(measured.items())
         )
         result["reason"] = (
-            f"declared direction {direction!r} with >{int(RELATIVE_MARGIN * 100)}% relative margin "
-            f"holds on {pairs_passed} of {len(fixtures)} {kind} pairs (need >= {needed}); "
-            f"signalKey {signal_key!r} values, planted vs clean: {values}"
+            f"declared direction {direction!r} with the control rule completed no fixture family "
+            f"(validation needs every pair of one family to pass); by family: {by_family}; "
+            f"signalKey {signal_key!r} values, planted vs clean side: {values}"
         )
         return result
     if not deterministic:
@@ -695,6 +775,25 @@ def validate_probe(
         return result
     result["ok"] = True
     return result
+
+
+def _fill_family_summary(result: dict[str, Any], families: tuple[str, ...], n_pairs: int) -> None:
+    """Aggregate the per-pair measurements into the per-family record."""
+    pairs_per_family = n_pairs // len(families)
+    measured: dict[int, dict[str, Any]] = result["measured"]
+    for family_index, family in enumerate(families):
+        entries = [
+            measured[pair]
+            for pair in range(family_index * pairs_per_family, (family_index + 1) * pairs_per_family)
+            if pair in measured
+        ]
+        passed = sum(1 for entry in entries if entry["passes"])
+        result["families"][family] = {
+            "pairsPassed": passed,
+            "pairsTotal": pairs_per_family,
+            "complete": passed == pairs_per_family,
+        }
+    result["pairs_passed"] = sum(1 for entry in measured.values() if entry["passes"])
 
 
 # --- fixture generation ------------------------------------------------------
@@ -711,16 +810,18 @@ def artifacts_from_series(
 ) -> dict[str, Any]:
     """Build one internally-consistent artifacts dict from a [T, C] series.
 
-    The incumbent is persistence (predict the last observed value for every
-    step): cheap, honest, and it guarantees every structure the incumbent
-    cannot one-step-predict lands in the residuals — which is exactly what
-    the planted defects exploit.  H-step residuals are sampled at
-    residual_stride; e carries the 1-step residual on the full time axis,
-    NaN-padded at the head (no previous row) and the tail (mirroring
-    segment_data, where origins near the segment end have no realized
-    targets).  No windows/targets by contract — the fixture builders keep the
-    windows to themselves.  Used by make_fixtures and by tests that build
-    artifacts from REGISTRY tasks.
+    The incumbent is the mean predictor (the classic naive baseline): every
+    structure in the series the incumbent cannot know lands in the residuals
+    at full strength, which is exactly what the planted defects exploit, and
+    unlike a persistence incumbent it does not difference the defect away.
+    Fixtures are synthetic, so fitting the mean on the full series breaks no
+    train/test boundary — what matters is that the same incumbent processes
+    both members of a pair.  e is the series minus its channel means,
+    NaN-padded at the head and tail so probes must handle the real
+    artifacts' NaN layout; H-step residuals are sampled at residual_stride.
+    No windows/targets by contract — the fixture builders keep the windows
+    to themselves.  Used by make_fixtures and by tests that build artifacts
+    from REGISTRY tasks.
     """
     values = np.asarray(values, dtype=np.float64)
     if values.ndim != 2:
@@ -733,16 +834,17 @@ def artifacts_from_series(
             f"series of length {t_len} is too short for {n_residuals} residuals at stride "
             f"{residual_stride} with L={input_length}, H={horizon}; last usable origin is {last}"
         )
-    # r[o, h, c] = x[o+h+1, c] - x[o, c]: the persistence residual at origin o.
-    r = np.stack([values[o + 1 : o + 1 + horizon] - values[o] for o in residual_origins])
+    mean = values.mean(axis=0)
+    # r[o, h, c] = x[o+h+1, c] - mean_c: the mean-predictor residual at origin o.
+    r = np.stack([values[o + 1 : o + 1 + horizon] - mean for o in residual_origins])
     e = np.full((t_len, channels), np.nan)
-    e[1 : t_len - horizon] = values[1 : t_len - horizon] - values[: t_len - horizon - 1]
+    e[1 : t_len - horizon] = values[1 : t_len - horizon] - mean
     meta: dict[str, Any] = {
         "L": input_length,
         "H": horizon,
         "C": channels,
         "T": t_len,
-        "incumbent": "persistence",
+        "incumbent": "mean",
         "task": "synthetic",
     }
     if meta_update:
@@ -754,35 +856,86 @@ def artifacts_from_series(
     }
 
 
-def _residual_pair(child_seed: int, defect: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """One (planted, clean) residual-fixture pair; see the module docstring."""
-    rng = np.random.default_rng(child_seed)
+def _residual_series(rng: np.random.Generator, family: str) -> tuple[np.ndarray, np.ndarray]:
+    """(planted, clean) [T, C] series of one residual-fixture pair.
+
+    Both members share the innovation draws, so the comparison isolates the
+    planted defect exactly.  See the module docstring for what each family
+    plants and why the nonlinear defect is invisible to linear probes.
+    """
     innovation = rng.standard_normal((_RESIDUAL_T, _RESIDUAL_C)) * _AR_INNOVATION_SD
     ar = np.empty_like(innovation)
     ar[0] = innovation[0]
     for t in range(1, _RESIDUAL_T):
         ar[t] = _AR_PHI * ar[t - 1] + innovation[t]
+    if family == "nonlinear":
+        # Channel 0 stays a pure AR(1) here (no white component): with a
+        # white part the planted/clean covariance ratio would differ between
+        # numerator and denominator of the correlations, and the exact
+        # linear invisibility below would break.  Channel 1 keeps the shared
+        # AR(1)+white process.
+        clean = ar.copy()
+        clean[:, 1] += _WHITE_SD * rng.standard_normal(_RESIDUAL_T)
+        level1 = clean[:, 1] - clean[:, 1].mean()
+        driver = np.tanh(level1 / level1.std())
+        gamma = _INJECTION_SD_FRACTION / driver.std()
+        planted = clean.copy()
+        for t in range(1, _RESIDUAL_T):
+            planted[t, 0] = (
+                _AR_PHI * planted[t - 1, 0] + innovation[t, 0] * (1.0 + gamma * driver[t - 1])
+            )
+        return planted, clean
     clean = ar + _WHITE_SD * rng.standard_normal((_RESIDUAL_T, _RESIDUAL_C))
     planted = clean.copy()
     sd0 = float(clean[:, 0].std())
-    if defect == "period24":
+    if family == "period24":
         time_axis = np.arange(_RESIDUAL_T)
         planted[:, 0] += (
             _INJECTION_SD_FRACTION * sd0 * np.sin(2.0 * np.pi * time_axis / _RESIDUAL_PERIOD)
         )
-    elif defect == "cross-lag3":
+    elif family == "cross-lag3":
         # Channel 0 reads channel 1 three rows back, scaled so the injected
         # component carries _INJECTION_SD_FRACTION of channel 0's sd.
         sd1 = float(clean[:, 1].std())
         planted[_CROSS_LAG:, 0] += (_INJECTION_SD_FRACTION * sd0 / sd1) * clean[:-_CROSS_LAG, 1]
     else:  # pragma: no cover - guarded by the caller
-        raise ValueError(f"unknown residual defect {defect!r}")
-    meta = {"kind": "residual", "defect": defect, "seed": child_seed, "phi": _AR_PHI,
-            "injectionSdFraction": _INJECTION_SD_FRACTION}
+        raise ValueError(f"unknown residual fixture family {family!r}")
+    return planted, clean
+
+
+def _residual_fixture_meta(child_seed: int, family: str, control: bool) -> dict[str, Any]:
+    return {
+        "kind": "residual",
+        "family": family,
+        "seed": child_seed,
+        "control": control,
+        "phi": _AR_PHI,
+        "injectionSdFraction": _INJECTION_SD_FRACTION,
+    }
+
+
+def _residual_pair(child_seed: int, family: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One (planted, clean) residual-fixture pair; see the module docstring."""
+    rng = np.random.default_rng(child_seed)
+    series_planted, series_clean = _residual_series(rng, family)
+    meta = _residual_fixture_meta(child_seed, family, control=False)
     return (
-        artifacts_from_series(planted, meta_update=meta),
-        artifacts_from_series(clean, meta_update=meta),
+        artifacts_from_series(series_planted, meta_update=meta),
+        artifacts_from_series(series_clean, meta_update=meta),
     )
+
+
+def _residual_control(child_seed: int, family: str) -> dict[str, Any]:
+    """One clean-only control fixture: a fresh draw of the family's clean process.
+
+    The planted series is generated and discarded — the clean member never
+    depends on it, and sharing one code path guarantees controls are exactly
+    what a pair's clean member is: clean data.
+    """
+    rng = np.random.default_rng(child_seed)
+    _, series_clean = _residual_series(rng, family)
+    meta = _residual_fixture_meta(child_seed, family, control=True)
+    return artifacts_from_series(series_clean, meta_update=meta)
 
 
 def _activation_pair(
@@ -817,17 +970,14 @@ def _activation_pair(
             h2 = h2 + torch.from_numpy(inject)
         return h1.numpy(), h2.numpy(), (h2 @ w3).numpy()
 
-    # The injected scalar signal: the KNOWN analytic period-24 component of the
-    # channel-0 persistence residual at the sampled origins, averaged over the
-    # H steps — exactly what a bandpass of r[:, :, 0].mean(axis=1) recovers, so
-    # a probe reads the planted signal from r (its contract channel), never
-    # from targets.
+    # The injected scalar signal: the KNOWN analytic period-24 component of
+    # the channel-0 mean-predictor residual at the sampled origins, averaged
+    # over the H steps — exactly what a bandpass of r[:, :, 0].mean(axis=1)
+    # recovers, so a probe reads the planted signal from r (its contract
+    # channel), never from targets.
     signal = _ACT_SIN_AMPLITUDE * np.array(
         [
-            np.mean(
-                np.sin(2.0 * np.pi * (o + np.arange(1, _HORIZON + 1)) / _RESIDUAL_PERIOD)
-                - np.sin(2.0 * np.pi * o / _RESIDUAL_PERIOD)
-            )
+            np.mean(np.sin(2.0 * np.pi * (o + np.arange(1, _HORIZON + 1)) / _RESIDUAL_PERIOD))
             for o in origins
         ]
     )
@@ -860,17 +1010,24 @@ def _activation_pair(
 def make_fixtures(kind: str, seed: int = 0) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Deterministic (planted, clean) artifact pairs for validation; see the docstring.
 
-    Same seed -> bitwise identical fixtures, so a validation record is
-    reproducible and the loop can re-validate any probe against exactly the
-    fixtures it was first judged on.  Generation stays well under 2s per pair
-    (the activation net is a 64->32->16->8 CPU MLP on 384 windows).
+    Residual pairs come family-major: pair i belongs to family
+    _FAMILIES_BY_KIND["residual"][i // 2].  Same seed -> bitwise identical
+    fixtures, so a validation record is reproducible and the loop can
+    re-validate any probe against exactly the fixtures it was first judged
+    on.  Generation stays well under 2s per pair (the activation net is a
+    64->32->16->8 CPU MLP on 384 windows).
     """
     if kind == "residual":
-        children = np.random.SeedSequence(seed).spawn(4)
-        defects = ("period24", "period24", "period24", "cross-lag3")
+        children = np.random.SeedSequence(seed).spawn(_PAIRS_PER_FAMILY * 3 + 6 * _N_CONTROLS)
+        families = _FAMILIES_BY_KIND["residual"]
+
+        def child_seed(index: int) -> int:
+            return int(children[index].generate_state(1, dtype=np.uint32)[0])
+
         return [
-            _residual_pair(int(child.generate_state(1, dtype=np.uint32)[0]), defect)
-            for child, defect in zip(children, defects)
+            _residual_pair(child_seed(family_index * _PAIRS_PER_FAMILY + pair_index), family)
+            for family_index, family in enumerate(families)
+            for pair_index in range(_PAIRS_PER_FAMILY)
         ]
     if kind == "activation":
         import torch
@@ -878,7 +1035,10 @@ def make_fixtures(kind: str, seed: int = 0) -> list[tuple[dict[str, Any], dict[s
         torch.set_num_threads(1)
         # One fixed net and one fixed injection direction per seed (spawned
         # children 0-1); the two pairs differ in the data draw (children 2-3).
-        children = np.random.SeedSequence(seed).spawn(4)
+        # The child pool matches make_controls' exactly, with disjoint index
+        # ranges (controls use children 4-7), so no control ever repeats a
+        # pair's data draw.
+        children = np.random.SeedSequence(seed).spawn(4 + _PAIRS_PER_FAMILY * _N_CONTROLS)
         net_rng = np.random.default_rng(children[0])
         fan_in = _INPUT_LENGTH * _RESIDUAL_C
         weights = (
@@ -890,13 +1050,80 @@ def make_fixtures(kind: str, seed: int = 0) -> list[tuple[dict[str, Any], dict[s
         return [
             _activation_pair(
                 weights,
-                int(children[2 + index].generate_state(1, dtype=np.uint32)[0]),
+                int(children[2 + pair_index].generate_state(1, dtype=np.uint32)[0]),
                 direction_seed,
-                index,
+                pair_index,
             )
-            for index in range(2)
+            for pair_index in range(_PAIRS_PER_FAMILY)
         ]
-    raise ValueError(f"kind must be one of {sorted(_PASS_NEEDED_BY_KIND)}, got {kind!r}")
+    raise ValueError(f"kind must be one of {sorted(_FAMILIES_BY_KIND)}, got {kind!r}")
+
+
+def make_controls(kind: str, seed: int = 0) -> list[list[dict[str, Any]]]:
+    """Per-pair negative controls: _N_CONTROLS clean-only fixtures each, aligned
+    with make_fixtures' pair order (controls[i] belongs to pair i).
+
+    Controls are fresh draws of the same clean generating process (the
+    activation kind: same fixed net and injection direction, clean variant,
+    new data seeds) — the empirical null the pair rule is judged against.
+    Same seed -> bitwise identical controls.
+    """
+    if kind == "residual":
+        children = np.random.SeedSequence(seed).spawn(_PAIRS_PER_FAMILY * 3 + 6 * _N_CONTROLS)
+        families = _FAMILIES_BY_KIND["residual"]
+
+        def child_seed(index: int) -> int:
+            return int(children[index].generate_state(1, dtype=np.uint32)[0])
+
+        controls: list[list[dict[str, Any]]] = []
+        for family_index, family in enumerate(families):
+            for pair_index in range(_PAIRS_PER_FAMILY):
+                pair_position = family_index * _PAIRS_PER_FAMILY + pair_index
+                controls.append(
+                    [
+                        _residual_control(
+                            child_seed(6 + pair_position * _N_CONTROLS + control_index), family
+                        )
+                        for control_index in range(_N_CONTROLS)
+                    ]
+                )
+        return controls
+    if kind == "activation":
+        import torch
+
+        torch.set_num_threads(1)
+        # Same child pool as make_fixtures("activation"): children 0-1 built
+        # the pair fixtures' net/direction (redundant here, kept so the two
+        # functions share one seed layout), children 2-3 are the pair data
+        # draws, and the controls use children 4-7 — fresh data, same fixed
+        # net and injection direction, clean variant only.
+        children = np.random.SeedSequence(seed).spawn(4 + _PAIRS_PER_FAMILY * _N_CONTROLS)
+        net_rng = np.random.default_rng(children[0])
+        fan_in = _INPUT_LENGTH * _RESIDUAL_C
+        weights = (
+            torch.from_numpy(net_rng.standard_normal((fan_in, _ACT_D1)) / math.sqrt(fan_in)),
+            torch.from_numpy(net_rng.standard_normal((_ACT_D1, _ACT_D2)) / math.sqrt(_ACT_D1)),
+            torch.from_numpy(net_rng.standard_normal((_ACT_D2, _HORIZON * _RESIDUAL_C)) / math.sqrt(_ACT_D2)),
+        )
+        direction_seed = int(children[1].generate_state(1, dtype=np.uint32)[0])
+        out: list[list[dict[str, Any]]] = []
+        for pair_index in range(_PAIRS_PER_FAMILY):
+            base = 4 + pair_index * _N_CONTROLS
+            out.append(
+                [
+                    # The clean member of a freshly seeded pair: same net, same
+                    # injection direction, new data, no injection applied.
+                    _activation_pair(
+                        weights,
+                        int(children[base + control_index].generate_state(1, dtype=np.uint32)[0]),
+                        direction_seed,
+                        pair_index,
+                    )[1]
+                    for control_index in range(_N_CONTROLS)
+                ]
+            )
+        return out
+    raise ValueError(f"kind must be one of {sorted(_FAMILIES_BY_KIND)}, got {kind!r}")
 
 
 if __name__ == "__main__":  # manual debugging only; the loop uses the -c bootstrap

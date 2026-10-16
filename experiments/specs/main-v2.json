@@ -67,7 +67,7 @@
   },
   "selfBuiltArm": {
     "probeContract": "probes/<id>/probe.py + probe_proposal.json; probe receives residuals {e, r, origins} and per-layer activations only (256 evenly spaced diag windows, activations[i] paired with r[meta.activationOrigins][i]); no windows/targets reach a probe",
-    "validation": "new probes are validated on planted-signal fixtures (4 residual pairs: period-24 sinusoid x3, cross-channel lag-3; 2 activation pairs: rank-1 residual-component injection at layer 2) — pass requires declared signalKey direction with >5% relative margin on >=2/4 (residual) or >=1/2 (activation) pairs, determinism, and <=4KB output; verdicts reach the agent in the next round's feedback",
+    "validation": "new probes are validated on planted-signal fixtures before touching real data: residual kind = 3 families x 2 pairs (period-24 sinusoid, cross-channel lag-3, nonlinear threshold coupling) each with 2 clean-only negative controls; activation kind = 1 family x 2 pairs (rank-1 residual-component injection at layer 2) with controls. Pass requires completing at least one family (per pair: declared direction vs the clean member and every control with >5% relative margin, plus a nonparametric gap-beyond-spread floor vs the control cluster), determinism (fresh-subprocess rerun, canonical JSON), and <=4KB output. A measured heavy-tailed near-zero probe retains ~1-7% per-validation false-pass under exchangeability (documented Monte Carlo floor); verdicts reach the agent in the next round's feedback",
     "library": "validated probes re-run on every incumbent; outputs rendered (<=600 chars per probe, 8 newest rows); rejection never costs a candidate repair turn"
   },
   "evolutionGuidance": {

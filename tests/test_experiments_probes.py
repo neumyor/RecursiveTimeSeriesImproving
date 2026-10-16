@@ -1,14 +1,18 @@
-from __future__ import annotations
-
-"""Probe validation and execution: planted-defect fixtures, the trust rule, isolation.
+"""Probe validation and execution: planted-defect families, controls, isolation.
 
 These tests exercise experiments/probes.py exactly the way the loop will:
 sources written by "the agent" into probes/<id>/probe.py, proposals as parsed
 probe_proposal.json, every run inside the killpg-protected subprocess.  The
 probe sources below are intentionally realistic agent output — numpy-only
 diagnostics under the candidate whitelist — so check_probe_source, the worker
-contract checks and the validation rule are all exercised end to end.
+contract checks and the family/controls validation rule are all exercised
+end to end.  The trust-rule tests encode the M4 review requirements: honest
+probes complete exactly their own fixture family, a near-zero noise probe
+completes nothing (negative controls), and a linear probe cannot see the
+bilinear defect.
 """
+
+from __future__ import annotations
 
 import importlib.util
 import math
@@ -36,7 +40,7 @@ def _load_probes() -> Any:
 
 P = _load_probes()
 
-# A GOOD residual probe: period-24 band energy of the 1-step residual series.
+# A GOOD periodicity probe: period-24 band energy of the 1-step residual series.
 GOOD_PROBE_SOURCE = '''import numpy as np
 
 
@@ -59,6 +63,107 @@ class Band24Probe:
         periods[positive] = 1.0 / freqs[positive]
         band = (periods >= 21.6) & (periods <= 26.4)
         return {"band24": float(power[band].sum())}
+'''
+
+# A GOOD lag probe: R^2 of the channel-0 residual on channel 1 three rows back.
+LAG3_PROBE_SOURCE = '''import numpy as np
+
+
+def create_probe():
+    return Xlag3Probe()
+
+
+class Xlag3Probe:
+    def __init__(self):
+        self.probe_id = "xlag3-r2"
+
+    def run(self, artifacts):
+        e = np.asarray(artifacts["residuals"]["e"], dtype=np.float64)
+        e = e[np.isfinite(e).all(axis=1)]
+        y = e[3:, 0]
+        design = np.hstack([e[:-3, 1:2], np.ones((y.shape[0], 1))])
+        beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ beta
+        total = y - y.mean()
+        return {"xlag3R2": float(1.0 - residual @ residual / (total @ total))}
+'''
+
+# A GOOD nonlinear probe: R^2 of the squared channel-0 residual on thresholded
+# (tanh) channel-1 lags — the bilinear/conditional-variance signature.
+BILINEAR_PROBE_SOURCE = '''import numpy as np
+
+
+def create_probe():
+    return BilinearProbe()
+
+
+class BilinearProbe:
+    def __init__(self):
+        self.probe_id = "bilinear-r2"
+
+    def run(self, artifacts):
+        e = np.asarray(artifacts["residuals"]["e"], dtype=np.float64)
+        e = e[np.isfinite(e).all(axis=1)]
+        y = e[2:, 0] ** 2
+        s = float(e[:, 1].std())
+        design = np.hstack([
+            np.tanh(e[1:-1, 1:2] / s),
+            np.tanh(e[:-2, 1:2] / s),
+            np.ones((y.shape[0], 1)),
+        ])
+        beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ beta
+        total = y - y.mean()
+        return {"bilinearR2": float(1.0 - residual @ residual / (total @ total))}
+'''
+
+# A LINEAR-ONLY probe: 16-lag linear R^2 of both channels' residuals.  It can
+# see the sinusoid and the lag-3 defect but must be blind to the bilinear one.
+LINEAR_PROBE_SOURCE = '''import numpy as np
+
+
+def create_probe():
+    return LinearLagProbe()
+
+
+class LinearLagProbe:
+    def __init__(self):
+        self.probe_id = "linear-lags"
+
+    def run(self, artifacts):
+        e = np.asarray(artifacts["residuals"]["e"], dtype=np.float64)
+        e = e[np.isfinite(e).all(axis=1)]
+        y = e[8:, 0]
+        feats = [e[8 - k : e.shape[0] - k, c] for k in range(1, 9) for c in range(e.shape[1])]
+        design = np.hstack([np.stack(feats, axis=1), np.ones((y.shape[0], 1))])
+        beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ beta
+        total = y - y.mean()
+        return {"linearR2": float(1.0 - residual @ residual / (total @ total))}
+'''
+
+# A NOISE probe: lag-13 cross-channel R^2 — nothing is planted at lag 13, so
+# the signalKey is pure near-zero noise (reviewer B's demonstrated hole).
+NOISE_PROBE_SOURCE = '''import numpy as np
+
+
+def create_probe():
+    return NoiseProbe()
+
+
+class NoiseProbe:
+    def __init__(self):
+        self.probe_id = "noise-r2"
+
+    def run(self, artifacts):
+        e = np.asarray(artifacts["residuals"]["e"], dtype=np.float64)
+        e = e[np.isfinite(e).all(axis=1)]
+        y = e[13:, 0]
+        design = np.hstack([e[:-13, 1:2], np.ones((y.shape[0], 1))])
+        beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ beta
+        total = y - y.mean()
+        return {"noiseR2": float(1.0 - residual @ residual / (total @ total))}
 '''
 
 # A GOOD activation probe: linear-probe R^2 of the bandpassed channel-0
@@ -201,6 +306,9 @@ def registry_artifacts(task_name: str, seed: int, sizes: dict[str, int]) -> dict
     return P.artifacts_from_series(task.train_diag, meta_update={"seed": seed})
 
 
+FAMILY_OF_PAIR = ("period24", "period24", "cross-lag3", "cross-lag3", "nonlinear", "nonlinear")
+
+
 # ---------------------------------------------------------------------------
 # error taxonomy
 # ---------------------------------------------------------------------------
@@ -221,17 +329,24 @@ def test_error_taxonomy_subclasses_the_candidate_hierarchy() -> None:
 
 def test_good_band_probe_passes_validation(tmp_path: Path) -> None:
     source = write_probe(tmp_path, "band24-energy", GOOD_PROBE_SOURCE)
-    # Fixtures are deterministic: two calls with the same seed must agree, or
-    # validation records would not be reproducible.
+    # Fixtures and controls are deterministic: the same seed must reproduce
+    # them exactly, or validation records would not be comparable.
     fixtures = P.make_fixtures("residual", seed=0)
-    assert len(fixtures) == 4
-    for planted, clean in fixtures:
+    assert len(fixtures) == 6  # three families, two pairs each
+    controls = P.make_controls("residual", seed=0)
+    assert [len(entry) for entry in controls] == [P._N_CONTROLS] * 6
+    for index, (planted, clean) in enumerate(fixtures):
         assert np.isnan(planted["residuals"]["e"][0]).all()  # NaN-padded head
         assert np.isnan(planted["residuals"]["e"][-1]).all()  # ... and tail
         assert planted["residuals"]["origins"].shape == planted["residuals"]["r"].shape[:1]
         assert planted["residuals"]["origins"].dtype == np.int64
-        assert planted["meta"]["task"] == "synthetic"  # de-identified, never the registry name
-        assert set(planted) == {"residuals", "activations", "meta"}  # no windows/targets leak
+        assert planted["meta"]["task"] == "synthetic"  # de-identified
+        assert planted["meta"]["family"] == FAMILY_OF_PAIR[index]
+        assert set(planted) == {"residuals", "activations", "meta"}  # no windows/targets
+    for (planted, clean), pair_controls in zip(fixtures, controls):
+        for control in pair_controls:
+            assert control["meta"]["family"] == clean["meta"]["family"]
+            assert control["meta"]["control"] is True
     for (p1, c1), (p2, c2) in zip(fixtures, P.make_fixtures("residual", seed=0)):
         # equal_nan: the e series is NaN-padded by design, and NaN != NaN under
         # the default comparison.
@@ -244,12 +359,21 @@ def test_good_band_probe_passes_validation(tmp_path: Path) -> None:
     assert result["ok"] is True, result["reason"]
     assert result["reason"] is None
     assert result["deterministic"] is True
-    assert result["pairs_needed"] == 2  # specialization-friendly: one miss of four allowed
-    assert result["pairs_passed"] >= 2
-    assert set(result["measured"]) == {0, 1, 2, 3}
+    assert result["familyComplete"] is True
+    assert result["families"]["period24"] == {"pairsPassed": 2, "pairsTotal": 2, "complete": True}
+    # Specificity: a periodicity probe completes only its own family.
+    assert result["families"]["cross-lag3"]["complete"] is False
+    assert result["families"]["nonlinear"]["complete"] is False
+    assert set(result["measured"]) == set(range(6))
     for entry in result["measured"].values():
+        assert len(entry["controls"]) == P._N_CONTROLS
+    # The direction/margin claims hold on the probe's own family; the other
+    # families' pairs may legitimately fail (that is the specialization rule).
+    period24 = [e for e in result["measured"].values() if e["family"] == "period24"]
+    for entry in period24:
         assert entry["planted"] > entry["clean"]  # direction holds
         assert entry["margin"] > P.RELATIVE_MARGIN
+        assert entry["passes"] is True
 
 
 def test_wrong_direction_fails_with_measured_values(tmp_path: Path) -> None:
@@ -275,10 +399,64 @@ def test_garbage_probe_is_a_contract_violation(tmp_path: Path) -> None:
     assert result["measured"] == {}  # the very first pair already failed
 
 
+def test_lag3_probe_completes_only_cross_lag3(tmp_path: Path) -> None:
+    source = write_probe(tmp_path, "xlag3-r2", LAG3_PROBE_SOURCE)
+    result = P.validate_probe(source, make_proposal("xlag3-r2", "xlag3R2"), "residual")
+    assert result["ok"] is True, result["reason"]
+    assert result["families"]["cross-lag3"] == {"pairsPassed": 2, "pairsTotal": 2, "complete": True}
+    assert result["families"]["period24"]["complete"] is False
+    assert result["families"]["nonlinear"]["complete"] is False
+
+
+def test_nonlinear_probe_completes_only_the_nonlinear_family(tmp_path: Path) -> None:
+    source = write_probe(tmp_path, "bilinear-r2", BILINEAR_PROBE_SOURCE)
+    result = P.validate_probe(source, make_proposal("bilinear-r2", "bilinearR2"), "residual")
+    assert result["ok"] is True, result["reason"]
+    assert result["families"]["nonlinear"] == {"pairsPassed": 2, "pairsTotal": 2, "complete": True}
+    assert result["families"]["period24"]["complete"] is False
+    assert result["families"]["cross-lag3"]["complete"] is False
+    # The measured signal is the bilinear R^2 gap: large on the planted
+    # nonlinear pairs, at the clean noise floor everywhere else.
+    nonlinear = [e for e in result["measured"].values() if e["family"] == "nonlinear"]
+    for entry in nonlinear:
+        assert entry["planted"] > 0.05
+        assert abs(entry["clean"]) < 0.01
+
+
+def test_linear_probe_fails_the_nonlinear_family(tmp_path: Path) -> None:
+    """The bilinear defect is invisible to linear probes by construction: the
+    planted channel's second moments equal the clean ones up to one common
+    scale factor, so a linear R^2 sees pure sampling noise there.  The probe
+    may honestly complete the linear families (sinusoid, lag-3) — the point
+    is that it cannot see the bilinear defect."""
+    source = write_probe(tmp_path, "linear-lags", LINEAR_PROBE_SOURCE)
+    result = P.validate_probe(source, make_proposal("linear-lags", "linearR2"), "residual")
+    assert result["families"]["nonlinear"]["complete"] is False
+    assert result["families"]["nonlinear"]["pairsPassed"] < 2
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_negative_controls_kill_noise_probes(tmp_path: Path, seed: int) -> None:
+    """Reviewer B's demonstrated hole: a near-zero signalKey used to pass on
+    relative margins alone.  With the negative controls and the gap>spread
+    rule, pure noise must complete no family, at every seed."""
+    source = write_probe(tmp_path, "noise-r2", NOISE_PROBE_SOURCE)
+    result = P.validate_probe(source, make_proposal("noise-r2", "noiseR2"), "residual", seed=seed)
+    assert result["ok"] is False
+    assert result["familyComplete"] is False
+    assert all(not summary["complete"] for summary in result["families"].values())
+    # and the values themselves tell the noise story: near zero on both sides
+    for entry in result["measured"].values():
+        assert abs(entry["planted"]) < 0.01
+        assert abs(entry["clean"]) < 0.01
+
+
 def test_activation_probe_passes_validation(tmp_path: Path) -> None:
     fixtures = P.make_fixtures("activation", seed=0)
+    controls = P.make_controls("activation", seed=0)
     assert len(fixtures) == 2
-    for planted, clean in fixtures:
+    assert [len(entry) for entry in controls] == [P._N_CONTROLS] * 2
+    for (planted, clean), pair_controls in zip(fixtures, controls):
         # The injection happens at layer 2's output: layer 1 (upstream) must be
         # identical between the pair members, layer 2 (and 3) must differ.
         assert np.array_equal(planted["activations"]["layer1"], clean["activations"]["layer1"])
@@ -289,14 +467,19 @@ def test_activation_probe_passes_validation(tmp_path: Path) -> None:
         n_sub = planted["activations"]["layer2"].shape[0]
         assert planted["meta"]["activationOrigins"] == list(range(n_sub))
         assert planted["residuals"]["origins"].shape[0] == n_sub
+        for control in pair_controls:
+            assert control["meta"]["variant"] == "clean"  # no injection applied
+            assert not np.array_equal(control["activations"]["layer2"], planted["activations"]["layer2"])
 
     source = write_probe(tmp_path, "layer-gap", ACT_PROBE_SOURCE)
     result = P.validate_probe(
         source, make_proposal("layer-gap", "layer2_gap", direction="higher"), "activation"
     )
     assert result["ok"] is True, result["reason"]
-    assert result["pairs_needed"] == 1
-    assert set(result["measured"]) == {0, 1}
+    # Activation rule: BOTH pairs must pass (they share one net and one
+    # injection direction, so a single lucky draw must not be enough).
+    assert result["families"]["activation"] == {"pairsPassed": 2, "pairsTotal": 2, "complete": True}
+    assert result["familyComplete"] is True
     for entry in result["measured"].values():
         assert entry["planted"] > entry["clean"]
         assert entry["margin"] > P.RELATIVE_MARGIN

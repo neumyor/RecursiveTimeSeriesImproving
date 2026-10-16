@@ -65,13 +65,19 @@ A JSON object with exactly these fields, all non-empty strings:
 ## Validation, then trust
 
 New probes never touch your data first. They are validated on synthetic
-fixtures with KNOWN planted structure — residual fixtures plant periodic
-components and cross-channel lag coupling at undisclosed parameters;
-activation fixtures plant structure at a known layer of a fixed small
-network. Your probe is kept only if its `signalKey` number moves in the
-declared direction on the planted fixtures and the probe is deterministic.
-The verdict appears in your next round's feedback. A validated probe is
-re-run on every future incumbent and its output is shown to you every round.
+fixtures with KNOWN planted structure — three residual families (a periodic
+component, a cross-channel lag injection, and a nonlinear threshold coupling,
+each at two signal draws and undisclosed parameters) and one activation
+family (planted structure at a known layer of a fixed small network, two
+draws). Every fixture pair also carries clean-only negative controls at
+fresh seeds. Your probe is kept only if, for at least ONE complete family:
+on every planted pair its `signalKey` number moves in the declared direction
+against the clean member AND every control, with a clear relative margin,
+and the planted value stands clearly above the whole clean cluster; plus the
+probe is deterministic (same fixture twice, identical output) and within the
+size cap. The verdict appears in your next round's feedback. A validated
+probe is re-run on every future incumbent and its output is shown to you
+every round.
 
 A probe that times out (120 s), crashes, exceeds the output cap, or returns
 nondeterministic results is rejected with the reason in your feedback. Fix it
