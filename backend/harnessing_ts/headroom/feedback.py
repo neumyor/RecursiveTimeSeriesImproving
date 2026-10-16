@@ -98,6 +98,12 @@ def render_feedback(
         blocks.append(_card_table(ordered, total, perm))
     elif arm == "self-built":
         blocks.append(_probe_table(probe_rows or [], validation_rows or []))
+    elif arm == "augmented":
+        # The fixed card first (what the backend already covers), then the
+        # agent's own validated probes (the agent's additions on top).
+        rows, total = _split_gains(gains)
+        blocks.append(_card_table(_sorted_by_lcb(rows), total, None))
+        blocks.append(_probe_table(probe_rows or [], validation_rows or []))
     return "\n\n".join(blocks) + "\n"
 
 

@@ -77,6 +77,10 @@ from harnessing_ts.settings.llm import build_sdk_invocation_config, read_effecti
 from harnessing_ts.state.message_log import MessageLog
 
 AGENT_TOOLS = ["read", "glob", "grep", "write", "edit"]
+# Arm groups: which arms collect/run agent-written probes, and which render
+# the backend defect card.  "augmented" belongs to both.
+PROBE_ARMS = ("self-built", "augmented")
+CARD_ARMS = ("fixed", "placebo", "augmented")
 # The diversity judge's system prompt: role, JSON contract, neutral-wording
 # constraints.  Arm-free by construction (no arm is ever named).
 JUDGE_SYSTEM_PROMPT = (_REPO_ROOT / "experiments" / "prompts" / "judge.md").read_text(
@@ -283,7 +287,7 @@ class HeadroomLoop:
         (self.ws / "models" / "candidates").mkdir(parents=True, exist_ok=True)
         (self.ws / "logs").mkdir(parents=True, exist_ok=True)
         (self.ws / "data").mkdir(parents=True, exist_ok=True)
-        if self.arm == "self-built":
+        if self.arm in PROBE_ARMS:
             (self.ws / "probes").mkdir(parents=True, exist_ok=True)
         self.heldout.mkdir(parents=True, exist_ok=True)
         self.heldout.chmod(0o700)
@@ -367,7 +371,7 @@ class HeadroomLoop:
         assert self.seg_diag is not None and self.values is not None
         self._activations = None
         self._activation_origins = None
-        if self.arm != "self-built" or self.seg_diag.origins.size == 0:
+        if self.arm not in PROBE_ARMS or self.seg_diag.origins.size == 0:
             return
         positions = np.linspace(
             0, self.seg_diag.origins.size - 1, min(ACTIVATION_WINDOWS, self.seg_diag.origins.size)
@@ -395,7 +399,7 @@ class HeadroomLoop:
     def _feedback_gains(self) -> list[Any]:
         """The incumbent's card gains (card_level), empty for the other arms."""
         assert self.seg_diag is not None
-        if self.arm not in {"fixed", "placebo"}:
+        if self.arm not in CARD_ARMS:
             return []
         seg_a, seg_b = ev.split_ab(self.seg_diag, self.cfg)
         channels = self.seg_diag.values.shape[1]
@@ -441,7 +445,7 @@ class HeadroomLoop:
             "round": state.round_index,
             "budgetLeft": self.cfg.budget_candidates - state.round_index + 1,
         }
-        if self.arm == "self-built":
+        if self.arm in PROBE_ARMS:
             probe_rows, validation_rows, self._probe_seconds = self._probe_feedback(state)
             body = render_feedback(
                 self.arm,
@@ -454,7 +458,12 @@ class HeadroomLoop:
             )
             # The how-to-write-probes guide rides below the dynamic block:
             # scaffold and probe outputs first (problem), contract text after.
+            # The augmented arm additionally gets the complementarity note
+            # (its probes must go beyond what the card already covers).
             guide = (_REPO_ROOT / "experiments" / "prompts" / "probes.md").read_text(encoding="utf-8")
+            if self.arm == "augmented":
+                note = (_REPO_ROOT / "experiments" / "prompts" / "probes-augmented.md").read_text(encoding="utf-8")
+                guide = note.rstrip() + "\n\n" + guide
             return body.rstrip() + "\n\n" + guide.rstrip() + "\n"
         placebo_perm = None
         if self.arm == "placebo":
@@ -1061,7 +1070,7 @@ class HeadroomLoop:
             attempts += 1
             round_text = self._render_round(state, feedback_block, failure_block, inspiration)
             await self._send_with_retries(state, system_prompt, round_text)
-            if self.arm == "self-built":
+            if self.arm in PROBE_ARMS:
                 # Probes are tools, not deliverables: validation never costs a
                 # repair turn, and the verdict rides the next round's feedback.
                 started = time.monotonic()
@@ -1297,7 +1306,9 @@ async def main_async() -> None:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--task", default="hmm_ar_switch")
     parser.add_argument(
-        "--arm", default="fixed", choices=["scalar", "fixed", "self-built", "placebo"]
+        "--arm",
+        default="fixed",
+        choices=["scalar", "fixed", "self-built", "augmented", "placebo"],
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--budget", type=int, default=25)

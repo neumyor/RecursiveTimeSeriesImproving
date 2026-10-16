@@ -325,6 +325,8 @@ def test_endpoint_table_and_contrasts(synthetic_analysis: dict[str, Any]) -> Non
         "self-built-vs-fixed",
         "fixed-vs-scalar",
         "self-built-vs-scalar",
+        "augmented-vs-self-built",
+        "augmented-vs-fixed",
     }
     card_scalar = contrasts["fixed-vs-scalar"]
     assert card_scalar["nBlocks"] == 1  # one (task, seed) block shared by both arms

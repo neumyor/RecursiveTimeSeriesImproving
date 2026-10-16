@@ -52,4 +52,4 @@ def test_from_dict_rejects_invalid_config_with_all_reasons() -> None:
 
 
 def test_arm_values_match_the_loop_choices() -> None:
-    assert ARM_VALUES == ("scalar", "fixed", "self-built", "placebo")
+    assert ARM_VALUES == ("scalar", "fixed", "self-built", "augmented", "placebo")

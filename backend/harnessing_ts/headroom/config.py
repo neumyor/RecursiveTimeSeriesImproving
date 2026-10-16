@@ -13,7 +13,8 @@ from typing import Any
 
 
 # Feedback arms; the run's arm is a loop argument, not a config field.
-ARM_VALUES = ("scalar", "fixed", "self-built", "placebo")
+# "augmented" = the fixed card PLUS the agent's own validated probes.
+ARM_VALUES = ("scalar", "fixed", "self-built", "augmented", "placebo")
 
 _FIELD_ALIASES: dict[str, str] = {
     "input_length": "inputLength",

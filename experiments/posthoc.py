@@ -85,7 +85,13 @@ _DEFAULT_M0_TEMPLATE = "m0_deep.py"
 # The only absolute roots a well-behaved agent may touch besides its own ws.
 _ALLOWED_ROOTS = (_REPO_ROOT / "experiments" / "templates", _REPO_ROOT / "backend")
 _READ_TOOLS = ("read", "glob", "grep")
-_CONTRASTS = (("self-built", "fixed"), ("fixed", "scalar"), ("self-built", "scalar"))
+_CONTRASTS = (
+    ("self-built", "fixed"),
+    ("fixed", "scalar"),
+    ("self-built", "scalar"),
+    ("augmented", "self-built"),
+    ("augmented", "fixed"),
+)
 _EXACT_PERM_CAP = 8192  # 2^13 sign patterns; at or below this the test is exact
 _MC_PERMS = 10_000
 _GAIN_RATIO_FLAG = 5.0

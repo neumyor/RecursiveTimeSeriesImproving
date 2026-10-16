@@ -460,6 +460,77 @@ def test_validated_probe_runs_from_the_heldout_frozen_copy(tmp_path: Path) -> No
     assert "ac24" in output  # the frozen source, not the tampered ws copy
 
 
+def test_augmented_arm_combines_card_and_probes(tmp_path: Path) -> None:
+    """The augmented arm renders the fixed card AND runs the probe channel:
+    round 1 shows m0's card plus the probe bootstrap message; round 2 shows
+    the verdicts and the probe output below the card, with the
+    complementarity note riding above the probe guide."""
+    loop_module = _load_loop()
+    script_pos = {"pos": 0}
+    prompts: list[str] = []
+
+    def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
+        class _Runner(ScriptedRunner):
+            async def send(self, prompt: str) -> list[Any]:
+                prompts.append(prompt)
+                pos = script_pos["pos"]
+                script_pos["pos"] += 1
+                model_source, proposal = _better_candidate(ws, pos)
+                candidate_dir = ws / "models" / "candidates" / proposal["candidateId"]
+                candidate_dir.mkdir(parents=True, exist_ok=True)
+                (candidate_dir / "model.py").write_text(model_source, encoding="utf-8")
+                (candidate_dir / "proposal.json").write_text(json.dumps(proposal), encoding="utf-8")
+                if pos == 0:
+                    pdir = ws / "probes" / "p-ac24"
+                    pdir.mkdir(parents=True, exist_ok=True)
+                    (pdir / "probe.py").write_text(
+                        _AC24_PROBE.replace("__PID__", "p-ac24"), encoding="utf-8"
+                    )
+                    (pdir / "probe_proposal.json").write_text(
+                        json.dumps(_probe_proposal("p-ac24", "higher")), encoding="utf-8"
+                    )
+                return []
+
+        return _Runner()
+
+    run_dir = tmp_path / "run-aug"
+    loop = loop_module.HeadroomLoop(
+        run_dir=run_dir,
+        task_name="lgssm_xchannel",
+        arm="augmented",
+        seed=0,
+        cfg=loop_module.HeadroomConfig(
+            input_length=48,
+            horizon=8,
+            lag_segments=((0, 7), (8, 15), (16, 31)),
+            fir_len_cap=48,
+            beyond_l_lags=2,
+            band_period_range=(4, 24),
+            budget_candidates=2,
+            candidate_timeout_seconds=60.0,
+            ridge_alphas=(1.0, 100.0),
+            evolution=False,
+        ),
+        sizes=SMALL_SIZES,
+        runner_factory=factory,
+        m0_template="m0.py",
+    )
+    asyncio.run(loop.run())
+
+    for prompt in prompts:
+        # The card, the complementarity note, and the probe guide every round.
+        assert "## Remaining improvement by coordinate" in prompt
+        assert "Your probes alongside the fixed diagnostics" in prompt
+        assert "## probe.py contract" in prompt
+    assert "No validated probes yet" in prompts[0]
+    assert "## Probe validation results" not in prompts[0]
+    assert "| p-ac24 | kept |" in prompts[1]
+    assert "lag-24 autocorrelation of the 1-step residual |" in prompts[1]
+    rounds = _rounds(run_dir)
+    assert rounds[0]["probesSubmitted"] == 1
+    assert rounds[0]["probesKept"] == 1
+
+
 def test_self_built_samples_activations_with_alignment(tmp_path: Path) -> None:
     """The activation artifact: [B, P, D] per layer, aligned to residual rows,
     and absent (not an error) for incumbents without the extension."""

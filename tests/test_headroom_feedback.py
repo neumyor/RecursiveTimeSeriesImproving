@@ -10,7 +10,7 @@ from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.feedback import render_feedback
 
 HORIZON = 24
-ARMS = ("scalar", "fixed", "self-built", "placebo")
+ARMS = ("scalar", "fixed", "self-built", "augmented", "placebo")
 # Contract/plan §3.2 forbidden vocabulary: dataset names, domain words, and
 # status language that could prime or certify any arm.
 FORBIDDEN_SUBSTRINGS = (
@@ -310,3 +310,26 @@ def test_self_built_shows_the_newest_probe_rows() -> None:
     assert "| p02 |" in out and "| p09 |" in out
     assert "| p00 |" not in out and "| p01 |" not in out
     assert "2 earlier probes not shown" in out
+
+
+def test_augmented_renders_card_and_probe_outputs_together() -> None:
+    """The augmented arm's middle block is the fixed card plus the agent's own
+    probe outputs and verdicts — the full combination treatment."""
+    out = render_feedback(
+        "augmented",
+        _make_incumbent(),
+        _make_gains(),
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[
+            {"probeId": "p-nonlin", "measures": "threshold coupling", "output": {"r2": 0.2}}
+        ],
+        validation_rows=[{"probeId": "p-nonlin", "ok": True, "detail": "validated"}],
+    )
+    # The backend card is present, in the fixed arm's exact wording.
+    assert "## Remaining improvement by coordinate" in out
+    assert "| band(P=24) | 0.0340 | 0.0260 |" in out
+    # The agent's probe channel rides below it.
+    assert "## Probe validation results" in out
+    assert "| p-nonlin | kept | validated |" in out
+    assert '"r2": 0.2' in out
