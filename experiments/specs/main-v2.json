@@ -121,9 +121,9 @@
     "ifG1Fails": "prompt iteration is allowed until this spec's runs begin; after the first P2 v2 run, prompts are frozen"
   },
   "calibrationEvidence": {
-    "cal1-hac-bandwidth": "floor frozen at max_lag+H=359: coverage 1.0/1.0 at every tested floor, widening costs 14-26%",
-    "cal2-etth1-acceptance": "null false-accept 0/20, planted detection 8/8 at 2869 diag origins",
-    "cal3-exchange-rate": "card reports no headroom (all LCB<0); certificate declines to stop at 735 cert origins (power envelope)",
+    "cal1-hac-bandwidth": "floor frozen at max_lag+H=359: coverage 1.0/1.0 at every tested floor (359/700/1200/2400), re-measured at the fixed 95% level (revision 2026-10-16b rerun)",
+    "cal2-etth1-acceptance": "null false-accept 0/20, planted detection 8/8 at the diag origins (DM acceptance is level-independent; re-confirmed in the 2026-10-16b rerun)",
+    "cal3-exchange-rate": "under the fixed 95% level the round-0 certificate still CONSERVATIVELY DECLINES to certify saturation on the near-random-walk control (saturated=false, 17 statistics above threshold) — the negative-control verdict survives the alpha-ledger removal; the power envelope remains the binding constraint at the small cert segment",
     "g0-recalibration": "G0 must be measured under the fixed-level stop rule (revision 2026-10-16b): all seven gates with the linear incumbent (frozen as experiments/specs/g0-final-report-v3.json) and G0-3/4/6 with the deep incumbent (frozen as experiments/specs/g0-final-report-v3-deep.json) before any P2 v2 run; the earlier v1-rule artifacts (g0-final-report.json, g0-final-report-v2.json) are historical record"
   }
 }
