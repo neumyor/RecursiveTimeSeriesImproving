@@ -18,7 +18,7 @@ def test_burn_in_combines_max_lag_and_fir_cap() -> None:
 
 
 def test_camel_case_round_trip(tmp_path: Path) -> None:
-    cfg = HeadroomConfig(arm="bj", horizon=24, diag_a_ratio=0.6, seed=7)
+    cfg = HeadroomConfig(arm="self-built", horizon=24, diag_a_ratio=0.6, seed=7, evolution=False)
     path = tmp_path / "config.headroom.json"
     cfg.to_json(path)
     assert HeadroomConfig.from_json(path) == cfg

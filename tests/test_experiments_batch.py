@@ -136,7 +136,7 @@ def test_matrix_enumeration(tmp_path: Path) -> None:
             {"name": "hmm", "kind": "synthetic"},
             {"name": "real-ett", "kind": "real", "csv": str(_write_csv(tmp_path / "ett.csv"))},
         ],
-        arms=["scalar", "card"],
+        arms=["scalar", "fixed"],
         seeds=[0, 1, 2, 3],
     )
     cells = batch.enumerate_cells(batch.load_spec(spec))
@@ -144,7 +144,7 @@ def test_matrix_enumeration(tmp_path: Path) -> None:
     assert {cell.cell_id for cell in cells} == {
         f"{task}-{arm}-{seed}"
         for task in ("hmm", "real-ett")
-        for arm in ("scalar", "card")
+        for arm in ("scalar", "fixed")
         for seed in (0, 1, 2, 3)
     }
 
@@ -163,7 +163,7 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
             {"name": "hmm", "kind": "synthetic"},
             {"name": "real-ett", "kind": "real", "csv": str(_write_csv(tmp_path / "ett.csv"))},
         ],
-        arms=["scalar", "card"],
+        arms=["scalar", "fixed"],
         seeds=[0, 1, 2, 3],
     )
     # One cell is already finished: the loop command must never run for it.
@@ -179,7 +179,7 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
     expected = {
         f"{task}-{arm}-{seed}"
         for task in ("hmm", "real-ett")
-        for arm in ("scalar", "card")
+        for arm in ("scalar", "fixed")
         for seed in (0, 1, 2, 3)
     }
     for cell_id in expected:
@@ -195,9 +195,9 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
         assert done == (not cell_id.endswith("-3"))
 
     counts = _invocation_counts(runs)
-    assert counts["hmm-card-0"] == 1  # succeeded first try
-    assert counts["hmm-card-1"] == 2  # failed once, retried once, succeeded
-    assert counts["hmm-card-3"] == 2  # retried ONCE even though it failed again
+    assert counts["hmm-fixed-0"] == 1  # succeeded first try
+    assert counts["hmm-fixed-1"] == 2  # failed once, retried once, succeeded
+    assert counts["hmm-fixed-3"] == 2  # retried ONCE even though it failed again
     assert counts["real-ett-scalar-1"] == 2
 
     records = [
@@ -207,13 +207,13 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
     fails = [r for r in records if r["event"] == "fail"]
     oks = [r for r in records if r["event"] == "ok"]
     assert len(oks) == 11  # 15 run cells - 4 permanent failures
-    assert [r["attempt"] for r in fails if r["cell"] == "hmm-card-1"] == [1]
-    assert [r["attempt"] for r in fails if r["cell"] == "hmm-card-3"] == [1, 2]
+    assert [r["attempt"] for r in fails if r["cell"] == "hmm-fixed-1"] == [1]
+    assert [r["attempt"] for r in fails if r["cell"] == "hmm-fixed-3"] == [1, 2]
     assert all(r["exitCode"] in (1, 2) for r in fails)
     assert all("at" in r and "seconds" in r for r in records)
     # Final failures are reported in the summary.
     out = capsys.readouterr().out
-    assert "hmm-card-3" in out and "failed after the retry" in out
+    assert "hmm-fixed-3" in out and "failed after the retry" in out
 
     # No secret anywhere the batch wrote, even though the fake printed it.
     assert FAKE_SECRET not in out + capsys.readouterr().err
@@ -221,7 +221,7 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
         if path.is_file():
             assert FAKE_SECRET not in path.read_text(encoding="utf-8", errors="replace"), path
     # The chatty fake DID hit the log; the scrub is what removed it.
-    assert "TS_HARNESS_LLM_API_KEY=***" in (runs / "logs" / "hmm-card-0.log").read_text(
+    assert "TS_HARNESS_LLM_API_KEY=***" in (runs / "logs" / "hmm-fixed-0.log").read_text(
         encoding="utf-8"
     )
 
@@ -232,17 +232,17 @@ def test_only_filter_subsets_the_matrix(tmp_path: Path, fake_loop: Path) -> None
         tmp_path / "spec.json",
         tasks=[{"name": "hmm", "kind": "synthetic"}, {"name": "real-ett", "kind": "real",
                                                       "csv": str(_write_csv(tmp_path / "ett.csv"))}],
-        arms=["scalar", "card"],
+        arms=["scalar", "fixed"],
         seeds=[0, 1],
     )
     runs = tmp_path / "only-runs"
-    assert _main(batch, fake_loop, spec, runs, "--only", "hmm-card") == 0
-    assert set(_invocation_counts(runs)) == {"hmm-card-0", "hmm-card-1"}
+    assert _main(batch, fake_loop, spec, runs, "--only", "hmm-fixed") == 0
+    assert set(_invocation_counts(runs)) == {"hmm-fixed-0", "hmm-fixed-1"}
 
     runs2 = tmp_path / "only-runs2"
     assert _main(batch, fake_loop, spec, runs2, "--only", "seed=1") == 0
     assert set(_invocation_counts(runs2)) == {
-        "hmm-scalar-1", "hmm-card-1", "real-ett-scalar-1", "real-ett-card-1"
+        "hmm-scalar-1", "hmm-fixed-1", "real-ett-scalar-1", "real-ett-fixed-1"
     }
 
 
@@ -253,7 +253,7 @@ def test_unstartable_loop_command_is_a_contained_cell_failure(
     spec = _write_spec(
         tmp_path / "spec.json",
         tasks=[{"name": "hmm", "kind": "synthetic"}],
-        arms=["card"],
+        arms=["fixed"],
         seeds=[0, 1],
     )
     runs = tmp_path / "runs"
@@ -281,7 +281,7 @@ def test_bad_specs_and_args_are_batch_fatal(
     good = _write_spec(
         tmp_path / "good.json",
         tasks=[{"name": "hmm", "kind": "synthetic"}],
-        arms=["card"],
+        arms=["fixed"],
         seeds=[0],
     )
     runs = tmp_path / "runs"
@@ -300,7 +300,7 @@ def test_bad_specs_and_args_are_batch_fatal(
     missing_csv = tmp_path / "missing_csv.json"
     missing_csv.write_text(
         json.dumps({"tasks": [{"name": "ett", "kind": "real", "csv": "experiments/data/nope.csv"}],
-                    "arms": ["card"], "seeds": [0], "budget": 3}),
+                    "arms": ["fixed"], "seeds": [0], "budget": 3}),
         encoding="utf-8",
     )
     untouched = tmp_path / "untouched-runs"

@@ -42,7 +42,7 @@ SMALL_SIZES = {"train": 1500, "diag": 1100, "cert": 1300, "test": 1800}
 
 def _small_cfg(budget: int = 3) -> Any:
     return loop.HeadroomConfig(
-        arm="card",
+        arm="fixed",
         input_length=48,
         horizon=8,
         lag_segments=((0, 7), (8, 15), (16, 31)),
@@ -197,6 +197,7 @@ def _run_loop(
         sizes=None if real_csv is not None else SMALL_SIZES,
         real_csv=real_csv,
         runner_factory=_make_factory(_candidate_script(budget)),
+        m0_template="m0.py",
     )
     asyncio.run(loop_obj.run())
 
@@ -221,11 +222,11 @@ def synthetic_analysis(tmp_path_factory: pytest.TempPathFactory) -> dict[str, An
     posthoc report produced by the real CLI over their directory."""
     tmp = tmp_path_factory.mktemp("synthetic")
     runs_dir = tmp / "p2"
-    _run_loop(runs_dir / "card-s0", tmp / "heldout-root", arm="card", seed=0, budget=3)
+    _run_loop(runs_dir / "fixed-s0", tmp / "heldout-root", arm="fixed", seed=0, budget=3)
     _run_loop(runs_dir / "scalar-s0", tmp / "heldout-root", arm="scalar", seed=0, budget=3)
     out = tmp / "analysis.json"
     code = posthoc.main(
-        ["--runs", str(runs_dir), "--out", str(out), "--config", str(_write_cfg(tmp))]
+        ["--m0-template", "m0.py", "--runs", str(runs_dir), "--out", str(out), "--config", str(_write_cfg(tmp))]
     )
     assert code == 0
     raw = out.read_text(encoding="utf-8")
@@ -312,7 +313,7 @@ def test_incumbent_chain_replay_and_endpoints(synthetic_analysis: dict[str, Any]
 def test_endpoint_table_and_contrasts(synthetic_analysis: dict[str, Any]) -> None:
     report = synthetic_analysis["report"]
     table = {(row["task"], row["arm"]): row for row in report["endpointTable"]}
-    assert ("lgssm_xchannel", "card") in table
+    assert ("lgssm_xchannel", "fixed") in table
     assert ("lgssm_xchannel", "scalar") in table
     for row in report["endpointTable"]:
         assert row["nRuns"] >= 1
@@ -320,8 +321,12 @@ def test_endpoint_table_and_contrasts(synthetic_analysis: dict[str, Any]) -> Non
         assert row["e1"]["iqr"] >= 0.0
         assert row["e2"]["median"] is not None
     contrasts = {c["contrast"]: c for c in report["contrasts"]}
-    assert set(contrasts) == {"card-vs-scalar", "bj-vs-scalar", "card-vs-bj"}
-    card_scalar = contrasts["card-vs-scalar"]
+    assert set(contrasts) == {
+        "self-built-vs-fixed",
+        "fixed-vs-scalar",
+        "self-built-vs-scalar",
+    }
+    card_scalar = contrasts["fixed-vs-scalar"]
     assert card_scalar["nBlocks"] == 1  # one (task, seed) block shared by both arms
     assert card_scalar["permutations"] == "exact"
     for contrast in report["contrasts"]:
@@ -354,9 +359,9 @@ def test_audit_flags_planted_out_of_ws_paths(
 ) -> None:
     """A copied run tree with planted tool-call leaks must be flagged, while
     in-workspace, backend, and template reads stay clean."""
-    src = synthetic_analysis["runs_dir"] / "card-s0"
+    src = synthetic_analysis["runs_dir"] / "fixed-s0"
     runs_dir = tmp_path / "planted"
-    dst = runs_dir / "card-s0"
+    dst = runs_dir / "fixed-s0"
     shutil.copytree(src, dst)  # heldout.json still points at the shared tmp heldout
     ws = dst / "ws"
     heldout_dir = Path(json.loads((dst / "heldout.json").read_text(encoding="utf-8"))["path"])
@@ -438,7 +443,7 @@ def test_real_run_reports_null_gaps_and_ratio(tmp_path: Path) -> None:
     _run_loop(
         runs_dir / "real-s0",
         tmp_path / "heldout-root",
-        arm="card",
+        arm="fixed",
         seed=0,
         budget=2,
         task="real-fake",

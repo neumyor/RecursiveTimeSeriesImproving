@@ -79,12 +79,14 @@ from harnessing_ts.headroom.timeidx import segment_origins, windows
 
 # m0's source is the repo template: the loop copies it into
 # ws/models/incumbent/model.py at prepare(), but every acceptance overwrites
-# that file, so only the template still holds m0 verbatim.
-_M0_TEMPLATE = _REPO_ROOT / "experiments" / "templates" / "m0.py"
+# that file, so only the template still holds m0 verbatim.  The v2 default is
+# the PatchTST-lite template (plan §12.2); --m0-template overrides it for
+# analyzing runs made with the linear template.
+_DEFAULT_M0_TEMPLATE = "m0_deep.py"
 # The only absolute roots a well-behaved agent may touch besides its own ws.
-_ALLOWED_ROOTS = (_M0_TEMPLATE.parent, _REPO_ROOT / "backend")
+_ALLOWED_ROOTS = (_REPO_ROOT / "experiments" / "templates", _REPO_ROOT / "backend")
 _READ_TOOLS = ("read", "glob", "grep")
-_CONTRASTS = (("card", "scalar"), ("bj", "scalar"), ("card", "bj"))
+_CONTRASTS = (("self-built", "fixed"), ("fixed", "scalar"), ("self-built", "scalar"))
 _EXACT_PERM_CAP = 8192  # 2^13 sign patterns; at or below this the test is exact
 _MC_PERMS = 10_000
 _GAIN_RATIO_FLAG = 5.0
@@ -218,7 +220,13 @@ class _Replay:
     incumbent-chain members — rejected candidates never reach test.
     """
 
-    def __init__(self, run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path]) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        base_cfg: HeadroomConfig,
+        real_csvs: dict[str, Path],
+        m0_template: Path,
+    ) -> None:
         self.run_dir = run_dir
         self.ws = run_dir / "ws"
         heldout_ref = run_dir / "heldout.json"
@@ -242,6 +250,7 @@ class _Replay:
         }
         self.is_real = meta.get("task") == "real-deidentified"
         self._load_task(real_csvs)
+        self.m0_template = m0_template
         self._states: dict[str, dict[str, Any] | None] = {}
         self._cards: dict[str, list[dict[str, Any]] | None] = {}
         self.errors: dict[str, str] = {}
@@ -282,7 +291,7 @@ class _Replay:
         state: dict[str, Any] | None
         try:
             source = (
-                _M0_TEMPLATE
+                self.m0_template
                 if cand_id == "m0"
                 else self.ws / "models" / "candidates" / cand_id / "model.py"
             )
@@ -443,20 +452,22 @@ def _audit_paths(run_dir: Path) -> list[str]:
 # --- per-run analysis -------------------------------------------------------------------
 
 
-def _analyze_run(run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path]) -> dict[str, Any]:
+def _analyze_run(
+    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path], m0_template: Path
+) -> dict[str, Any]:
     """One run's record; any failure becomes {"run", "error"} and nothing else."""
     record: dict[str, Any] = {"run": run_dir.name, "error": None}
     try:
-        record.update(_analyze_run_inner(run_dir, base_cfg, real_csvs))
+        record.update(_analyze_run_inner(run_dir, base_cfg, real_csvs, m0_template))
     except Exception as exc:  # one broken run must not sink the whole report
         record["error"] = str(exc)
     return record
 
 
 def _analyze_run_inner(
-    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path]
+    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path], m0_template: Path
 ) -> dict[str, Any]:
-    replay = _Replay(run_dir, base_cfg, real_csvs)
+    replay = _Replay(run_dir, base_cfg, real_csvs, m0_template)
     cfg = replay.cfg
     rounds = _read_jsonl(run_dir / "rounds.jsonl")
     arm = next((str(row["arm"]) for row in rounds if row.get("arm")), None)
@@ -775,6 +786,7 @@ def analyze_runs(
     runs_dir: Path,
     config: Path | None = None,
     real_csvs: dict[str, Path] | None = None,
+    m0_template: str = _DEFAULT_M0_TEMPLATE,
 ) -> dict[str, Any]:
     """Analyze every run under ``runs_dir``; returns a JSON-ready dict.
 
@@ -782,8 +794,12 @@ def analyze_runs(
     table, contrasts and audit summaries simply skip it.
     """
     base_cfg = HeadroomConfig.from_json(config) if config is not None else HeadroomConfig()
+    template_path = _REPO_ROOT / "experiments" / "templates" / m0_template
+    if not template_path.is_file():
+        raise _RunError(f"m0 template does not exist: {template_path}")
     records = [
-        _analyze_run(run_dir, base_cfg, real_csvs or {}) for run_dir in _discover_runs(Path(runs_dir))
+        _analyze_run(run_dir, base_cfg, real_csvs or {}, template_path)
+        for run_dir in _discover_runs(Path(runs_dir))
     ]
     flagged = [rec["run"] for rec in records if rec.get("audit", {}).get("flagged")]
     gain_flagged = [rec["run"] for rec in records if rec.get("audit", {}).get("gainRatioFlags")]
@@ -807,6 +823,11 @@ def main(argv: list[str] | None = None) -> int:
         "--config", type=Path, default=None, help="HeadroomConfig JSON for the replay (default: frozen defaults)"
     )
     parser.add_argument(
+        "--m0-template",
+        default=_DEFAULT_M0_TEMPLATE,
+        help=f"m0 template filename under experiments/templates (default: {_DEFAULT_M0_TEMPLATE})",
+    )
+    parser.add_argument(
         "--real-csv",
         action="append",
         default=[],
@@ -822,7 +843,9 @@ def main(argv: list[str] | None = None) -> int:
         real_csvs[name] = Path(path)
     if not args.runs.is_dir() or not _discover_runs(args.runs):
         parser.error(f"no run directories under {args.runs}")
-    report = analyze_runs(args.runs, config=args.config, real_csvs=real_csvs)
+    report = analyze_runs(
+        args.runs, config=args.config, real_csvs=real_csvs, m0_template=args.m0_template
+    )
     out = args.out if args.out is not None else Path(args.runs) / "analysis.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(

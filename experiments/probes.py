@@ -1,0 +1,903 @@
+from __future__ import annotations
+
+"""Probe contract: AST source vetting, planted-defect validation, isolated execution.
+
+A probe is a diagnostic script the treatment-arm agent writes against the
+incumbent's evaluation artifacts; the agent-facing prompt text lives
+elsewhere.  This module is the trust mechanism: it decides whether a probe's
+declared signal is real (validation) and runs validated probes in isolation
+(execution).  The isolation patterns mirror
+backend/harnessing_ts/headroom/candidate.py deliberately — the probe runner
+reuses cand's whitelists, environment builder, exit-code convention and error
+hierarchy rather than growing a second one.
+
+Probe contract
+--------------
+One probe = one directory ``probes/<probe-id>/probe.py`` whose id matches
+``cand.CANDIDATE_ID_PATTERN`` ([a-z0-9][a-z0-9-]{0,63}) and whose file defines
+a top-level ``create_probe()`` returning an object with:
+
+- ``probe_id: str`` — must equal the directory name (``run_probe``) resp. the
+  proposal's ``probeId`` (``validate_probe``);
+- ``run(artifacts: dict) -> dict`` — a JSON-serializable summary dict whose
+  TOTAL serialized size is at most ``OUTPUT_CAP_BYTES`` (4096) bytes; larger
+  output is rejected as ``ProbeOutputTooLarge``.  Deterministic by contract:
+  the same artifacts must produce the same output (bitwise not required, but
+  validation reruns one fixture and requires identical output).
+
+``artifacts`` is the incumbent's evaluation artifacts — residuals and
+activations only, the two channels the paper gives probes.  Windows and
+targets are deliberately NOT part of the contract: probe output is rendered
+back into the agent's prompt, so raw input windows and ground-truth targets
+must not flow through it; anything target-conditional a diagnostic needs is
+already in ``r``, per (origin, h, c):
+
+    residuals    {"e": [T_e, C] float64,      1-step residual series,
+                                              NaN-padded at the head and
+                                              tail (realized rows only),
+                  "r": [n_r, H, C] float64,   H-step residuals at origins,
+                  "origins": [n_r] int64}     time index of each r row (into e)
+    activations  {layer_name: [n_sub, n_p, d] float32}  per-layer activations
+                 of the subsampled windows ({} when the incumbent has none)
+    meta         dict of plain JSON values: L, H, C, seed, incumbent=model_id,
+                 task = the DE-IDENTIFIED string "synthetic" | "real-deidentified"
+                 (never the registry/task name — probe output flows back into
+                 the agent's prompt), and, when activations are present,
+                 "activationOrigins": list[int] of length n_sub indexing rows
+                 of r, so activations[i] aligns with r[activationOrigins[i]].
+
+``probe_proposal.json`` sits beside the source and declares what the probe
+claims to measure (extra keys are tolerated; the loop adds "kind"):
+
+    {"probeId": str, "measures": str, "signalKey": str,
+     "expectedDirection": "higher" | "lower", "rationale": str}
+
+``signalKey`` names the output key that carries the validated signal; its
+value must be a finite number.
+
+Validation (``validate_probe``)
+-------------------------------
+Deterministic fixture pairs (``make_fixtures``), each (planted, clean):
+
+- residual kind, 4 pairs.  clean = per-channel AR(1) (phi=0.6, innovation sd
+  1.0) plus white noise (sd 0.5), T=2064, C=2; planted = clean plus the
+  defect.  Pairs 0-2: a period-24 sinusoid added to channel 0 at amplitude
+  0.5 * sd(clean channel 0).  Pair 3: a cross-channel lag-3 injection —
+  0.5 * sd(clean channel 0) / sd(clean channel 1) times channel 1 three rows
+  back, added to channel 0.  Artifacts are built by ``artifacts_from_series``
+  with a persistence incumbent, so every injected defect the incumbent cannot
+  predict lands in the residuals; the pair members differ only in residuals.
+- activation kind, 2 pairs.  Both members share one series (channel 0 = a
+  period-24 sinusoid of amplitude 1.0 plus white noise sd 0.5, channel 1 =
+  white noise) and one fixed seeded 3-layer torch-CPU MLP (64->32->16->8,
+  ReLU, threads=1); they differ only in the net variant: planted adds a rank-1
+  signal to layer 2's output — a fixed seeded unit direction scaled by the
+  KNOWN analytic period-24 component of the persistence residual (so a probe
+  reads it from ``r``, never from targets), at per-coordinate sd
+  ``_ACT_INJECT_BETA`` (2.0) times the clean layer-2 sd.  Layer 2 (and only
+  layer 2; layer 1 is upstream) becomes linearly informative about the
+  bandpassed residual; the r rows and activations share their sampled origins
+  and meta["activationOrigins"] is arange, mirroring the loop's alignment.
+
+A probe passes validation when the declared direction holds on >= 2 of 4
+residual pairs (>= 1 of 2 activation pairs) with relative margin > 5%
+(|a-b| / max(|a|, |b|, tiny)) — a periodicity probe is not required to fire on
+the cross-channel fixture — the output is deterministic (one fixture run
+twice gives identical output) and within the size cap.  Every failure lands
+in exactly one category with an expected-vs-actual message; probe-side
+failures come back as ``{"ok": False, "reason": ..., "measured": ...}`` rather
+than raised, because a rejected probe is a budgeted outcome for the loop.
+
+Execution (``run_probe``)
+-------------------------
+Same subprocess protocol as candidate.py: the source passes
+``check_probe_source`` first, then runs under ``cand.build_env()`` in a fresh
+temp cwd, stdout merged into stderr, ``start_new_session`` + SIGKILL of the
+whole process group on timeout, results via a JSON file (the only channel
+out).  The worker is this module itself, spawned through ``python -c`` with
+the module path as argv so the child's sys.path never sees experiments/
+(whose loop.py/batch.py must not shadow anything); artifacts travel via a
+temp npz (e/r/origins float64/int64, activations float32, meta as JSON).
+Exit codes follow candidate_worker: 0 = result written, 1 = crash, 3 =
+contract violation.
+
+This is correctness tooling, not a security boundary — the same caveat as
+candidate.py's docstring.
+"""
+
+import ast
+import importlib.util
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import traceback
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_BACKEND = str(_REPO_ROOT / "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+from harnessing_ts.headroom import candidate as cand
+
+# Probe ids double as directory names under probes/, exactly like candidates.
+PROBE_ID_PATTERN = cand.CANDIDATE_ID_PATTERN
+# Hard cap on a probe's serialized output: a summary, not an exfiltration
+# channel for the artifacts themselves.
+OUTPUT_CAP_BYTES = 4096
+DEFAULT_TIMEOUT_SECONDS = 120.0
+# Validation rule: declared direction with relative margin above this floor.
+RELATIVE_MARGIN = 0.05
+_TINY = 1e-12  # guards the margin denominator against two zeros
+_STDERR_TAIL_CHARS = 1200
+# Specialization-friendly pass rule: a periodicity probe must not be forced to
+# fire on the cross-channel fixture, so one miss of four is allowed; one hit
+# of two suffices for the activation kind, whose two fixtures plant the same
+# defect at different data draws.
+_PASS_NEEDED_BY_KIND = {"residual": 2, "activation": 1}
+
+# --- fixture design constants (documented in the module docstring) ----------
+_INPUT_LENGTH = 32
+_HORIZON = 4
+_RESIDUAL_T = 2064
+_RESIDUAL_C = 2
+_RESIDUAL_PERIOD = 24
+_AR_PHI = 0.6
+_AR_INNOVATION_SD = 1.0
+_WHITE_SD = 0.5
+_INJECTION_SD_FRACTION = 0.5  # defect amplitude = 0.5 * clean channel sd
+_CROSS_LAG = 3
+_N_RESIDUALS = 256
+_RESIDUAL_STRIDE = 7
+
+_ACT_T = 1200
+_ACT_N = 384
+_ACT_D1, _ACT_D2 = 32, 16
+_ACT_SIN_AMPLITUDE = 1.0
+_ACT_NOISE_SD = 0.5
+_ACT_WINDOW_STRIDE = 2
+# The injected rank-1 signal has per-coordinate sd = beta * sd(clean layer 2).
+# beta = 2.0 measured (seeds 0-2, both pairs, against a linear probe of the
+# bandpassed residual): the planted layer-2 R^2 gap exceeds the clean gap
+# with relative margin >= 1.0 on every fixture; the ceiling on the planted
+# R^2 is the residual's in-band noise, so larger betas buy little.
+_ACT_INJECT_BETA = 2.0
+
+
+class ProbeError(cand.CandidateError):
+    """Base for every probe failure; the subclass is the category.
+
+    ProbeTimeout/ProbeCrash/ProbeContractViolation also subclass the matching
+    cand category, so a caller that already handles candidate failures (the
+    loop) classifies probe failures the same way.
+    """
+
+
+class ProbeTimeout(cand.CandidateTimeout, ProbeError):
+    """The probe subprocess exceeded its budget and its process group was killed."""
+
+
+class ProbeCrash(cand.CandidateCrash, ProbeError):
+    """The worker exited nonzero (probe raised, OOM, ...) or produced invalid output."""
+
+
+class ProbeContractViolation(cand.ContractViolation, ProbeError):
+    """probe.py breaks the probe contract: missing create_probe/run/probe_id,
+    wrong output type, non-JSON-serializable output, probe_id mismatch, or an
+    output missing its declared signalKey."""
+
+
+class ProbeOutputTooLarge(ProbeError):
+    """The probe's serialized output exceeds OUTPUT_CAP_BYTES."""
+
+
+# --- source vetting ---------------------------------------------------------
+
+# cand.check_source requires a top-level create_adapter() — the one candidate-
+# contract rule that does not transfer to probes (they define create_probe).
+# Appending a clean stub keeps the ENTIRE whitelist walk (imports, forbidden
+# names, forbidden attribute calls, line numbers, future-annotations handling)
+# inside cand.check_source, so the probe and candidate whitelists can never
+# drift apart; the probe factory requirement is then enforced separately on
+# the unmodified source.  A probe that defines its own create_adapter is
+# harmless: the stub only ever satisfies the check, and the real factory
+# lookup below still goes through create_probe.
+_ADAPTER_STUB = (
+    '\n\n\ndef create_adapter():\n'
+    '    raise RuntimeError("probes define create_probe(), not create_adapter()")\n'
+)
+
+
+def check_probe_source(source: str) -> None:
+    """Reject probe sources outside the candidate whitelist; raises SourceRejected."""
+    try:
+        cand.check_source(source + _ADAPTER_STUB)
+    except cand.SourceRejected as exc:
+        # Reword the fixed cand header for the repair turn; if cand's wording
+        # ever changes the message merely stays candidate-flavored.
+        raise cand.SourceRejected(
+            str(exc).replace("candidate source rejected:", "probe source rejected:", 1)
+        ) from exc
+    if not any(
+        isinstance(node, ast.FunctionDef) and node.name == "create_probe" for node in ast.parse(source).body
+    ):
+        raise cand.SourceRejected("probe.py must define a top-level create_probe() (the probe factory)")
+
+
+# --- the worker (runs inside the isolated subprocess) ----------------------
+
+# Exit codes follow candidate_worker.py: 0 = result written, 1 = crash,
+# 3 = probe-contract violation (missing callable, wrong output type, ...).
+# A probe raising inside run() is a crash (exit 1), mirroring a candidate
+# raising inside fit(); only structural breakage is a contract violation.
+_WORKER_CONTRACT_EXIT = cand.WORKER_CONTRACT_EXIT
+
+
+class _WorkerContractError(Exception):
+    """Probe-contract failure inside the worker; maps to exit code 3."""
+
+
+# The child is started as `python -c <bootstrap> <probes.py> <npz_in> <json_out>`.
+# Going through -c (rather than executing this file) keeps experiments/ off the
+# child's sys.path — its loop.py/batch.py must not shadow any import the probe
+# or numpy/scipy/torch makes — and the child's cwd is a fresh empty temp dir,
+# so sys.path[0] resolves to nothing.  The worker code itself stays in this
+# module: there is no second file to keep in sync.
+_WORKER_BOOTSTRAP = """\
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('rhg_probes_worker', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+sys.exit(module.worker_main(sys.argv[2:]))
+"""
+
+_PROBES_SOURCE = Path(__file__).resolve()
+
+
+def _jsonify_numpy(value: Any) -> float | int:
+    """json.dumps default handler: numpy scalars become plain numbers.
+
+    np.float64 already subclasses float, but np.float32 / np.int32 do not;
+    rejecting them would burn repair turns on a pure serialization detail.
+    Anything else still fails the dumps (and becomes a contract violation).
+    """
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"object of type {type(value).__name__} is not JSON serializable")
+
+
+def worker_main(argv: list[str]) -> int:
+    """Subprocess entry, spawned via _WORKER_BOOTSTRAP; never run by hand."""
+    if len(argv) != 2:
+        print("usage: probes.py worker <npz_in> <json_out>", file=sys.stderr)
+        return 1
+    try:
+        _worker_run(dict(np.load(Path(argv[0]), allow_pickle=False)), Path(argv[1]))
+    except _WorkerContractError:
+        traceback.print_exc()
+        return _WORKER_CONTRACT_EXIT
+    except Exception:
+        traceback.print_exc()
+        return 1
+    return 0
+
+
+def _worker_run(data: dict[str, np.ndarray], json_out: Path) -> None:
+    """Reassemble the artifacts, run the probe, write the JSON result file."""
+    # The npz flattens the nested artifacts dict: activations live under
+    # "act/<layer_name>" keys (npz names may carry slashes), meta is a JSON
+    # string.  Everything else round-trips as-is.
+    artifacts: dict[str, Any] = {
+        "residuals": {
+            "e": np.asarray(data["e"], dtype=np.float64),
+            "r": np.asarray(data["r"], dtype=np.float64),
+            "origins": np.asarray(data["origins"], dtype=np.int64),
+        },
+        "activations": {
+            key[4:]: np.asarray(data[key], dtype=np.float32)
+            for key in data
+            if key.startswith("act/")
+        },
+        "meta": json.loads(str(data["meta"].item())),
+    }
+    probe, probe_id = _load_probe(Path(str(data["source_path"].item())))
+    out = probe.run(artifacts)
+    if not isinstance(out, dict):
+        raise _WorkerContractError(
+            f"run() must return a dict, got {type(out).__name__} (the summary the loop records)"
+        )
+    try:
+        json.dumps(out, default=_jsonify_numpy)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _WorkerContractError(
+            f"run() output must be JSON-serializable, got {type(exc).__name__}: {exc}"
+        ) from exc
+    # The JSON file is the only channel out: probeId rides along so the parent
+    # can bind the result to the expected id with a clean expected-vs-actual
+    # message (the worker has no access to the proposal).
+    json_out.write_text(
+        json.dumps({"probeId": probe_id, "output": out}, default=_jsonify_numpy),
+        encoding="utf-8",
+    )
+
+
+def _load_probe(source_path: Path) -> tuple[Any, str]:
+    """Import the vetted probe module and return (probe, probe_id).
+
+    Mirrors candidate_worker._load_adapter: the parent already AST-vetted the
+    source, so this is the first and only place probe code executes.
+    """
+    spec = importlib.util.spec_from_file_location("_headroom_probe_worker", source_path)
+    if spec is None or spec.loader is None:
+        raise _WorkerContractError(f"cannot build an import spec for probe source {source_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise _WorkerContractError(
+            f"importing probe source {source_path} raised {type(exc).__name__}: {exc}"
+        ) from exc
+    factory = getattr(module, "create_probe", None)
+    if not callable(factory):
+        raise _WorkerContractError(f"probe module must define a callable create_probe(), found {factory!r}")
+    try:
+        probe = factory()
+    except Exception as exc:
+        raise _WorkerContractError(f"create_probe() raised {type(exc).__name__}: {exc}") from exc
+    probe_id = getattr(probe, "probe_id", None)
+    if not isinstance(probe_id, str):
+        raise _WorkerContractError(
+            f"probe must carry a str probe_id attribute, found {type(probe_id).__name__}"
+        )
+    if not callable(getattr(probe, "run", None)):
+        raise _WorkerContractError(
+            f"probe must expose a callable run(artifacts), found {type(probe).__name__} without one"
+        )
+    return probe, probe_id
+
+
+# --- isolated execution (parent side) ---------------------------------------
+
+
+def _tail(output: str) -> str:
+    """Last 1200 chars: enough to carry a traceback, small enough for the loop log."""
+    return output[-_STDERR_TAIL_CHARS:] if output else "(no output captured)"
+
+
+def _write_artifacts_npz(path: Path, artifacts: dict[str, Any], source_path: Path) -> None:
+    """Flatten one artifacts dict into the worker's npz contract.
+
+    Structural validation only (keys, shapes, dtypes) — loud ValueErrors for
+    harness-side wiring bugs.  Windows/targets are not part of the contract
+    and are rejected if present: a dict that carries them is mis-wired, and
+    letting them slip through would reopen the information leak the contract
+    exists to close.
+    """
+    if not isinstance(artifacts, dict):
+        raise ValueError(f"artifacts must be a dict, got {type(artifacts).__name__}")
+    required = ("residuals", "activations", "meta")
+    missing = [key for key in required if key not in artifacts]
+    if missing:
+        raise ValueError(f"artifacts is missing keys {missing}")
+    leaked = [key for key in ("windows", "targets") if key in artifacts]
+    if leaked:
+        raise ValueError(
+            f"artifacts carries {leaked}, which are not part of the probe contract "
+            f"(probes see residuals and activations only)"
+        )
+    residuals = artifacts["residuals"]
+    if not (isinstance(residuals, dict) and {"e", "r", "origins"} <= set(residuals)):
+        raise ValueError(
+            f"artifacts['residuals'] must be a dict with keys 'e', 'r' and 'origins', got {residuals!r}"
+        )
+    e = np.asarray(residuals["e"], dtype=np.float64)
+    r = np.asarray(residuals["r"], dtype=np.float64)
+    origins = np.asarray(residuals["origins"], dtype=np.int64)
+    if e.ndim != 2:
+        raise ValueError(f"residuals['e'] must be [T_e, C], got shape {e.shape}")
+    if r.ndim != 3:
+        raise ValueError(f"residuals['r'] must be [n_r, H, C], got shape {r.shape}")
+    if origins.ndim != 1 or origins.shape[0] != r.shape[0]:
+        raise ValueError(
+            f"residuals['origins'] must have one entry per r row ({r.shape[0]}), "
+            f"got shape {origins.shape}"
+        )
+    activations = artifacts["activations"]
+    if not isinstance(activations, dict):
+        raise ValueError(f"activations must be a dict, got {type(activations).__name__}")
+    arrays: dict[str, Any] = {
+        "e": e,
+        "r": r,
+        "origins": origins,
+        "meta": np.array(json.dumps(artifacts["meta"])),
+        "source_path": np.array(str(Path(source_path).resolve())),
+    }
+    for name, values in activations.items():
+        values = np.asarray(values, dtype=np.float32)
+        if values.ndim != 3:
+            raise ValueError(
+                f"activations[{name!r}] must be [n_sub, n_p, d], got shape {values.shape}"
+            )
+        arrays[f"act/{name}"] = values
+    np.savez(path, **arrays)
+
+
+def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout: float) -> dict[str, Any]:
+    """Run one probe in the isolated worker; returns its {"probeId", "output"} wrapper.
+
+    Failures raise exactly one ProbeError subclass (see the classes above);
+    the display id in every message is the probe directory name, the only id
+    the parent knows before the probe has run.
+    """
+    source_path = Path(source_path)
+    if not source_path.is_file():
+        raise ValueError(f"probe source {source_path} does not exist")
+    display_id = source_path.parent.name
+    with tempfile.TemporaryDirectory(prefix="headroom-probe-") as run_dir:
+        npz_in, json_out = Path(run_dir) / "probe-in.npz", Path(run_dir) / "probe-out.json"
+        _write_artifacts_npz(npz_in, artifacts, source_path)
+        command = [sys.executable, "-c", _WORKER_BOOTSTRAP, str(_PROBES_SOURCE), str(npz_in), str(json_out)]
+        process = subprocess.Popen(
+            command,
+            cwd=run_dir,
+            env=cand.build_env(),
+            # Both child streams share one pipe, exactly like evaluate_candidate:
+            # a chatty probe cannot corrupt the result channel (the JSON file).
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # start_new_session made the child a session leader, so its pid is
+            # the process group id: one SIGKILL reaps the worker and anything
+            # it spawned (torch threads included).
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # already dead; the reap below still collects it
+            process.communicate()
+            raise ProbeTimeout(
+                f"probe {display_id!r} exceeded the {timeout:g}s budget "
+                f"and its process group was killed"
+            ) from None
+        if process.returncode == _WORKER_CONTRACT_EXIT:
+            raise ProbeContractViolation(
+                f"probe {display_id!r} broke the probe contract inside the worker:\n{_tail(output)}"
+            )
+        if process.returncode != 0:
+            raise ProbeCrash(
+                f"probe {display_id!r} crashed in the worker (exit code {process.returncode}):\n{_tail(output)}"
+            )
+        try:
+            wrapper = json.loads(json_out.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ProbeCrash(
+                f"probe {display_id!r}: worker exited 0 but wrote no readable JSON result to "
+                f"{json_out.name}: {type(exc).__name__}: {exc}"
+            ) from exc
+        if not (
+            isinstance(wrapper, dict)
+            and isinstance(wrapper.get("probeId"), str)
+            and isinstance(wrapper.get("output"), dict)
+        ):
+            raise ProbeCrash(
+                f"probe {display_id!r}: worker wrote a malformed result wrapper "
+                f"(expected a JSON object with a str probeId and a dict output), got {wrapper!r}"
+            )
+        # Size cap, enforced on every run (validation and execution alike):
+        # re-serializing with the same json.dumps defaults reproduces exactly
+        # the bytes the worker wrote for the output part.
+        size = len(json.dumps(wrapper["output"]).encode("utf-8"))
+        if size > OUTPUT_CAP_BYTES:
+            raise ProbeOutputTooLarge(
+                f"probe {display_id!r} serialized output is {size} bytes, "
+                f"expected at most {OUTPUT_CAP_BYTES} bytes"
+            )
+    return wrapper
+
+
+def run_probe(source_path: Path, artifacts: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Run one (validated) probe on real evaluation artifacts; returns its output dict.
+
+    The source is vetted before any subprocess spawns (cand.SourceRejected on
+    violation).  The probe object's probe_id must equal the directory name —
+    probes/<probe-id>/probe.py is the layout the loop reads, so a swapped file
+    cannot silently run under another id.  Raises ProbeTimeout, ProbeCrash,
+    ProbeContractViolation or ProbeOutputTooLarge; never returns partial data.
+    """
+    source_path = Path(source_path)
+    check_probe_source(source_path.read_text(encoding="utf-8"))
+    wrapper = _run_probe_subprocess(source_path, artifacts, timeout)
+    expected = source_path.parent.name
+    actual = wrapper["probeId"]
+    if actual != expected:
+        raise ProbeContractViolation(
+            f"probe {expected!r}: probe_id must equal the probe directory name, "
+            f"expected {expected!r}, got {actual!r}"
+        )
+    return wrapper["output"]
+
+
+# --- validation: the trust mechanism -----------------------------------------
+
+
+def _proposal_problems(proposal: Any) -> list[str]:
+    """Expected-vs-actual problems with an agent-written probe_proposal.json."""
+    if not isinstance(proposal, dict):
+        return [f"must be a JSON object, got {type(proposal).__name__}"]
+    problems: list[str] = []
+    for key in ("probeId", "measures", "signalKey", "expectedDirection", "rationale"):
+        if key not in proposal:
+            problems.append(f"missing key {key!r}")
+        elif not isinstance(proposal[key], str) or not proposal[key]:
+            problems.append(f"{key!r} must be a non-empty string, got {proposal[key]!r}")
+    if isinstance(proposal.get("probeId"), str) and not PROBE_ID_PATTERN.fullmatch(proposal["probeId"]):
+        problems.append(
+            f"probeId must match [a-z0-9][a-z0-9-]{{0,63}}, got {proposal['probeId']!r}"
+        )
+    if "expectedDirection" in proposal and proposal["expectedDirection"] not in ("higher", "lower"):
+        problems.append(
+            f"expectedDirection must be 'higher' or 'lower', got {proposal['expectedDirection']!r}"
+        )
+    return problems
+
+
+def _signal_value(wrapper: dict[str, Any], probe_id: str, signal_key: str) -> float:
+    """The declared signal of one run: probe_id bound, signalKey present and finite."""
+    actual = wrapper["probeId"]
+    if actual != probe_id:
+        raise ProbeContractViolation(
+            f"probe {probe_id!r}: probe_id must equal probe_proposal.json's probeId, "
+            f"expected {probe_id!r}, got {actual!r}"
+        )
+    output = wrapper["output"]
+    if signal_key not in output:
+        raise ProbeContractViolation(
+            f"probe {probe_id!r}: output must carry its declared signalKey {signal_key!r}, "
+            f"found keys {sorted(output)}"
+        )
+    value = output[signal_key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ProbeContractViolation(
+            f"probe {probe_id!r}: signalKey {signal_key!r} must carry a finite number, got {value!r}"
+        )
+    return float(value)
+
+
+def _canonical(output: dict[str, Any]) -> str:
+    """Canonical serialization for the determinism comparison.
+
+    sort_keys makes key order irrelevant (the contract asks for stable output,
+    not byte-identical key order), and NaN survives the comparison because
+    both sides serialize it to the same "NaN" token — unlike ==, where
+    NaN != NaN would flag every NaN-carrying probe as non-deterministic.
+    """
+    return json.dumps(output, sort_keys=True)
+
+
+def validate_probe(
+    source_path: Path,
+    proposal: dict[str, Any],
+    kind: str,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Validate one probe against deterministic planted-defect fixtures.
+
+    Returns {"ok": bool, "reason": str | None, "measured": {pair index:
+    {"planted", "clean", "margin", "passes"}}, "pairs_passed": int,
+    "pairs_needed": int, "deterministic": bool} — the loop records it as-is.
+    Probe-side failures (timeout, crash, contract violation, oversized output)
+    come back as ok=False with the classified message, not as raised errors:
+    a rejected probe is a budgeted round outcome, not a harness bug.  A bad
+    ``kind`` is a harness bug and raises ValueError.
+    """
+    if kind not in _PASS_NEEDED_BY_KIND:
+        raise ValueError(f"kind must be one of {sorted(_PASS_NEEDED_BY_KIND)}, got {kind!r}")
+    measured: dict[int, dict[str, Any]] = {}
+    result: dict[str, Any] = {
+        "ok": False,
+        "reason": None,
+        "measured": measured,
+        "pairs_passed": 0,
+        "pairs_needed": _PASS_NEEDED_BY_KIND[kind],
+        "deterministic": False,
+    }
+    problems = _proposal_problems(proposal)
+    # The loop's proposals carry a sixth key, "kind" (which data the probe
+    # reads); extra keys are tolerated, but a declared kind that disagrees
+    # with the validation kind means the agent described one probe and the
+    # loop is validating another.
+    if "kind" in proposal and proposal["kind"] != kind:
+        problems.append(
+            f"proposal declares kind {proposal['kind']!r} but validation is running {kind!r}"
+        )
+    if problems:
+        result["reason"] = "invalid probe_proposal.json: " + "; ".join(problems)
+        return result
+    source_path = Path(source_path)
+    try:
+        check_probe_source(source_path.read_text(encoding="utf-8"))
+    except cand.SourceRejected as exc:
+        result["reason"] = f"source rejected: {exc}"
+        return result
+
+    probe_id = proposal["probeId"]
+    signal_key = proposal["signalKey"]
+    direction = proposal["expectedDirection"]
+    fixtures = make_fixtures(kind, seed)
+    try:
+        first_output: dict[str, Any] | None = None
+        for index, (planted, clean) in enumerate(fixtures):
+            wrapper_planted = _run_probe_subprocess(source_path, planted, DEFAULT_TIMEOUT_SECONDS)
+            if index == 0:
+                first_output = wrapper_planted["output"]
+            wrapper_clean = _run_probe_subprocess(source_path, clean, DEFAULT_TIMEOUT_SECONDS)
+            value_planted = _signal_value(wrapper_planted, probe_id, signal_key)
+            value_clean = _signal_value(wrapper_clean, probe_id, signal_key)
+            margin = abs(value_planted - value_clean) / max(abs(value_planted), abs(value_clean), _TINY)
+            # "higher" means the planted defect RAISES the declared signal.
+            pair_ok = (
+                value_planted > value_clean if direction == "higher" else value_planted < value_clean
+            ) and margin > RELATIVE_MARGIN
+            measured[index] = {
+                "planted": value_planted,
+                "clean": value_clean,
+                "margin": margin,
+                "passes": pair_ok,
+            }
+        assert first_output is not None
+        # Determinism: the same fixture (pair 0, planted) run a second time in
+        # a fresh subprocess must produce identical output — this catches
+        # clock-seeded and hash-order-dependent probes that an in-process
+        # double call would not.
+        repeat = _run_probe_subprocess(source_path, fixtures[0][0], DEFAULT_TIMEOUT_SECONDS)
+        _signal_value(repeat, probe_id, signal_key)  # same binding checks on the rerun
+    except ProbeError as exc:
+        result["pairs_passed"] = sum(1 for entry in measured.values() if entry["passes"])
+        result["reason"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+    pairs_passed = sum(1 for entry in measured.values() if entry["passes"])
+    result["pairs_passed"] = pairs_passed
+    deterministic = _canonical(first_output) == _canonical(repeat["output"])
+    result["deterministic"] = deterministic
+    needed = _PASS_NEEDED_BY_KIND[kind]
+    if pairs_passed < needed:
+        values = ", ".join(
+            f"pair{index}: {entry['planted']:.6g} vs {entry['clean']:.6g} "
+            f"(margin {entry['margin']:.3g}, {'pass' if entry['passes'] else 'fail'})"
+            for index, entry in sorted(measured.items())
+        )
+        result["reason"] = (
+            f"declared direction {direction!r} with >{int(RELATIVE_MARGIN * 100)}% relative margin "
+            f"holds on {pairs_passed} of {len(fixtures)} {kind} pairs (need >= {needed}); "
+            f"signalKey {signal_key!r} values, planted vs clean: {values}"
+        )
+        return result
+    if not deterministic:
+        result["reason"] = (
+            "probe output is not deterministic: rerunning the same pair-0 planted fixture produced "
+            f"{_canonical(first_output)[:200]} then {_canonical(repeat['output'])[:200]}"
+        )
+        return result
+    result["ok"] = True
+    return result
+
+
+# --- fixture generation ------------------------------------------------------
+
+
+def artifacts_from_series(
+    values: np.ndarray,
+    *,
+    input_length: int = _INPUT_LENGTH,
+    horizon: int = _HORIZON,
+    n_residuals: int = _N_RESIDUALS,
+    residual_stride: int = _RESIDUAL_STRIDE,
+    meta_update: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one internally-consistent artifacts dict from a [T, C] series.
+
+    The incumbent is persistence (predict the last observed value for every
+    step): cheap, honest, and it guarantees every structure the incumbent
+    cannot one-step-predict lands in the residuals — which is exactly what
+    the planted defects exploit.  H-step residuals are sampled at
+    residual_stride; e carries the 1-step residual on the full time axis,
+    NaN-padded at the head (no previous row) and the tail (mirroring
+    segment_data, where origins near the segment end have no realized
+    targets).  No windows/targets by contract — the fixture builders keep the
+    windows to themselves.  Used by make_fixtures and by tests that build
+    artifacts from REGISTRY tasks.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 2:
+        raise ValueError(f"values must be [T, C], got shape {values.shape}")
+    t_len, channels = values.shape
+    last = t_len - 1 - horizon  # last origin whose H targets lie inside the series
+    residual_origins = (input_length - 1) + residual_stride * np.arange(n_residuals)
+    if residual_origins[-1] > last:
+        raise ValueError(
+            f"series of length {t_len} is too short for {n_residuals} residuals at stride "
+            f"{residual_stride} with L={input_length}, H={horizon}; last usable origin is {last}"
+        )
+    # r[o, h, c] = x[o+h+1, c] - x[o, c]: the persistence residual at origin o.
+    r = np.stack([values[o + 1 : o + 1 + horizon] - values[o] for o in residual_origins])
+    e = np.full((t_len, channels), np.nan)
+    e[1 : t_len - horizon] = values[1 : t_len - horizon] - values[: t_len - horizon - 1]
+    meta: dict[str, Any] = {
+        "L": input_length,
+        "H": horizon,
+        "C": channels,
+        "T": t_len,
+        "incumbent": "persistence",
+        "task": "synthetic",
+    }
+    if meta_update:
+        meta.update(meta_update)
+    return {
+        "residuals": {"e": e, "r": r, "origins": residual_origins},
+        "activations": {},
+        "meta": meta,
+    }
+
+
+def _residual_pair(child_seed: int, defect: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One (planted, clean) residual-fixture pair; see the module docstring."""
+    rng = np.random.default_rng(child_seed)
+    innovation = rng.standard_normal((_RESIDUAL_T, _RESIDUAL_C)) * _AR_INNOVATION_SD
+    ar = np.empty_like(innovation)
+    ar[0] = innovation[0]
+    for t in range(1, _RESIDUAL_T):
+        ar[t] = _AR_PHI * ar[t - 1] + innovation[t]
+    clean = ar + _WHITE_SD * rng.standard_normal((_RESIDUAL_T, _RESIDUAL_C))
+    planted = clean.copy()
+    sd0 = float(clean[:, 0].std())
+    if defect == "period24":
+        time_axis = np.arange(_RESIDUAL_T)
+        planted[:, 0] += (
+            _INJECTION_SD_FRACTION * sd0 * np.sin(2.0 * np.pi * time_axis / _RESIDUAL_PERIOD)
+        )
+    elif defect == "cross-lag3":
+        # Channel 0 reads channel 1 three rows back, scaled so the injected
+        # component carries _INJECTION_SD_FRACTION of channel 0's sd.
+        sd1 = float(clean[:, 1].std())
+        planted[_CROSS_LAG:, 0] += (_INJECTION_SD_FRACTION * sd0 / sd1) * clean[:-_CROSS_LAG, 1]
+    else:  # pragma: no cover - guarded by the caller
+        raise ValueError(f"unknown residual defect {defect!r}")
+    meta = {"kind": "residual", "defect": defect, "seed": child_seed, "phi": _AR_PHI,
+            "injectionSdFraction": _INJECTION_SD_FRACTION}
+    return (
+        artifacts_from_series(planted, meta_update=meta),
+        artifacts_from_series(clean, meta_update=meta),
+    )
+
+
+def _activation_pair(
+    weights: tuple[Any, ...], data_seed: int, direction_seed: int, pair_index: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One (planted, clean) activation-fixture pair; see the module docstring."""
+    import torch
+
+    torch.set_num_threads(1)  # fixture generation is tiny; pin threads like build_env does
+    data_rng = np.random.default_rng(data_seed)
+    direction_rng = np.random.default_rng(direction_seed)
+    time_axis = np.arange(_ACT_T)
+    values = data_rng.standard_normal((_ACT_T, _RESIDUAL_C)) * _ACT_NOISE_SD
+    values[:, 0] += _ACT_SIN_AMPLITUDE * np.sin(2.0 * np.pi * time_axis / _RESIDUAL_PERIOD)
+    # r rows and the net's input windows share the same evenly spaced origins,
+    # so meta["activationOrigins"] is arange — the alignment the loop promises.
+    base = artifacts_from_series(
+        values,
+        n_residuals=_ACT_N,
+        residual_stride=_ACT_WINDOW_STRIDE,
+        meta_update={"kind": "activation", "pair": pair_index},
+    )
+    origins = base["residuals"]["origins"]
+    windows = np.stack([values[o - _INPUT_LENGTH + 1 : o + 1].reshape(-1) for o in origins])
+    w1, w2, w3 = weights
+
+    def forward(inject: Any | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        x = torch.from_numpy(windows)
+        h1 = torch.relu(x @ w1)
+        h2 = torch.relu(h1 @ w2)
+        if inject is not None:
+            h2 = h2 + torch.from_numpy(inject)
+        return h1.numpy(), h2.numpy(), (h2 @ w3).numpy()
+
+    # The injected scalar signal: the KNOWN analytic period-24 component of the
+    # channel-0 persistence residual at the sampled origins, averaged over the
+    # H steps — exactly what a bandpass of r[:, :, 0].mean(axis=1) recovers, so
+    # a probe reads the planted signal from r (its contract channel), never
+    # from targets.
+    signal = _ACT_SIN_AMPLITUDE * np.array(
+        [
+            np.mean(
+                np.sin(2.0 * np.pi * (o + np.arange(1, _HORIZON + 1)) / _RESIDUAL_PERIOD)
+                - np.sin(2.0 * np.pi * o / _RESIDUAL_PERIOD)
+            )
+            for o in origins
+        ]
+    )
+    unit = direction_rng.standard_normal(_ACT_D2)
+    unit /= np.linalg.norm(unit)
+
+    h1_clean, h2_clean, out_clean = forward(None)
+    amplitude = _ACT_INJECT_BETA * float(h2_clean.std())
+    inject = amplitude * (signal / signal.std())[:, None] * unit[None, :]
+    h1_planted, h2_planted, out_planted = forward(inject)
+
+    def pack(h1: np.ndarray, h2: np.ndarray, out: np.ndarray, variant: str) -> dict[str, Any]:
+        pair = dict(base)
+        pair["activations"] = {
+            "layer1": h1[:, None, :].astype(np.float32),
+            "layer2": h2[:, None, :].astype(np.float32),
+            "layer3": out[:, None, :].astype(np.float32),
+        }
+        pair["meta"] = {
+            **base["meta"],
+            "variant": variant,
+            "injectBeta": _ACT_INJECT_BETA,
+            "activationOrigins": list(range(_ACT_N)),
+        }
+        return pair
+
+    return pack(h1_planted, h2_planted, out_planted, "planted"), pack(h1_clean, h2_clean, out_clean, "clean")
+
+
+def make_fixtures(kind: str, seed: int = 0) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Deterministic (planted, clean) artifact pairs for validation; see the docstring.
+
+    Same seed -> bitwise identical fixtures, so a validation record is
+    reproducible and the loop can re-validate any probe against exactly the
+    fixtures it was first judged on.  Generation stays well under 2s per pair
+    (the activation net is a 64->32->16->8 CPU MLP on 384 windows).
+    """
+    if kind == "residual":
+        children = np.random.SeedSequence(seed).spawn(4)
+        defects = ("period24", "period24", "period24", "cross-lag3")
+        return [
+            _residual_pair(int(child.generate_state(1, dtype=np.uint32)[0]), defect)
+            for child, defect in zip(children, defects)
+        ]
+    if kind == "activation":
+        import torch
+
+        torch.set_num_threads(1)
+        # One fixed net and one fixed injection direction per seed (spawned
+        # children 0-1); the two pairs differ in the data draw (children 2-3).
+        children = np.random.SeedSequence(seed).spawn(4)
+        net_rng = np.random.default_rng(children[0])
+        fan_in = _INPUT_LENGTH * _RESIDUAL_C
+        weights = (
+            torch.from_numpy(net_rng.standard_normal((fan_in, _ACT_D1)) / math.sqrt(fan_in)),
+            torch.from_numpy(net_rng.standard_normal((_ACT_D1, _ACT_D2)) / math.sqrt(_ACT_D1)),
+            torch.from_numpy(net_rng.standard_normal((_ACT_D2, _HORIZON * _RESIDUAL_C)) / math.sqrt(_ACT_D2)),
+        )
+        direction_seed = int(children[1].generate_state(1, dtype=np.uint32)[0])
+        return [
+            _activation_pair(
+                weights,
+                int(children[2 + index].generate_state(1, dtype=np.uint32)[0]),
+                direction_seed,
+                index,
+            )
+            for index in range(2)
+        ]
+    raise ValueError(f"kind must be one of {sorted(_PASS_NEEDED_BY_KIND)}, got {kind!r}")
+
+
+if __name__ == "__main__":  # manual debugging only; the loop uses the -c bootstrap
+    sys.exit(worker_main(sys.argv[1:]))

@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 
-ARM_VALUES = ("scalar", "bj", "card", "placebo")
+# Arms after the 2026-10-16 revision: the fixed card (backend-built tools) vs
+# self-built probes (agent-built tools) is the core contrast; bj is retired.
+ARM_VALUES = ("scalar", "fixed", "self-built", "placebo")
 
 _FIELD_ALIASES: dict[str, str] = {
     "input_length": "inputLength",
@@ -35,6 +37,7 @@ _FIELD_ALIASES: dict[str, str] = {
     "diag_ratio": "diagRatio",
     "cert_ratio": "certRatio",
     "diag_a_ratio": "diagARatio",
+    "evolution": "evolution",
     "seed": "seed",
 }
 _JSON_ALIASES: dict[str, str] = {value: key for key, value in _FIELD_ALIASES.items()}
@@ -46,7 +49,10 @@ class HeadroomConfig:
 
     input_length: int = 96
     horizon: int = 24
-    arm: str = "card"
+    arm: str = "fixed"
+    # Residual-signature evolution guidance (plan §12.3): identical across the
+    # feedback arms so the arm contrast stays clean; off only in an ablation.
+    evolution: bool = True
     budget_candidates: int = 25
     candidate_timeout_seconds: float = 600.0
     acceptance_alpha: float = 0.05

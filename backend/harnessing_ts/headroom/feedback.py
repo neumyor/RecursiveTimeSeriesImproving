@@ -1,29 +1,33 @@
 from __future__ import annotations
 
-"""Markdown feedback rendering for the scalar / bj / card / placebo arms.
+"""Markdown feedback rendering for the scalar / fixed / self-built / placebo arms.
 
 All four arms share one byte-identical scaffold and differ only in the
 middle block, so any measured behavioural difference between arms is
 attributable to that block; see docs/headroom-contracts.md §9 and the
 coding plan §2.5/§3.2 (arm-neutral wording: no dataset or domain
 vocabulary, no status language such as "certified").
+
+Post-revision arms (plan §12): ``fixed``/``placebo`` render the backend
+defect card (placebo = the same card with coordinate rows permuted);
+``self-built`` renders the outputs of the agent's OWN validated probes —
+the backend never injects diagnostic content into that arm, it only runs
+and reports the agent's tools.
 """
 
+import json
 from typing import Any
 
 import numpy as np
-from scipy import stats
-from scipy.signal import find_peaks, periodogram
 
 from harnessing_ts.headroom.config import ARM_VALUES, HeadroomConfig
 from harnessing_ts.headroom.correctors import GainReport
 
-# The bj diagnostics are fixed by the protocol (contract §9), not configurable:
-# the whole point of the arm is a standard Box-Jenkins style diagnostic view.
-_BJ_ACF_LAGS = 48
-_BJ_LB_LAGS = (12, 24, 48)
-_BJ_TOP_PEAKS = 5
-_BJ_PER_CHANNEL_MAX = 4  # above this channel count the ACF table shows the mean
+# Probe output rendering caps (the probe contract bounds one probe's output
+# at 4 KB; the table still caps the rendered fraction so a chatty probe
+# cannot crowd out the rest of the prompt).
+_PROBE_OUTPUT_CHARS = 600
+_PROBE_MAX_ROWS = 8
 
 
 def _fmt(value: Any) -> str:
@@ -36,88 +40,6 @@ def _fmt(value: Any) -> str:
     return f"{number:.4f}"
 
 
-def acf(e: np.ndarray, max_lag: int) -> np.ndarray:
-    """Sample autocorrelation per channel, rows = lags 1..max_lag, as [max_lag, C].
-
-    Uses the standard biased estimator rho_k = c_k / c_0 with
-    c_k = sum_t (x_t - x_bar)(x_{t-k} - x_bar): |rho| <= 1 by construction,
-    which is what the Ljung-Box formula below expects.  A constant channel
-    has no autocorrelation to report (NaN), not a zero one.
-    """
-    e = np.asarray(e, dtype=np.float64)
-    if e.ndim != 2:
-        raise ValueError(f"e must be [T, C], got shape {e.shape}")
-    n, n_channels = e.shape
-    out = np.full((max_lag, n_channels), np.nan)
-    if n < 2:
-        return out
-    centered = e - e.mean(axis=0)
-    c0 = (centered * centered).sum(axis=0)
-    for k in range(1, min(max_lag, n - 1) + 1):
-        c_k = (centered[k:] * centered[:-k]).sum(axis=0)
-        np.divide(c_k, c0, out=out[k - 1], where=c0 > 0)
-    return out
-
-
-def ljung_box(rho: np.ndarray, n: int, lags: tuple[int, ...]) -> dict[int, tuple[float, float]]:
-    """Ljung-Box Q and chi-square p at each requested lag for a 1-D ACF.
-
-    Q(m) = n(n+2) sum_{k=1..m} rho_k^2 / (n-k) with p = chi2.sf(Q, m),
-    implemented locally because the plain formula is the contract.
-    """
-    rho = np.asarray(rho, dtype=np.float64).ravel()
-    result: dict[int, tuple[float, float]] = {}
-    for m in lags:
-        if m > rho.size or m >= n or not np.isfinite(rho[:m]).all():
-            result[m] = (float("nan"), float("nan"))
-            continue
-        q = n * (n + 2.0) * float(np.sum(rho[:m] ** 2 / (n - np.arange(1, m + 1))))
-        result[m] = (q, float(stats.chi2.sf(q, m)))
-    return result
-
-
-def min_p_ljung_box(
-    rho: np.ndarray, n: int, lags: tuple[int, ...]
-) -> dict[int, tuple[float, float]]:
-    """Per-channel Ljung-Box, reduced at each lag to the smallest-p channel.
-
-    The portmanteau is a single-series test, and the cross-channel mean ACF
-    is no series' ACF: sign cancellation can push its Q toward zero while
-    every channel is autocorrelated, which would hand the bj agent a weaker
-    diagnostic than the card arm's per-coordinate view.  Reporting the
-    strongest per-channel evidence at each lag names no channel and ranks
-    nothing; at C = 1 it reduces to the textbook test.
-    """
-    rho = np.asarray(rho, dtype=np.float64)
-    per_channel = [ljung_box(rho[:, channel], n, lags) for channel in range(rho.shape[1])]
-    worst: dict[int, tuple[float, float]] = {}
-    for m in lags:
-        # A channel with a NaN ACF (constant) or too few rows has no vote.
-        finite = [per_channel[c][m] for c in range(rho.shape[1]) if np.isfinite(per_channel[c][m][1])]
-        worst[m] = min(finite, key=lambda pair: pair[1]) if finite else (float("nan"), float("nan"))
-    return worst
-
-
-def periodogram_peaks(e: np.ndarray, top: int) -> list[tuple[float, float]]:
-    """Up to ``top`` spectral peaks of the channel-averaged periodogram.
-
-    Returns (period, power) rows in ascending period order.  Selecting the
-    largest peaks is inherent to "top", but they are deliberately not ranked
-    by power for the agent: the bj arm must not order anything by importance.
-    """
-    e = np.asarray(e, dtype=np.float64)
-    if e.shape[0] < 4:
-        return []
-    # Center each channel here so the DC bin is exactly zero and cannot
-    # dominate the peak list; detrend is disabled to keep that explicit.
-    freqs, power = periodogram(e - e.mean(axis=0), axis=0, fs=1.0, detrend=False)
-    mean_power = power.mean(axis=1)
-    peaks, _ = find_peaks(mean_power)
-    selected = peaks[np.argsort(mean_power[peaks])[-top:]]
-    rows = [(float(1.0 / freqs[k]), float(mean_power[k])) for k in selected]
-    return sorted(rows, key=lambda row: row[0])
-
-
 def render_feedback(
     arm: str,
     incumbent: dict[str, Any],
@@ -125,15 +47,17 @@ def render_feedback(
     history: list[dict[str, Any]],  # unused: round.md owns the history table
     cfg: HeadroomConfig,
     placebo_perm: tuple[int, ...] | None = None,
+    probe_rows: list[dict[str, Any]] | None = None,
+    validation_rows: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render one round of agent feedback as markdown (contract §9).
 
     The scaffold (title with round and remaining budget, incumbent diagnostic
     MSE, per-horizon-group MSE, candidate history) is byte-identical across
     arms; only the middle block differs.  ``scalar`` gets no middle block,
-    ``bj`` gets residual diagnostics, ``card``/``placebo`` get the defect
-    card (the card wording is "remaining improvement (lower bound)", never
-    "headroom").
+    ``fixed``/``placebo`` get the defect card (the card wording is "remaining
+    improvement (lower bound)", never "headroom"), ``self-built`` gets its own
+    validated probes' outputs plus the latest probe validation results.
 
     Card ordering: coordinate rows are sorted by the ``lcb`` values the
     caller passed.  This function never computes or adjusts intervals; the
@@ -149,13 +73,17 @@ def render_feedback(
     ``placebo_perm=None`` the permutation is
     ``np.random.default_rng(cfg.seed).permutation(len(rows))``, i.e. fixed
     per (seed, row count) and independent of global RNG state.
+
+    Probe rows (self-built arm only) are dicts from the loop: ``probeId``,
+    ``signalKey``, ``output`` (JSON-serializable dict) or ``error``.  The
+    static how-to-write-probes guide is NOT rendered here — the loop appends
+    it (it is prompt text, and it lives in experiments/prompts/probes.md).
+    Validation rows carry ``probeId``, ``ok``, ``detail``.
     """
     if arm not in ARM_VALUES:
         raise ValueError(f"arm must be one of {ARM_VALUES}, got {arm!r}")
     blocks = [_scaffold_head(incumbent), _scaffold_groups(incumbent)]
-    if arm == "bj":
-        blocks.append(_bj_block(incumbent))
-    elif arm in ("card", "placebo"):
+    if arm in ("fixed", "placebo"):
         rows, total = _split_gains(gains)
         ordered = _sorted_by_lcb(rows)
         if arm == "placebo":
@@ -167,6 +95,8 @@ def render_feedback(
         else:
             perm = None
         blocks.append(_card_table(ordered, total, perm))
+    elif arm == "self-built":
+        blocks.append(_probe_table(probe_rows or [], validation_rows or []))
     return "\n\n".join(blocks) + "\n"
 
 
@@ -188,55 +118,63 @@ def _scaffold_groups(incumbent: dict[str, Any]) -> str:
 
 
 
-def _bj_block(incumbent: dict[str, Any]) -> str:
-    """Raw statistical diagnostics of the 1-step residual series.
+def _probe_table(
+    probe_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]]
+) -> str:
+    """Self-built arm middle block: the agent's own tools' latest outputs.
 
-    No gains, no importance ordering, no status statements: the bj arm must
-    make the agent do the inference itself.
+    Only the agent's validated probes appear here — the fixed card's content
+    is never injected into this arm, so a measured win of self-built over
+    fixed is a win of agent-built tooling, not of extra backend hints.
     """
-    e = np.asarray(incumbent["eFull"], dtype=np.float64)
-    if e.ndim != 2:
-        raise ValueError(f"incumbent['eFull'] must be [T, C], got shape {e.shape}")
-    # e_full is defined only at origins; dropping the NaN rows in between
-    # leaves the contiguous realized 1-step residual series.
-    e = e[~np.isnan(e).any(axis=1)]
-    rho = acf(e, _BJ_ACF_LAGS)
-
-    if e.shape[1] <= _BJ_PER_CHANNEL_MAX:
-        headers = [f"ch{c}" for c in range(e.shape[1])]
-        acf_rows = [
-            "| lag | " + " | ".join(headers) + " |",
-            "| --- |" + " --- |" * len(headers),
-        ]
-        acf_rows += [
-            f"| {k} | " + " | ".join(_fmt(v) for v in rho[k - 1]) + " |"
-            for k in range(1, _BJ_ACF_LAGS + 1)
-        ]
+    sections: list[str] = []
+    if validation_rows:
+        lines = ["## Probe validation results", "", "| probe | verdict | detail |", "| --- | --- | --- |"]
+        for row in validation_rows:
+            verdict = "kept" if row.get("ok") else "rejected"
+            lines.append(f"| {row['probeId']} | {verdict} | {row.get('detail', '')} |")
+        sections.append("\n".join(lines))
+    lines = ["## Your probes on the incumbent", ""]
+    if not probe_rows:
+        lines.append(
+            "No validated probes yet: this round you see only the scalar numbers. "
+            "Write a probe (see the probe guide below) and once it passes "
+            "validation, its output on every future incumbent appears here."
+        )
     else:
-        mean_rho = rho.mean(axis=1)
-        acf_rows = ["| lag | mean |", "| --- | --- |"]
-        acf_rows += [
-            f"| {k} | {_fmt(mean_rho[k - 1])} |" for k in range(1, _BJ_ACF_LAGS + 1)
-        ]
-
-    lb = min_p_ljung_box(rho, e.shape[0], _BJ_LB_LAGS)
-    lb_rows = [
-        "| lag | Q (min p over channels) | p (min over channels) |",
-        "| --- | --- | --- |",
-    ]
-    lb_rows += [f"| {m} | {_fmt(q)} | {_fmt(p)} |" for m, (q, p) in lb.items()]
-
-    peak_rows = ["| period (steps) | power |", "| --- | --- |"]
-    peak_rows += [
-        f"| {_fmt(period)} | {_fmt(power)} |" for period, power in periodogram_peaks(e, _BJ_TOP_PEAKS)
-    ]
-
-    sections = [
-        "## 1-step residual autocorrelation\n\n" + "\n".join(acf_rows),
-        "## Ljung-Box portmanteau test\n\n" + "\n".join(lb_rows),
-        "## Top periodogram peaks\n\n" + "\n".join(peak_rows),
-    ]
+        lines += ["| probe | signal | output |", "| --- | --- | --- |"]
+        for row in probe_rows[:_PROBE_MAX_ROWS]:
+            if "error" in row and row["error"]:
+                output = f"ERROR: {row['error']}"
+            else:
+                output = json.dumps(_probe_safe(row.get("output")), ensure_ascii=False)
+                if len(output) > _PROBE_OUTPUT_CHARS:
+                    output = output[:_PROBE_OUTPUT_CHARS] + "… (truncated)"
+            lines.append(f"| {row['probeId']} | {row.get('signalKey', '')} | {output} |")
+        if len(probe_rows) > _PROBE_MAX_ROWS:
+            lines.append(f"({_len_note(probe_rows)})")
+    sections.append("\n".join(lines))
     return "\n\n".join(sections)
+
+
+def _probe_safe(value: Any) -> Any:
+    """JSON-renderable view of a probe output (NaN -> null, numpy -> plain)."""
+    if isinstance(value, dict):
+        return {key: _probe_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_probe_safe(item) for item in value]
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return None if np.isnan(number) else number
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.ndarray):
+        return _probe_safe(value.tolist())
+    return value
+
+
+def _len_note(probe_rows: list[dict[str, Any]]) -> str:
+    return f"{len(probe_rows) - _PROBE_MAX_ROWS} older probes not shown"
 
 
 def _split_gains(gains: list[GainReport]) -> tuple[list[GainReport], GainReport | None]:

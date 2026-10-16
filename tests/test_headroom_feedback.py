@@ -5,19 +5,12 @@ from typing import Any
 
 import numpy as np
 import pytest
-from scipy.signal import lfilter
 
 from harnessing_ts.headroom.config import HeadroomConfig
-from harnessing_ts.headroom.feedback import (
-    acf,
-    ljung_box,
-    min_p_ljung_box,
-    periodogram_peaks,
-    render_feedback,
-)
+from harnessing_ts.headroom.feedback import render_feedback
 
 HORIZON = 24
-ARMS = ("scalar", "bj", "card", "placebo")
+ARMS = ("scalar", "fixed", "self-built", "placebo")
 # Contract/plan §3.2 forbidden vocabulary: dataset names, domain words, and
 # status language that could prime or certify any arm.
 FORBIDDEN_SUBSTRINGS = (
@@ -121,7 +114,6 @@ def _make_history(entries: int = 2) -> list[dict[str, Any]]:
 def _card_rows(text: str) -> list[str]:
     """Data rows of the defect-card table, in rendered order."""
     section = text.split("## Remaining improvement by coordinate", 1)[1]
-    section = section  # the shared scaffold no longer renders history (round.md owns it)
     return [
         line
         for line in section.splitlines()
@@ -139,9 +131,9 @@ def test_scalar_is_exactly_the_scaffold() -> None:
     assert "| hgroup[1,12] | 0.4012 |" in out
     assert "| hgroup[13,24] | 0.4234 |" in out
     # No middle block of any other arm leaks in.
-    assert "autocorrelation" not in out
     assert "aspect" not in out
     assert "Remaining improvement" not in out
+    assert "Your probes" not in out
 
 
 def test_all_arms_share_the_identical_scaffold() -> None:
@@ -162,70 +154,8 @@ def test_all_arms_share_the_identical_scaffold() -> None:
         assert (out == scalar) == (arm == "scalar")
 
 
-def test_bj_reports_diagnostics_without_any_gain_numbers() -> None:
-    incumbent = _make_incumbent(_make_efull(rows=2000, seed=21))
-    # Magnitudes an ACF (bounded by 1) can never reproduce, so their absence
-    # from the rendered text proves no gain numbers leaked.
-    gains = [
-        _Gain(_Coordinate("band", "band(P=24)", "periodicity"), 88.8888, 77.7777, 90.0, np.zeros(HORIZON), 66.6666, 500),
-        _Gain(_Coordinate("total", "total", "other"), 99.9999, 88.8888, 101.0, np.zeros(HORIZON), 66.6666, 500),
-    ]
-    out = render_feedback("bj", incumbent, gains, _make_history(2), HeadroomConfig())
-    for needle in (
-        "88.8888",
-        "77.7777",
-        "99.9999",
-        "66.6666",
-        "band(P=24)",
-        "periodicity",
-        "delta",
-        "lower bound",
-        "aspect",
-    ):
-        assert needle not in out, needle
-    for heading in (
-        "## 1-step residual autocorrelation",
-        "## Ljung-Box portmanteau test",
-        "## Top periodogram peaks",
-    ):
-        assert heading in out
-
-
-def test_bj_ljung_box_row_shows_min_p_across_channels() -> None:
-    # One strongly autocorrelated channel, one white channel: the old mean-ACF
-    # portmanteau diluted the signal (and can cancel it outright across
-    # sign-opposed channels), weakening the bj arm relative to card. The
-    # per-channel minimum p must show a tiny p at lag 24.
-    n = 2000
-    rng = np.random.default_rng(33)
-    ar1 = lfilter([1.0], [1.0, -0.9], rng.normal(0.0, 1.0, size=n))
-    e = np.column_stack([ar1, rng.normal(0.0, 1.0, size=n)])
-    gains = [
-        _Gain(
-            _Coordinate("band", "band(P=24)", "periodicity"),
-            88.8888,
-            77.7777,
-            90.0,
-            np.zeros(HORIZON),
-            66.6666,
-            500,
-        )
-    ]
-    out = render_feedback("bj", _make_incumbent(e), gains, _make_history(1), HeadroomConfig())
-    assert "Q (min p over channels)" in out
-    # The lag-24 row is the AR(1) channel's own (Q, p) — the minimum-p
-    # channel — and its p is tiny (renders as 0.0000).
-    rho = acf(e, 48)
-    q24, p24 = ljung_box(rho[:, 0], n, (24,))[24]
-    assert p24 < 1e-10
-    assert f"| 24 | {q24:.4f} | {p24:.4f} |" in out
-    # The bj arm still renders no gain numbers and no coordinate labels.
-    assert "88.8888" not in out
-    assert "band(P=24)" not in out
-
-
-def test_card_orders_coordinates_by_lcb_descending() -> None:
-    out = render_feedback("card", _make_incumbent(), _make_gains(), _make_history(1), HeadroomConfig())
+def test_fixed_orders_coordinates_by_lcb_descending() -> None:
+    out = render_feedback("fixed", _make_incumbent(), _make_gains(), _make_history(1), HeadroomConfig())
     section = out.split("## Remaining improvement by coordinate", 1)[1]
     expected = ["band(P=24)", "lag[0,23]", "beyond_l", "channel->3", "horizon"]
     positions = [section.index(f"| {label} |") for label in expected]
@@ -240,16 +170,32 @@ def test_card_orders_coordinates_by_lcb_descending() -> None:
     assert out.count("hgroup[1,12]") == 1
 
 
+def test_fixed_never_renders_card_content_into_self_built() -> None:
+    """The self-built arm's diagnostic channel is the agent's own probes only;
+    any fixed-card content leaking in would contaminate the core contrast."""
+    out = render_feedback(
+        "self-built",
+        _make_incumbent(),
+        _make_gains(),
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[{"probeId": "p1", "signalKey": "dominant period", "output": {"period": 24.0}}],
+    )
+    assert "Remaining improvement by coordinate" not in out
+    assert "band(P=24)" not in out
+    assert "lower bound" not in out
+
+
 def test_placebo_renders_the_same_rows_in_a_permuted_order() -> None:
     cfg = HeadroomConfig()
     incumbent = _make_incumbent()
     gains = _make_gains()
     history = _make_history(1)
-    card_rows = _card_rows(render_feedback("card", incumbent, gains, history, cfg))
+    fixed_rows = _card_rows(render_feedback("fixed", incumbent, gains, history, cfg))
     placebo_rows = _card_rows(render_feedback("placebo", incumbent, gains, history, cfg))
-    assert sorted(placebo_rows) == sorted(card_rows)  # same multiset of rows
-    assert placebo_rows != card_rows  # seed-0 default permutation moves them
-    assert placebo_rows[-2:] == card_rows[-2:]  # total and mu2 stay pinned at the end
+    assert sorted(placebo_rows) == sorted(fixed_rows)  # same multiset of rows
+    assert placebo_rows != fixed_rows  # seed-0 default permutation moves them
+    assert placebo_rows[-2:] == fixed_rows[-2:]  # total and mu2 stay pinned at the end
 
 
 def test_explicit_placebo_perm_is_honored() -> None:
@@ -257,13 +203,13 @@ def test_explicit_placebo_perm_is_honored() -> None:
     incumbent = _make_incumbent()
     gains = _make_gains()
     history = _make_history(1)
-    card_rows = _card_rows(render_feedback("card", incumbent, gains, history, cfg))
+    fixed_rows = _card_rows(render_feedback("fixed", incumbent, gains, history, cfg))
     perm = (4, 2, 0, 3, 1)
     placebo_rows = _card_rows(
         render_feedback("placebo", incumbent, gains, history, cfg, placebo_perm=perm)
     )
-    assert placebo_rows[:-2] == [card_rows[i] for i in perm]
-    assert placebo_rows[-2:] == card_rows[-2:]
+    assert placebo_rows[:-2] == [fixed_rows[i] for i in perm]
+    assert placebo_rows[-2:] == fixed_rows[-2:]
 
 
 def test_invalid_placebo_perm_is_rejected() -> None:
@@ -287,89 +233,83 @@ def test_no_forbidden_words_in_any_arm() -> None:
     gains = _make_gains()
     history = _make_history(2)
     for arm in ARMS:
-        lowered = render_feedback(arm, incumbent, gains, history, HeadroomConfig()).lower()
+        out = render_feedback(
+            arm,
+            incumbent,
+            gains,
+            history,
+            HeadroomConfig(),
+            probe_rows=[{"probeId": "p1", "signalKey": "m", "output": {"x": 1.0}}],
+            validation_rows=[{"probeId": "p1", "ok": True, "detail": "validated"}],
+        )
         for word in FORBIDDEN_SUBSTRINGS:
-            assert word not in lowered, (arm, word)
+            assert word not in out.lower(), (arm, word)
 
 
 def test_history_table_is_owned_by_round_md() -> None:
     """round.md renders the candidate history; the feedback scaffold no longer
     duplicates it (one table in the prompt, byte-identical across arms)."""
-    out = render_feedback("card", _make_incumbent(), _make_gains(), _make_history(15), HeadroomConfig())
+    out = render_feedback("fixed", _make_incumbent(), _make_gains(), _make_history(15), HeadroomConfig())
     assert "| 15 | c15 |" not in out
     assert "## Candidate history" not in out
 
 
-
-def test_ljung_box_white_noise_keeps_p_above_threshold() -> None:
-    rng = np.random.default_rng(11)
-    e = rng.normal(0.0, 1.0, size=(5000, 1))
-    rho = acf(e, 48)[:, 0]
-    result = ljung_box(rho, 5000, (12, 24, 48))
-    # Under whiteness each p is ~U(0,1); with this fixed seed most stay above 0.01.
-    assert sum(1 for _, p in result.values() if p > 0.01) >= 2
+def test_self_built_without_probes_shows_the_bootstrap_message() -> None:
+    out = render_feedback(
+        "self-built", _make_incumbent(), [], _make_history(1), HeadroomConfig()
+    )
+    assert "## Your probes on the incumbent" in out
+    assert "No validated probes yet" in out
 
 
-def test_ljung_box_ar1_rejects_whiteness() -> None:
-    n = 5000
-    eps = np.random.default_rng(12).normal(0.0, 1.0, size=n)
-    e = lfilter([1.0], [1.0, -0.9], eps)  # x_t = 0.9 x_{t-1} + eps_t
-    rho = acf(e[:, None], 48)[:, 0]
-    assert abs(rho[0] - 0.9) < 0.02  # ACF sanity: lag-1 autocorrelation is phi
-    _, p = ljung_box(rho, n, (24,))[24]
-    assert p < 1e-10
+def test_self_built_renders_probe_outputs_and_validation() -> None:
+    out = render_feedback(
+        "self-built",
+        _make_incumbent(),
+        [],
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[
+            {"probeId": "p-period", "signalKey": "dominant residual period", "output": {"period": 24.0}},
+            {
+                "probeId": "p-attn",
+                "signalKey": "block0 activation norm",
+                "error": "ProbeTimeout: ran past 120.0s",
+            },
+        ],
+        validation_rows=[
+            {"probeId": "p-period", "ok": True, "detail": "validated"},
+            {"probeId": "p-bad", "ok": False, "detail": "signalKey missing from output"},
+        ],
+    )
+    assert "## Probe validation results" in out
+    assert "| p-period | kept | validated |" in out
+    assert "| p-bad | rejected | signalKey missing from output |" in out
+    assert '| p-period | dominant residual period | {"period": 24.0} |' in out
+    assert "| p-attn | block0 activation norm | ERROR: ProbeTimeout: ran past 120.0s |" in out
 
 
-def test_min_p_ljung_box_reports_the_autocorrelated_channel() -> None:
-    # Channel 0 is a strong AR(1), channel 1 is white noise. The cross-channel
-    # mean ACF is no series' ACF — here it halves channel 0's signal, and with
-    # opposite-signed channels it cancels outright — so the portmanteau must
-    # run per channel; the minimum p then exposes the AR(1) at every lag.
-    n = 2000
-    rng = np.random.default_rng(31)
-    ar1 = lfilter([1.0], [1.0, -0.9], rng.normal(0.0, 1.0, size=n))
-    e = np.column_stack([ar1, rng.normal(0.0, 1.0, size=n)])
-    rho = acf(e, 48)
-    worst = min_p_ljung_box(rho, n, (12, 24, 48))
-    for m, (q, p) in worst.items():
-        q0, p0 = ljung_box(rho[:, 0], n, (m,))[m]
-        assert (q, p) == (q0, p0)  # the AR(1) channel is the minimum-p channel
-        assert p < 1e-10
+def test_self_built_truncates_chatty_probe_output() -> None:
+    chatty = {"series": list(range(400))}
+    out = render_feedback(
+        "self-built",
+        _make_incumbent(),
+        [],
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[{"probeId": "p", "signalKey": "m", "output": chatty}],
+    )
+    assert "… (truncated)" in out
+    assert len(out.split("| p | m | ", 1)[1].split(" |", 1)[0]) <= 620
 
 
-def test_min_p_ljung_box_skips_channels_with_no_acf() -> None:
-    # A constant channel has a NaN ACF and therefore no vote; the minimum
-    # must fall to the remaining informative channel rather than become n/a.
-    rng = np.random.default_rng(32)
-    e = np.column_stack([np.full(2000, 3.0), rng.normal(0.0, 1.0, size=2000)])
-    rho = acf(e, 48)
-    q, p = min_p_ljung_box(rho, 2000, (24,))[24]
-    q1, p1 = ljung_box(rho[:, 1], 2000, (24,))[24]
-    assert (q, p) == (q1, p1)
-    assert np.isfinite(p)
-
-
-def test_periodogram_peaks_locate_a_known_period() -> None:
-    rng = np.random.default_rng(13)
-    t = np.arange(4000)
-    e = np.sin(2.0 * np.pi * t / 24.0)[:, None] + 0.2 * rng.normal(size=(4000, 1))
-    peaks = periodogram_peaks(e, top=5)
-    periods = [period for period, _ in peaks]
-    assert 1 <= len(peaks) <= 5
-    assert periods == sorted(periods)  # period order, never ranked by power
-    assert min(abs(period - 24.0) for period in periods) < 0.5  # within half a bin
-
-
-def test_bj_drops_nan_rows_of_efull() -> None:
-    series = np.random.default_rng(14).normal(0.0, 1.0, size=(1000, 1))
-    e_full = np.full((2000, 1), np.nan)
-    e_full[1::2] = series  # only every other index is an origin
-    out = render_feedback("bj", _make_incumbent(e_full), [], _make_history(1), HeadroomConfig())
-    assert f"| 1 | {acf(series, 48)[0, 0]:.4f} |" in out
-
-
-def test_bj_mean_column_when_many_channels() -> None:
-    e = np.random.default_rng(15).normal(0.0, 1.0, size=(600, 6))
-    out = render_feedback("bj", _make_incumbent(e), [], _make_history(1), HeadroomConfig())
-    assert "| lag | mean |" in out
-    assert "ch0" not in out
+def test_self_built_caps_the_number_of_probe_rows() -> None:
+    rows = [
+        {"probeId": f"p{i:02d}", "signalKey": "m", "output": {"i": i}} for i in range(10)
+    ]
+    out = render_feedback(
+        "self-built", _make_incumbent(), [], _make_history(1), HeadroomConfig(), probe_rows=rows
+    )
+    assert "| p00 |" in out and "| p07 |" in out
+    assert "| p08 |" not in out
+    assert "2 older probes not shown" in out

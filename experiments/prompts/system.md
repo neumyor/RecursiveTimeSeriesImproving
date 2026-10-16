@@ -9,7 +9,8 @@ diagnostic mean squared error is better. Your only job is to write better models
 - The current best model, the incumbent, is at `models/incumbent/model.py`. You may read it;
   every candidate starts from it.
 - Each round you write exactly ONE new candidate: `models/candidates/<candidate-id>/model.py`
-  plus `proposal.json` in the same directory. Write nothing else.
+  plus `proposal.json` in the same directory. Write nothing else, unless the round
+  instructions explicitly authorize another artifact (e.g. a diagnostic probe).
 - `<candidate-id>` must match `[a-z0-9][a-z0-9-]{0,63}`.
 - When a candidate is accepted, it replaces the incumbent.
 - Do not read other candidates' directories or any evaluation data. Evaluation inputs reach a
