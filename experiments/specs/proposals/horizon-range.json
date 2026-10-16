@@ -1,0 +1,41 @@
+{
+  "familyId": "horizon-range",
+  "kind": "residual",
+  "generator": {
+    "type": "series_pair",
+    "clean": {
+      "length": 4096,
+      "channels": [
+        {
+          "type": "ar1_plus_white",
+          "phi": 0.0,
+          "innovationSd": 1.0,
+          "whiteSd": 0.5
+        },
+        {
+          "type": "ar1_plus_white",
+          "phi": 0.0,
+          "innovationSd": 1.0,
+          "whiteSd": 0.5
+        }
+      ]
+    },
+    "injection": {
+      "type": "horizon_scaled",
+      "channel": 0,
+      "period": 12,
+      "amplitudeFraction": 0.75
+    }
+  },
+  "witnessProbe": {
+    "source": "import numpy as np\n\n\ndef create_probe():\n    return HorizonRatioProbe()\n\n\nclass HorizonRatioProbe:\n    def __init__(self):\n        self.probe_id = \"horizon-ratio\"\n\n    def run(self, artifacts):\n        h = int(artifacts[\"meta\"][\"H\"])\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        gap = h - 1\n        long_step = e[gap:, 0] - e[:-gap, 0]\n        short_step = e[1:, 0] - e[:-1, 0]\n        num = float(np.mean(long_step * long_step))\n        den = float(np.mean(short_step * short_step))\n        return {\"horizonRatio\": num / den}\n",
+    "proposal": {
+      "probeId": "horizon-ratio",
+      "measures": "ratio of long-gap (H-1 step) to short-gap (1 step) residual increment power",
+      "signalKey": "horizonRatio",
+      "expectedDirection": "higher",
+      "rationale": "the planted component sits at period 4*(H-1): it contributes ~2% of the 1-step-gap increment power but ~27% of the full (H-1)-step-gap power on channel 0, so only a long-horizon contrast reads it; e is the full realization of the same residual process r samples at the origins, so the witness estimates the horizon contrast on e at full sample size"
+    }
+  },
+  "rationale": "Horizon-range: structure that is invisible at short forecast horizons and only detectable at long ones.  A stationary series injection cannot literally scale with h (h indexes read offsets of one fixed series), so the design is realized spectrally: a narrowband component at period 12 = 4*(H-1) added to channel 0 of a white clean process (phi=0 AR(1) plus white noise, no autocorrelation to hide it).  Its 1-step increments carry a 1-cos(2*pi/12) ~ 13% fraction of its amplitude squared against a clean gap-1 power of 2*Var, while its full 3-step increments carry 1-cos(pi/2) = 100% — a ~24% power ratio shift that a short-horizon probe cannot see (2% relative on gap 1).  The witness is the ratio of (H-1)-step to 1-step residual increment power on channel 0; the marginal std perturbation is ~13% (gate 3) and the band-24/lag-3/bilinear probes see nothing (gate 2)."
+}

@@ -1,0 +1,41 @@
+{
+  "familyId": "level-bias",
+  "kind": "residual",
+  "generator": {
+    "type": "series_pair",
+    "clean": {
+      "length": 4096,
+      "channels": [
+        {
+          "type": "ar1_plus_white",
+          "phi": 0.6,
+          "innovationSd": 1.0,
+          "whiteSd": 0.5
+        },
+        {
+          "type": "ar1_plus_white",
+          "phi": 0.6,
+          "innovationSd": 1.0,
+          "whiteSd": 0.5
+        }
+      ]
+    },
+    "injection": {
+      "type": "constant_offset",
+      "channel": 0,
+      "cycles": 0.5,
+      "amplitudeFraction": 0.7
+    }
+  },
+  "witnessProbe": {
+    "source": "import numpy as np\n\n\ndef create_probe():\n    return LevelBiasProbe()\n\n\nclass LevelBiasProbe:\n    def __init__(self):\n        self.probe_id = \"level-bias-mu2\"\n\n    def run(self, artifacts):\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        blocks = 8\n        size = e.shape[0] // blocks\n        means = e[: size * blocks].reshape(blocks, size, e.shape[1]).mean(axis=1)\n        return {\"mu2\": float(np.mean(means * means))}\n",
+    "proposal": {
+      "probeId": "level-bias-mu2",
+      "measures": "mu^2 statistic: mean over 8 equal blocks of e of the squared block means",
+      "signalKey": "mu2",
+      "expectedDirection": "higher",
+      "rationale": "the planted half-cosine drift moves every local block mean of the residual far outside the clean process's block-mean scatter, so the mu^2 statistic (the squared local level of e) rises by an order of magnitude"
+    }
+  },
+  "rationale": "Level-bias: a constant level offset the incumbent misses.  A TRUE constant is absorbed by the mean-predictor incumbent (e is centered by construction), so the admissible design is the low-frequency limit: a half-cosine drift over the series, cos(pi*t/T) at 0.7 * sd(clean ch0) on channel 0 — zero net mean shift over the window (the DC part is absorbed) but a level that sweeps from +0.7 sd to -0.7 sd, so no local window of the residual sits at the global mean.  The witness is the mu^2 statistic: block means of e are +-0.6 sd on the planted member against a ~0.1 sd clean floor, an order-of-magnitude shift; the marginal std perturbation is ~11% (gate 3) and the band-24/lag-3/bilinear probes see nothing (gate 2)."
+}

@@ -66,8 +66,12 @@ from harnessing_ts.headroom.timeidx import segment_origins
 
 # The full-size run owns experiments/runs/stage0 (the pre-registered
 # artifact); any smoke run writes beside it so concurrent tests can never
-# overwrite the calibration report.
-REPORT_DIR = _REPO_ROOT / "experiments" / "runs" / ("stage0-smoke" if "--smoke" in sys.argv else "stage0")
+# overwrite the calibration report.  The directory follows the smoke FLAG
+# the caller passes, never the process's sys.argv — a pytest process calling
+# run(smoke=True) directly must not clobber the full-size report (the exact
+# bug that erased the first fixed-level rerun).
+def _report_dir(smoke: bool) -> Path:
+    return _REPO_ROOT / "experiments" / "runs" / ("stage0-smoke" if smoke else "stage0")
 
 # Pre-registered (task, model) -> expected top-card aspects (final plan §5).
 # Period-168 structure exceeds the lookback, so beyond-l is a legitimate top
@@ -603,6 +607,7 @@ def _gate_setup(smoke: bool) -> tuple[HeadroomConfig, dict[str, int]]:
 
 
 def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
+    report_dir = _report_dir(smoke)
     cfg, sizes = _gate_setup(smoke)
     if smoke:
         seeds, reps = 1, 2
@@ -613,7 +618,7 @@ def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
     def flush(name: str, gate: dict[str, Any]) -> None:
         report["gates"][name] = gate
         report["all_pass"] = all(g.get("pass", False) for g in report["gates"].values())
-        write_report(report)
+        write_report(report, report_dir)
 
     flush("G0-7", gate_g07_observation0())
 
@@ -773,7 +778,9 @@ def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
     return report
 
 
-def write_report(report: dict[str, Any], report_dir: Path = REPORT_DIR) -> None:
+def write_report(report: dict[str, Any], report_dir: Path | None = None) -> None:
+    if report_dir is None:
+        report_dir = _report_dir("--smoke" in sys.argv)
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     title = (

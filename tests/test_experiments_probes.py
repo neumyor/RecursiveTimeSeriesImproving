@@ -306,7 +306,15 @@ def registry_artifacts(task_name: str, seed: int, sizes: dict[str, int]) -> dict
     return P.artifacts_from_series(task.train_diag, meta_update={"seed": seed})
 
 
-FAMILY_OF_PAIR = ("period24", "period24", "cross-lag3", "cross-lag3", "nonlinear", "nonlinear")
+# Family-major pair order, matching the registry order make_fixtures emits:
+# three seed families + two pipeline-admitted families, two pairs each.
+FAMILY_OF_PAIR = (
+    "period24", "period24",
+    "cross-lag3", "cross-lag3",
+    "nonlinear", "nonlinear",
+    "horizon-range", "horizon-range",
+    "level-bias", "level-bias",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -332,9 +340,9 @@ def test_good_band_probe_passes_validation(tmp_path: Path) -> None:
     # Fixtures and controls are deterministic: the same seed must reproduce
     # them exactly, or validation records would not be comparable.
     fixtures = P.make_fixtures("residual", seed=0)
-    assert len(fixtures) == 6  # three families, two pairs each
+    assert len(fixtures) == 10  # five families, two pairs each
     controls = P.make_controls("residual", seed=0)
-    assert [len(entry) for entry in controls] == [P._N_CONTROLS] * 6
+    assert [len(entry) for entry in controls] == [P._N_CONTROLS] * 10
     for index, (planted, clean) in enumerate(fixtures):
         assert np.isnan(planted["residuals"]["e"][0]).all()  # NaN-padded head
         assert np.isnan(planted["residuals"]["e"][-1]).all()  # ... and tail
@@ -364,7 +372,7 @@ def test_good_band_probe_passes_validation(tmp_path: Path) -> None:
     # Specificity: a periodicity probe completes only its own family.
     assert result["families"]["cross-lag3"]["complete"] is False
     assert result["families"]["nonlinear"]["complete"] is False
-    assert set(result["measured"]) == set(range(6))
+    assert set(result["measured"]) == set(range(10))
     for entry in result["measured"].values():
         assert len(entry["controls"]) == P._N_CONTROLS
     # The direction/margin claims hold on the probe's own family; the other

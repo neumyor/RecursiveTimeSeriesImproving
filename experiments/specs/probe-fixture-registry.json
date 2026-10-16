@@ -1,0 +1,1370 @@
+{
+  "version": 1,
+  "families": [
+    {
+      "familyId": "period24",
+      "kind": "residual",
+      "origin": "seed",
+      "generator": {
+        "type": "series_pair",
+        "clean": {
+          "length": 4096,
+          "channels": [
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            },
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            }
+          ]
+        },
+        "injection": {
+          "type": "sinusoid",
+          "channel": 0,
+          "period": 24,
+          "amplitudeFraction": 0.5
+        }
+      },
+      "seedLayout": {
+        "pairSeeds": [
+          0,
+          1
+        ],
+        "controlSeeds": [
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ]
+      },
+      "witnessProbe": {
+        "source": "import numpy as np\n\n\ndef create_probe():\n    return Band24Probe()\n\n\nclass Band24Probe:\n    def __init__(self):\n        self.probe_id = \"band24-energy\"\n\n    def run(self, artifacts):\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        e = e - e.mean(axis=0)\n        power = (np.abs(np.fft.rfft(e, axis=0)) ** 2).sum(axis=1)\n        freqs = np.fft.rfftfreq(e.shape[0])\n        periods = np.zeros_like(freqs)\n        positive = freqs > 0.0\n        periods[positive] = 1.0 / freqs[positive]\n        band = (periods >= 21.6) & (periods <= 26.4)\n        return {\"band24\": float(power[band].sum())}\n",
+        "proposal": {
+          "probeId": "band24-energy",
+          "measures": "period-24 band energy of the 1-step residual series",
+          "signalKey": "band24",
+          "expectedDirection": "higher",
+          "rationale": "a period-24 oscillation the incumbent cannot predict lands in e, so the band energy rises when the defect is planted"
+        }
+      },
+      "rationale": "A periodic defect at period 24: the classic spectral signature a residual diagnostic should find.  Clean is AR(1)+white both channels; the planted member adds a period-24 sinusoid on channel 0 at half the clean channel's sd.",
+      "gateEvidence": {
+        "witness": {
+          "perSeed": {
+            "0": {
+              "pairs": [
+                {
+                  "planted": 3677934.094379596,
+                  "clean": 1910150.4516691195,
+                  "controls": [
+                    1341428.4975299863,
+                    1250915.006422593
+                  ],
+                  "margin": 0.48064581837175935,
+                  "passes": true
+                },
+                {
+                  "planted": 3221020.9626712324,
+                  "clean": 1320564.5665492406,
+                  "controls": [
+                    1678075.8278250427,
+                    1452513.4097171398
+                  ],
+                  "margin": 0.4790236241016595,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "1": {
+              "pairs": [
+                {
+                  "planted": 3235754.1602692436,
+                  "clean": 1558998.7732570716,
+                  "controls": [
+                    1383603.2511050634,
+                    1619090.3559059903
+                  ],
+                  "margin": 0.49962504080616943,
+                  "passes": true
+                },
+                {
+                  "planted": 3757582.201143827,
+                  "clean": 1726817.7620901465,
+                  "controls": [
+                    1408457.8760694512,
+                    1932942.4105425165
+                  ],
+                  "margin": 0.48558878899465746,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "2": {
+              "pairs": [
+                {
+                  "planted": 4073632.0438001016,
+                  "clean": 1429395.55155128,
+                  "controls": [
+                    1604864.5167550724,
+                    1450509.3919658079
+                  ],
+                  "margin": 0.6060359650799563,
+                  "passes": true
+                },
+                {
+                  "planted": 3656644.7002739925,
+                  "clean": 1650351.9397442904,
+                  "controls": [
+                    1227322.1072948829,
+                    1184883.9748638263
+                  ],
+                  "margin": 0.5486704137209094,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "3": {
+              "pairs": [
+                {
+                  "planted": 3007185.2704297006,
+                  "clean": 1051449.3526841195,
+                  "controls": [
+                    1513319.4359885678,
+                    1530581.6653152416
+                  ],
+                  "margin": 0.49102515220269927,
+                  "passes": true
+                },
+                {
+                  "planted": 3145847.8424349986,
+                  "clean": 1633642.907704498,
+                  "controls": [
+                    1353487.3683321432,
+                    1501530.408111506
+                  ],
+                  "margin": 0.48069868934283866,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "4": {
+              "pairs": [
+                {
+                  "planted": 3394610.2703726045,
+                  "clean": 1463507.9357761159,
+                  "controls": [
+                    1479029.1885321594,
+                    1350689.1781588094
+                  ],
+                  "margin": 0.5643007383083726,
+                  "passes": true
+                },
+                {
+                  "planted": 2998771.386972579,
+                  "clean": 1142824.7791655692,
+                  "controls": [
+                    1282450.4191056485,
+                    1376170.8503092402
+                  ],
+                  "margin": 0.5410884416572487,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            }
+          },
+          "deterministic": true
+        },
+        "specificity": {
+          "probes": {
+            "xlag3-r2": {
+              "completedAtSeeds": []
+            },
+            "bilinear-r2": {
+              "completedAtSeeds": []
+            },
+            "horizon-ratio": {
+              "completedAtSeeds": []
+            },
+            "level-bias-mu2": {
+              "completedAtSeeds": []
+            }
+          },
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "amplitude": {
+          "bound": {
+            "maxStdChange": 0.2,
+            "maxMeanShiftStd": 0.25
+          },
+          "maxStdChange": 0.0797441948083257,
+          "maxMeanShiftStd": 0.0007482700544966036
+        },
+        "reproducibility": {
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "bitwiseIdentical": true
+        }
+      }
+    },
+    {
+      "familyId": "cross-lag3",
+      "kind": "residual",
+      "origin": "seed",
+      "generator": {
+        "type": "series_pair",
+        "clean": {
+          "length": 4096,
+          "channels": [
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            },
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            }
+          ]
+        },
+        "injection": {
+          "type": "cross_lag",
+          "channel": 0,
+          "sourceChannel": 1,
+          "lag": 3,
+          "amplitudeFraction": 0.5
+        }
+      },
+      "seedLayout": {
+        "pairSeeds": [
+          2,
+          3
+        ],
+        "controlSeeds": [
+          [
+            10,
+            11
+          ],
+          [
+            12,
+            13
+          ]
+        ]
+      },
+      "witnessProbe": {
+        "source": "import numpy as np\n\n\ndef create_probe():\n    return Xlag3Probe()\n\n\nclass Xlag3Probe:\n    def __init__(self):\n        self.probe_id = \"xlag3-r2\"\n\n    def run(self, artifacts):\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        y = e[3:, 0]\n        design = np.hstack([e[:-3, 1:2], np.ones((y.shape[0], 1))])\n        beta, *_ = np.linalg.lstsq(design, y, rcond=None)\n        residual = y - design @ beta\n        total = y - y.mean()\n        return {\"xlag3R2\": float(1.0 - residual @ residual / (total @ total))}\n",
+        "proposal": {
+          "probeId": "xlag3-r2",
+          "measures": "R^2 of the channel-0 residual on channel 1 three rows back",
+          "signalKey": "xlag3R2",
+          "expectedDirection": "higher",
+          "rationale": "the planted defect copies channel 1 three rows back into channel 0, so a lag-3 cross-channel regression gains real R^2"
+        }
+      },
+      "rationale": "A linear cross-channel dependency at lag 3: channel 0 reads channel 1 three rows back at half its own sd, invisible to any same-channel or wrong-lag probe.",
+      "gateEvidence": {
+        "witness": {
+          "perSeed": {
+            "0": {
+              "pairs": [
+                {
+                  "planted": 0.2039902957442309,
+                  "clean": 3.891113598686324e-05,
+                  "controls": [
+                    0.001016258751759147,
+                    1.6089883194125854e-05
+                  ],
+                  "margin": 0.995018102463887,
+                  "passes": true
+                },
+                {
+                  "planted": 0.20657486543139714,
+                  "clean": 0.00010018270961176245,
+                  "controls": [
+                    0.00020597048943860052,
+                    2.235412782958246e-05
+                  ],
+                  "margin": 0.9990029256995595,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "1": {
+              "pairs": [
+                {
+                  "planted": 0.20577354674957138,
+                  "clean": 8.54394770606337e-05,
+                  "controls": [
+                    0.0006192126790566244,
+                    0.001817029776753798
+                  ],
+                  "margin": 0.9911697601297356,
+                  "passes": true
+                },
+                {
+                  "planted": 0.18879592111466692,
+                  "clean": 0.00033005765136584486,
+                  "controls": [
+                    1.776329523250908e-06,
+                    0.0011775214819901292
+                  ],
+                  "margin": 0.993762992997741,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "2": {
+              "pairs": [
+                {
+                  "planted": 0.21092785766694022,
+                  "clean": 0.00028729545730865613,
+                  "controls": [
+                    8.918326930618115e-06,
+                    0.0014671762884205242
+                  ],
+                  "margin": 0.9930441796325584,
+                  "passes": true
+                },
+                {
+                  "planted": 0.20791298282023785,
+                  "clean": 0.00015662917852921066,
+                  "controls": [
+                    1.890548503413747e-06,
+                    0.000728872561999272
+                  ],
+                  "margin": 0.9964943383904532,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "3": {
+              "pairs": [
+                {
+                  "planted": 0.19401409726016428,
+                  "clean": 9.265828780857799e-05,
+                  "controls": [
+                    0.0003848008639091294,
+                    0.0014214643384896641
+                  ],
+                  "margin": 0.9926733966316709,
+                  "passes": true
+                },
+                {
+                  "planted": 0.21044174389747972,
+                  "clean": 0.00027956944732920874,
+                  "controls": [
+                    0.0011917537941922296,
+                    3.0731532771888226e-06
+                  ],
+                  "margin": 0.994336894514746,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "4": {
+              "pairs": [
+                {
+                  "planted": 0.1738500257140616,
+                  "clean": 0.0016661001205119375,
+                  "controls": [
+                    3.560438476268857e-06,
+                    8.553068919781026e-07
+                  ],
+                  "margin": 0.9904164516877769,
+                  "passes": true
+                },
+                {
+                  "planted": 0.1994424515903055,
+                  "clean": 1.000799803363428e-06,
+                  "controls": [
+                    6.406019673477203e-05,
+                    0.0010221575592472831
+                  ],
+                  "margin": 0.994874924816172,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            }
+          },
+          "deterministic": true
+        },
+        "specificity": {
+          "probes": {
+            "band24-energy": {
+              "completedAtSeeds": []
+            },
+            "bilinear-r2": {
+              "completedAtSeeds": []
+            },
+            "horizon-ratio": {
+              "completedAtSeeds": []
+            },
+            "level-bias-mu2": {
+              "completedAtSeeds": []
+            }
+          },
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "amplitude": {
+          "bound": {
+            "maxStdChange": 0.2,
+            "maxMeanShiftStd": 0.25
+          },
+          "maxStdChange": 0.1255301074477897,
+          "maxMeanShiftStd": 0.03188339155448024
+        },
+        "reproducibility": {
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "bitwiseIdentical": true
+        }
+      }
+    },
+    {
+      "familyId": "nonlinear",
+      "kind": "residual",
+      "origin": "seed",
+      "generator": {
+        "type": "series_pair",
+        "clean": {
+          "length": 4096,
+          "channels": [
+            {
+              "type": "ar1",
+              "phi": 0.6,
+              "innovationSd": 1.0
+            },
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            }
+          ]
+        },
+        "injection": {
+          "type": "threshold_bilinear",
+          "targetChannel": 0,
+          "driverChannel": 1,
+          "amplitudeFraction": 0.5
+        }
+      },
+      "seedLayout": {
+        "pairSeeds": [
+          4,
+          5
+        ],
+        "controlSeeds": [
+          [
+            14,
+            15
+          ],
+          [
+            16,
+            17
+          ]
+        ]
+      },
+      "witnessProbe": {
+        "source": "import numpy as np\n\n\ndef create_probe():\n    return BilinearProbe()\n\n\nclass BilinearProbe:\n    def __init__(self):\n        self.probe_id = \"bilinear-r2\"\n\n    def run(self, artifacts):\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        y = e[2:, 0] ** 2\n        s = float(e[:, 1].std())\n        design = np.hstack([\n            np.tanh(e[1:-1, 1:2] / s),\n            np.tanh(e[:-2, 1:2] / s),\n            np.ones((y.shape[0], 1)),\n        ])\n        beta, *_ = np.linalg.lstsq(design, y, rcond=None)\n        residual = y - design @ beta\n        total = y - y.mean()\n        return {\"bilinearR2\": float(1.0 - residual @ residual / (total @ total))}\n",
+        "proposal": {
+          "probeId": "bilinear-r2",
+          "measures": "R^2 of the squared channel-0 residual on thresholded (tanh) channel-1 lags",
+          "signalKey": "bilinearR2",
+          "expectedDirection": "higher",
+          "rationale": "the planted defect scales channel 0's innovation by a tanh(channel-1) driver, so the conditional variance carries the signal a linear probe cannot see"
+        }
+      },
+      "rationale": "A threshold-type cross-channel coupling in the conditional variance: channel 0's innovation sd is modulated by tanh of channel 1's level.  Every second moment matches the clean process up to one common scale, so linear probes see exactly the clean process while e0^2 regressed on tanh(e1) lags reads the defect.",
+      "gateEvidence": {
+        "witness": {
+          "perSeed": {
+            "0": {
+              "pairs": [
+                {
+                  "planted": 0.12555246304056134,
+                  "clean": 0.00024629252350472086,
+                  "controls": [
+                    0.0022793720320959387,
+                    0.002052660938221207
+                  ],
+                  "margin": 0.981845262315885,
+                  "passes": true
+                },
+                {
+                  "planted": 0.14252140889099074,
+                  "clean": 0.000508298954528752,
+                  "controls": [
+                    0.0011963862630547384,
+                    0.0002845583536464913
+                  ],
+                  "margin": 0.991605568087179,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "1": {
+              "pairs": [
+                {
+                  "planted": 0.12643538469929672,
+                  "clean": 0.0006839036333889936,
+                  "controls": [
+                    1.936942731428637e-05,
+                    0.00019534064762638526
+                  ],
+                  "margin": 0.9945908842290033,
+                  "passes": true
+                },
+                {
+                  "planted": 0.1266844269216043,
+                  "clean": 0.0003513367255567612,
+                  "controls": [
+                    0.0012838348916385245,
+                    0.0030398525810551025
+                  ],
+                  "margin": 0.9760045282997867,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "2": {
+              "pairs": [
+                {
+                  "planted": 0.13120236432809196,
+                  "clean": 0.00016300886899534017,
+                  "controls": [
+                    0.0016663757725530193,
+                    0.0002713858730086782
+                  ],
+                  "margin": 0.9872991940268242,
+                  "passes": true
+                },
+                {
+                  "planted": 0.12108044763883519,
+                  "clean": 0.00019044535200851698,
+                  "controls": [
+                    3.210238058937165e-05,
+                    1.9671369989149312e-05
+                  ],
+                  "margin": 0.9984271172123794,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "3": {
+              "pairs": [
+                {
+                  "planted": 0.1230105961851573,
+                  "clean": 0.0035999971807578746,
+                  "controls": [
+                    0.0008672388648841567,
+                    0.00013304664046887016
+                  ],
+                  "margin": 0.9707342514189663,
+                  "passes": true
+                },
+                {
+                  "planted": 0.1330403028379349,
+                  "clean": 0.00011324414697855278,
+                  "controls": [
+                    0.0006391201235018684,
+                    0.00011068696263705213
+                  ],
+                  "margin": 0.9951960412756996,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "4": {
+              "pairs": [
+                {
+                  "planted": 0.12216989932413047,
+                  "clean": 0.00023534849795703305,
+                  "controls": [
+                    0.0025080357927385055,
+                    0.0008770357278373719
+                  ],
+                  "margin": 0.9794709187237324,
+                  "passes": true
+                },
+                {
+                  "planted": 0.13917859351544137,
+                  "clean": 0.0009483047111532583,
+                  "controls": [
+                    0.0007686944528121353,
+                    0.0001936933914692407
+                  ],
+                  "margin": 0.9931864183478184,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            }
+          },
+          "deterministic": true
+        },
+        "specificity": {
+          "probes": {
+            "band24-energy": {
+              "completedAtSeeds": []
+            },
+            "xlag3-r2": {
+              "completedAtSeeds": []
+            },
+            "horizon-ratio": {
+              "completedAtSeeds": []
+            },
+            "level-bias-mu2": {
+              "completedAtSeeds": []
+            }
+          },
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "amplitude": {
+          "bound": {
+            "maxStdChange": 0.2,
+            "maxMeanShiftStd": 0.25
+          },
+          "maxStdChange": 0.13890938427535293,
+          "maxMeanShiftStd": 0.02866478898581862
+        },
+        "reproducibility": {
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "bitwiseIdentical": true
+        }
+      }
+    },
+    {
+      "familyId": "activation",
+      "kind": "activation",
+      "origin": "seed",
+      "generator": {
+        "type": "activation_mlp_rank1",
+        "params": {
+          "length": 1200,
+          "nResiduals": 384,
+          "windowStride": 2,
+          "layer1Width": 32,
+          "layer2Width": 16,
+          "sinusoidAmplitude": 1.0,
+          "noiseSd": 0.5,
+          "period": 24,
+          "injectBeta": 2.0
+        }
+      },
+      "seedLayout": {
+        "netSeed": 0,
+        "directionSeed": 1,
+        "pairDataSeeds": [
+          2,
+          3
+        ],
+        "controlDataSeeds": [
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ]
+        ]
+      },
+      "witnessProbe": {
+        "source": "import numpy as np\n\n\ndef create_probe():\n    return LayerGapProbe()\n\n\nclass LayerGapProbe:\n    def __init__(self):\n        self.probe_id = \"layer-gap\"\n\n    def run(self, artifacts):\n        r = np.asarray(artifacts[\"residuals\"][\"r\"], dtype=np.float64)\n        rows = np.asarray(artifacts[\"meta\"][\"activationOrigins\"], dtype=np.int64)\n        y = r[rows, :, 0].mean(axis=1)\n        y = y - y.mean()\n        spec = np.fft.rfft(y)\n        freqs = np.fft.rfftfreq(y.shape[0])\n        periods = np.zeros_like(freqs)\n        positive = freqs > 0.0\n        periods[positive] = 1.0 / freqs[positive]\n        keep = (periods >= 10.8) & (periods <= 13.2)\n        y_band = np.fft.irfft(spec * keep, n=y.shape[0])\n\n        def r2(layer):\n            feat = np.asarray(artifacts[\"activations\"][layer], dtype=np.float64)\n            feat = feat.mean(axis=1)\n            design = np.hstack([feat, np.ones((feat.shape[0], 1))])\n            beta, *_ = np.linalg.lstsq(design, y_band, rcond=None)\n            residual = y_band - design @ beta\n            total = y_band - y_band.mean()\n            return 1.0 - float(residual @ residual) / float(total @ total)\n\n        return {\"layer2_gap\": float(r2(\"layer2\") - r2(\"layer1\"))}\n",
+        "proposal": {
+          "probeId": "layer-gap",
+          "measures": "layer-2 minus layer-1 linear-probe R^2 gap on the bandpassed channel-0 residual",
+          "signalKey": "layer2_gap",
+          "expectedDirection": "higher",
+          "rationale": "the planted defect injects the known bandpassed residual into layer 2 only, so layer 2 becomes linearly informative while layer 1 stays clean"
+        }
+      },
+      "rationale": "A rank-1 activation defect: the fixed MLP's layer-2 output gains a seeded direction carrying the analytic period-24 component of the channel-0 residual, at per-coordinate sd 2.0 times the clean layer-2 sd.  Only layer 2 (and 3) become linearly informative about the bandpassed residual.",
+      "gateEvidence": {
+        "witness": {
+          "perSeed": {
+            "0": {
+              "pairs": [
+                {
+                  "planted": 0.050736058556315244,
+                  "clean": -0.27160972646047454,
+                  "controls": [
+                    -0.2072982352650784,
+                    -0.2167837381752754
+                  ],
+                  "margin": 1.1867976497656776,
+                  "passes": true
+                },
+                {
+                  "planted": 0.0569374033029173,
+                  "clean": -0.21933669492129648,
+                  "controls": [
+                    -0.23913459374161794,
+                    -0.2459782166571295
+                  ],
+                  "margin": 1.2314733559609576,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "1": {
+              "pairs": [
+                {
+                  "planted": 0.0848340585213645,
+                  "clean": -0.1527786158572052,
+                  "controls": [
+                    -0.19921980646610593,
+                    -0.1535587624952246
+                  ],
+                  "margin": 1.4258314473154439,
+                  "passes": true
+                },
+                {
+                  "planted": 0.10415069493824491,
+                  "clean": -0.16451466222552036,
+                  "controls": [
+                    -0.16131929826143654,
+                    -0.17780671456526098
+                  ],
+                  "margin": 1.5857523164571952,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "2": {
+              "pairs": [
+                {
+                  "planted": 0.04973565638713784,
+                  "clean": -0.2932730099197869,
+                  "controls": [
+                    -0.26317026106335817,
+                    -0.24703077550103758
+                  ],
+                  "margin": 1.1695882495315237,
+                  "passes": true
+                },
+                {
+                  "planted": 0.0826556289962802,
+                  "clean": -0.2640716920770082,
+                  "controls": [
+                    -0.3002849095712792,
+                    -0.29760083305750207
+                  ],
+                  "margin": 1.2752573518072845,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "3": {
+              "pairs": [
+                {
+                  "planted": 0.06594317366380531,
+                  "clean": -0.13176826276577513,
+                  "controls": [
+                    -0.13306162277648603,
+                    -0.09739391101164141
+                  ],
+                  "margin": 1.49558371743726,
+                  "passes": true
+                },
+                {
+                  "planted": 0.09773324727528976,
+                  "clean": -0.12277005990742396,
+                  "controls": [
+                    -0.12794310267194242,
+                    -0.12054017574572673
+                  ],
+                  "margin": 1.7638805471670214,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "4": {
+              "pairs": [
+                {
+                  "planted": 0.058075525996202026,
+                  "clean": -0.15630362232224593,
+                  "controls": [
+                    -0.13414179314684538,
+                    -0.1533367941701086
+                  ],
+                  "margin": 1.37155585477392,
+                  "passes": true
+                },
+                {
+                  "planted": 0.06306825110052472,
+                  "clean": -0.19564347416225836,
+                  "controls": [
+                    -0.19523045871686273,
+                    -0.16817603825106897
+                  ],
+                  "margin": 1.3223631729633802,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            }
+          },
+          "deterministic": true
+        },
+        "specificity": {
+          "probes": {},
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "amplitude": {
+          "bound": {
+            "maxStdChange": 0.2,
+            "maxMeanShiftStd": 0.25
+          },
+          "maxStdChange": 0.0,
+          "maxMeanShiftStd": 0.0,
+          "residualsBitwiseUnchanged": true,
+          "injectBeta": 2.0
+        },
+        "reproducibility": {
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "bitwiseIdentical": true
+        }
+      }
+    },
+    {
+      "familyId": "horizon-range",
+      "kind": "residual",
+      "origin": "generated",
+      "generator": {
+        "type": "series_pair",
+        "clean": {
+          "length": 4096,
+          "channels": [
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.0,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            },
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.0,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            }
+          ]
+        },
+        "injection": {
+          "type": "horizon_scaled",
+          "channel": 0,
+          "period": 12,
+          "amplitudeFraction": 0.75
+        }
+      },
+      "seedLayout": {
+        "pairSeeds": [
+          18,
+          19
+        ],
+        "controlSeeds": [
+          [
+            20,
+            21
+          ],
+          [
+            22,
+            23
+          ]
+        ]
+      },
+      "witnessProbe": {
+        "source": "import numpy as np\n\n\ndef create_probe():\n    return HorizonRatioProbe()\n\n\nclass HorizonRatioProbe:\n    def __init__(self):\n        self.probe_id = \"horizon-ratio\"\n\n    def run(self, artifacts):\n        h = int(artifacts[\"meta\"][\"H\"])\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        gap = h - 1\n        long_step = e[gap:, 0] - e[:-gap, 0]\n        short_step = e[1:, 0] - e[:-1, 0]\n        num = float(np.mean(long_step * long_step))\n        den = float(np.mean(short_step * short_step))\n        return {\"horizonRatio\": num / den}\n",
+        "proposal": {
+          "probeId": "horizon-ratio",
+          "measures": "ratio of long-gap (H-1 step) to short-gap (1 step) residual increment power",
+          "signalKey": "horizonRatio",
+          "expectedDirection": "higher",
+          "rationale": "the planted component sits at period 4*(H-1): it contributes ~2% of the 1-step-gap increment power but ~27% of the full (H-1)-step-gap power on channel 0, so only a long-horizon contrast reads it; e is the full realization of the same residual process r samples at the origins, so the witness estimates the horizon contrast on e at full sample size"
+        }
+      },
+      "rationale": "Horizon-range: structure that is invisible at short forecast horizons and only detectable at long ones.  A stationary series injection cannot literally scale with h (h indexes read offsets of one fixed series), so the design is realized spectrally: a narrowband component at period 12 = 4*(H-1) added to channel 0 of a white clean process (phi=0 AR(1) plus white noise, no autocorrelation to hide it).  Its 1-step increments carry a 1-cos(2*pi/12) ~ 13% fraction of its amplitude squared against a clean gap-1 power of 2*Var, while its full 3-step increments carry 1-cos(pi/2) = 100% — a ~24% power ratio shift that a short-horizon probe cannot see (2% relative on gap 1).  The witness is the ratio of (H-1)-step to 1-step residual increment power on channel 0; the marginal std perturbation is ~13% (gate 3) and the band-24/lag-3/bilinear probes see nothing (gate 2).",
+      "gateEvidence": {
+        "witness": {
+          "perSeed": {
+            "0": {
+              "pairs": [
+                {
+                  "planted": 1.2138794650149913,
+                  "clean": 0.9739564266649677,
+                  "controls": [
+                    0.9959047493429066,
+                    0.9900361786219339
+                  ],
+                  "margin": 0.17956866555065476,
+                  "passes": true
+                },
+                {
+                  "planted": 1.2539855621845324,
+                  "clean": 1.0169580109639271,
+                  "controls": [
+                    1.0117082233148844,
+                    0.9991162091280007
+                  ],
+                  "margin": 0.18901936223865795,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "1": {
+              "pairs": [
+                {
+                  "planted": 1.2435101031206948,
+                  "clean": 1.0058480954856182,
+                  "controls": [
+                    1.032251383036483,
+                    1.0459049957945719
+                  ],
+                  "margin": 0.15890912894894543,
+                  "passes": true
+                },
+                {
+                  "planted": 1.2061975810404886,
+                  "clean": 0.9846607753436601,
+                  "controls": [
+                    1.030790199395289,
+                    0.9972246344801194
+                  ],
+                  "margin": 0.1454217653909485,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "2": {
+              "pairs": [
+                {
+                  "planted": 1.2146563081600188,
+                  "clean": 0.9811710069844629,
+                  "controls": [
+                    0.9825830533595622,
+                    1.0012684095463678
+                  ],
+                  "margin": 0.17567759470734112,
+                  "passes": true
+                },
+                {
+                  "planted": 1.2433229091510776,
+                  "clean": 1.0011893320455532,
+                  "controls": [
+                    1.0166552316958195,
+                    0.9578444742716273
+                  ],
+                  "margin": 0.1823079714746215,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "3": {
+              "pairs": [
+                {
+                  "planted": 1.219983149595647,
+                  "clean": 0.9762743194084808,
+                  "controls": [
+                    0.9846320741518358,
+                    1.0016827875856797
+                  ],
+                  "margin": 0.1789371944049564,
+                  "passes": true
+                },
+                {
+                  "planted": 1.2167590377443058,
+                  "clean": 1.0086456812031501,
+                  "controls": [
+                    1.0074940601632243,
+                    1.0012527152390627
+                  ],
+                  "margin": 0.1710390883366419,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "4": {
+              "pairs": [
+                {
+                  "planted": 1.2738667198952989,
+                  "clean": 1.010950515822535,
+                  "controls": [
+                    1.0312966714900782,
+                    0.9676685294977398
+                  ],
+                  "margin": 0.19042027287215565,
+                  "passes": true
+                },
+                {
+                  "planted": 1.2223301763629406,
+                  "clean": 0.9814810406037517,
+                  "controls": [
+                    1.0328025274520691,
+                    1.006169088239844
+                  ],
+                  "margin": 0.1550543810305113,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            }
+          },
+          "deterministic": true
+        },
+        "specificity": {
+          "probes": {
+            "band24-energy": {
+              "completedAtSeeds": []
+            },
+            "xlag3-r2": {
+              "completedAtSeeds": []
+            },
+            "bilinear-r2": {
+              "completedAtSeeds": []
+            },
+            "level-bias-mu2": {
+              "completedAtSeeds": []
+            }
+          },
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "amplitude": {
+          "bound": {
+            "maxStdChange": 0.2,
+            "maxMeanShiftStd": 0.25
+          },
+          "maxStdChange": 0.14815157138181184,
+          "maxMeanShiftStd": 0.0004332321906341346
+        },
+        "reproducibility": {
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "bitwiseIdentical": true
+        }
+      }
+    },
+    {
+      "familyId": "level-bias",
+      "kind": "residual",
+      "origin": "generated",
+      "generator": {
+        "type": "series_pair",
+        "clean": {
+          "length": 4096,
+          "channels": [
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            },
+            {
+              "type": "ar1_plus_white",
+              "phi": 0.6,
+              "innovationSd": 1.0,
+              "whiteSd": 0.5
+            }
+          ]
+        },
+        "injection": {
+          "type": "constant_offset",
+          "channel": 0,
+          "cycles": 0.5,
+          "amplitudeFraction": 0.7
+        }
+      },
+      "seedLayout": {
+        "pairSeeds": [
+          24,
+          25
+        ],
+        "controlSeeds": [
+          [
+            26,
+            27
+          ],
+          [
+            28,
+            29
+          ]
+        ]
+      },
+      "witnessProbe": {
+        "source": "import numpy as np\n\n\ndef create_probe():\n    return LevelBiasProbe()\n\n\nclass LevelBiasProbe:\n    def __init__(self):\n        self.probe_id = \"level-bias-mu2\"\n\n    def run(self, artifacts):\n        e = np.asarray(artifacts[\"residuals\"][\"e\"], dtype=np.float64)\n        e = e[np.isfinite(e).all(axis=1)]\n        blocks = 8\n        size = e.shape[0] // blocks\n        means = e[: size * blocks].reshape(blocks, size, e.shape[1]).mean(axis=1)\n        return {\"mu2\": float(np.mean(means * means))}\n",
+        "proposal": {
+          "probeId": "level-bias-mu2",
+          "measures": "mu^2 statistic: mean over 8 equal blocks of e of the squared block means",
+          "signalKey": "mu2",
+          "expectedDirection": "higher",
+          "rationale": "the planted half-cosine drift moves every local block mean of the residual far outside the clean process's block-mean scatter, so the mu^2 statistic (the squared local level of e) rises by an order of magnitude"
+        }
+      },
+      "rationale": "Level-bias: a constant level offset the incumbent misses.  A TRUE constant is absorbed by the mean-predictor incumbent (e is centered by construction), so the admissible design is the low-frequency limit: a half-cosine drift over the series, cos(pi*t/T) at 0.7 * sd(clean ch0) on channel 0 — zero net mean shift over the window (the DC part is absorbed) but a level that sweeps from +0.7 sd to -0.7 sd, so no local window of the residual sits at the global mean.  The witness is the mu^2 statistic: block means of e are +-0.6 sd on the planted member against a ~0.1 sd clean floor, an order-of-magnitude shift; the marginal std perturbation is ~11% (gate 3) and the band-24/lag-3/bilinear probes see nothing (gate 2).",
+      "gateEvidence": {
+        "witness": {
+          "perSeed": {
+            "0": {
+              "pairs": [
+                {
+                  "planted": 0.2473775851719252,
+                  "clean": 0.01452548664867772,
+                  "controls": [
+                    0.017534146981831936,
+                    0.01922678475918552
+                  ],
+                  "margin": 0.9222775792486491,
+                  "passes": true
+                },
+                {
+                  "planted": 0.23695615899062217,
+                  "clean": 0.028110259013076663,
+                  "controls": [
+                    0.00580352791435686,
+                    0.011346383018900756
+                  ],
+                  "margin": 0.8813693675116114,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "1": {
+              "pairs": [
+                {
+                  "planted": 0.2126092858253443,
+                  "clean": 0.011760521829235057,
+                  "controls": [
+                    0.006838520943357402,
+                    0.016327879875645573
+                  ],
+                  "margin": 0.9232024141736749,
+                  "passes": true
+                },
+                {
+                  "planted": 0.23536527900436455,
+                  "clean": 0.008469416768485189,
+                  "controls": [
+                    0.009292914719866173,
+                    0.011340650956924474
+                  ],
+                  "margin": 0.9518168057544538,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "2": {
+              "pairs": [
+                {
+                  "planted": 0.20754549608507405,
+                  "clean": 0.021743205903099777,
+                  "controls": [
+                    0.010677596007836354,
+                    0.014818603800681058
+                  ],
+                  "margin": 0.8952364358020706,
+                  "passes": true
+                },
+                {
+                  "planted": 0.2488207693719324,
+                  "clean": 0.005630173552888149,
+                  "controls": [
+                    0.021754821093309215,
+                    0.008300391385020303
+                  ],
+                  "margin": 0.9125683071062668,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "3": {
+              "pairs": [
+                {
+                  "planted": 0.20881261229470874,
+                  "clean": 0.015067912812365494,
+                  "controls": [
+                    0.02223721594968591,
+                    0.011192943942426037
+                  ],
+                  "margin": 0.8935063562238218,
+                  "passes": true
+                },
+                {
+                  "planted": 0.2211833042297736,
+                  "clean": 0.010628597978068572,
+                  "controls": [
+                    0.010366888525414751,
+                    0.005641086943267677
+                  ],
+                  "margin": 0.9519466534100278,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            },
+            "4": {
+              "pairs": [
+                {
+                  "planted": 0.22266812747537024,
+                  "clean": 0.007662188100132245,
+                  "controls": [
+                    0.01030713380854499,
+                    0.016890982421632554
+                  ],
+                  "margin": 0.9241427921762134,
+                  "passes": true
+                },
+                {
+                  "planted": 0.20232808253425652,
+                  "clean": 0.02219964906352849,
+                  "controls": [
+                    0.015527542667076538,
+                    0.0052644909708673224
+                  ],
+                  "margin": 0.8902789529487593,
+                  "passes": true
+                }
+              ],
+              "complete": true
+            }
+          },
+          "deterministic": true
+        },
+        "specificity": {
+          "probes": {
+            "band24-energy": {
+              "completedAtSeeds": []
+            },
+            "xlag3-r2": {
+              "completedAtSeeds": []
+            },
+            "bilinear-r2": {
+              "completedAtSeeds": []
+            },
+            "horizon-ratio": {
+              "completedAtSeeds": []
+            }
+          },
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        "amplitude": {
+          "bound": {
+            "maxStdChange": 0.2,
+            "maxMeanShiftStd": 0.25
+          },
+          "maxStdChange": 0.12863367560742847,
+          "maxMeanShiftStd": 0.0001708984375000665
+        },
+        "reproducibility": {
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "bitwiseIdentical": true
+        }
+      }
+    }
+  ]
+}
