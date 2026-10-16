@@ -198,3 +198,81 @@ def test_fit_time_calibration_20000x4() -> None:
         f"fit on 20000x4 (L=96, H=24) took {seconds:.1f}s, over the "
         f"{_FIT_BUDGET_SECONDS:.0f}s calibration budget - reduce m0_deep._EPOCHS or shrink the architecture"
     )
+
+
+# --- variant() factory (the stage-0 deep defect variants) ----------------------
+
+
+def test_variant_factory_ids_and_unknown_id() -> None:
+    for model_id in m0_deep.MODEL_IDS:
+        assert m0_deep.variant(model_id).model_id == model_id
+    with pytest.raises(ValueError, match="unknown m0 model id"):
+        m0_deep.variant("m0-patchtst-bogus")
+    # Only the four named configurations are legal constructor states.
+    with pytest.raises(ValueError, match="unknown m0-patchtst variant configuration"):
+        m0_deep.M0DeepAdapter(attention=False, channel_mix=True)
+
+
+def test_variant_base_is_bitwise_create_adapter() -> None:
+    x = _ar_series()
+    a1 = m0_deep.variant("m0-patchtst")
+    a2 = m0_deep.create_adapter()
+    a1.fit(x, _SMALL_META)
+    a2.fit(x, _SMALL_META)
+    X = _windows(x, np.arange(1900, 1908), _SMALL_META["L"])
+    np.testing.assert_array_equal(a1.predict_batch(X), a2.predict_batch(X))
+
+
+def test_defect_variants_are_live_deterministic_and_row_independent() -> None:
+    x = _ar_series()
+    base = m0_deep.create_adapter()
+    base.fit(x, _SMALL_META)
+    X = _windows(x, np.arange(1900, 1916), _SMALL_META["L"])
+    base_pred = base.predict_batch(X)
+    n_patches = {
+        "m0-patchtst-noattn": _N_PATCHES_SMALL,
+        "m0-patchtst-coarsepatch": 1,  # (48 - 48) // 48 + 1
+        "m0-patchtst-channelmix": _N_PATCHES_SMALL,
+    }
+    for model_id, patches in n_patches.items():
+        a1 = m0_deep.variant(model_id)
+        a1.fit(x, _SMALL_META)
+        a2 = m0_deep.variant(model_id)
+        a2.fit(x, _SMALL_META)
+        p1 = a1.predict_batch(X)
+        assert p1.shape == (16, _SMALL_META["H"], _SMALL_META["C"])
+        assert p1.dtype == np.float64
+        assert np.all(np.isfinite(p1))
+        # Determinism gate, the loop's rtol 1e-5 bar.
+        np.testing.assert_allclose(p1, a2.predict_batch(X), rtol=1e-5, atol=0.0)
+        # Row independence, the worker's single-vs-batch probe.
+        for i in (0, 7, 15):
+            assert np.allclose(a1.predict_batch(X[i : i + 1])[0], p1[i], atol=1e-9), (
+                f"{model_id} row {i} differs from its single-row prediction"
+            )
+        # The defect must actually change the forecast: a no-op defect would
+        # make the stage-0 localization calibration vacuous.
+        assert float(np.abs(p1 - base_pred).max()) > 1e-3, model_id
+        # The layers probe keeps the base contract on every variant.
+        pred, info = a1.predict_batch(X[:4], return_layers=True)
+        assert [name for name, _ in info["layers"]] == ["patch_embed", "block0", "block1"]
+        for name, arr in info["layers"]:
+            assert arr.shape == (4, patches, 64), f"{model_id}/{name} has shape {arr.shape}"
+        np.testing.assert_array_equal(pred, p1[:4])
+
+
+def test_channelmix_forecasts_the_averaged_series() -> None:
+    x = _ar_series()
+    a = m0_deep.variant("m0-patchtst-channelmix")
+    a.fit(x, _SMALL_META)
+    X = _windows(x, np.arange(1900, 1906), _SMALL_META["L"])
+    identical = np.repeat(X[:, :, :1], _SMALL_META["C"], axis=2)
+    pred = a.predict_batch(identical)
+    # With every channel identical the cross-channel average is the channel
+    # itself, so all per-channel forecasts coincide exactly (the defect's
+    # defining property; per-channel window stats are identical here too).
+    for c in range(1, _SMALL_META["C"]):
+        np.testing.assert_array_equal(pred[:, :, c], pred[:, :, 0])
+    # Averaging one channel is a no-op, so fit refuses it outright.
+    with pytest.raises(ValueError, match="needs at least 2 channels"):
+        a.fit(_ar_series(T=600, C=1), {"L": 48, "H": 12, "C": 1, "seed": 0})

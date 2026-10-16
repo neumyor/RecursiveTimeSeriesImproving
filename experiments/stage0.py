@@ -1,19 +1,24 @@
 from __future__ import annotations
+import time
 
 """G0 certificate calibration: the seven gates of final-plan §5, no LLM involved.
 
 Usage:
-    uv run --extra research python experiments/stage0.py            # full run
+    uv run --extra research python experiments/stage0.py            # full run (v1 gates)
     uv run --extra research python experiments/stage0.py --smoke    # tiny sizes
+    uv run --extra research python experiments/stage0.py --deep     # deep G0-3/4/6 recalibration
 
 Writes experiments/runs/stage0/report.json and report.md incrementally after
-every gate.  Confidence levels are wired end to end: card gains use
-correctors.card_level, certification gains use correctors.certify_level (a
-two-sided level, so each UCB is one-sided conservative; family false-stop
-<= alpha/2), and certify() enforces the match.  Thresholds follow final-plan
-§5; where a hard threshold would be flaky under binomial noise at the
-achievable cell count, the pass bound is the conservative binomial quantile
-and the exact numbers are reported.
+every gate.  ``--deep`` runs ONLY the three incumbent-dependent gates
+(G0-3/G0-4/G0-6) with the deep incumbent and its planted defect variants,
+writing experiments/runs/stage0-v2 (or stage0-v2-smoke with --smoke); the
+v1 report directory is never touched.  Confidence levels are wired end to
+end: card gains use correctors.card_level, certification gains use
+correctors.certify_level (a two-sided level, so each UCB is one-sided
+conservative; family false-stop <= alpha/2), and certify() enforces the
+match.  Thresholds follow final-plan §5; where a hard threshold would be
+flaky under binomial noise at the achievable cell count, the pass bound is
+the conservative binomial quantile and the exact numbers are reported.
 """
 
 import argparse
@@ -93,6 +98,101 @@ CALIBRATION_PAIRS = ("lgssm_multiperiod", "arfima", "hmm_ar_switch")
 SCREENING_TASKS = ("lgssm_multiperiod", "lgssm_xchannel", "nonlinear_xchannel", "hmm_ar_switch", "arfima")
 ALL_TASKS = ("lgssm_multiperiod", "lgssm_xchannel", "hmm_ar_switch", "arfima", "garch", "random_walk")
 
+# --- deep-incumbent recalibration (plan §12; main-v2 calibrationEvidence ------
+# "g0-recalibration").  G0-3/G0-4/G0-6 were calibrated with linear m0
+# variants; the default incumbent is now m0-patchtst, so those three gates
+# are re-derived over the same tasks with the deep base plus three planted
+# defect variants.  G0-1/2/5/7 are model-agnostic and carry over from the
+# frozen v1 artifact experiments/specs/g0-final-report.json (CARRY_OVER_NOTES).
+#
+# Expected top-card aspects per (task, variant), derived from the task's
+# generating structure plus the variant's defect (each pair's reasoning is
+# restated in the frozen v2 artifact); m0-patchtst-channelmix is excluded on
+# the univariate tasks (arfima, hmm_ar_switch) because averaging one channel
+# is a no-op, exactly like the cross-channel rule fix is inapplicable there:
+DEEP_EXPECTED_ASPECTS: dict[tuple[str, str], tuple[str, ...]] = {
+    # lgssm_multiperiod: the period-168 oscillator exceeds the L=96 lookback,
+    # so its state-estimation error — periodic at 168 — is what the deep base
+    # leaves; band(P~168) tracks it and raw history at lags 96-240 pins it.
+    ("lgssm_multiperiod", "m0-patchtst"): ("periodicity", "long-range-beyond-window"),
+    # Attention is the only cross-patch mechanism; ablating it degrades phase
+    # integration on both oscillators AND leaves short-lag residual
+    # autocorrelation, on top of the base's slow-structure remainder — a
+    # genuine three-way tie between the repair channels.
+    ("lgssm_multiperiod", "m0-patchtst-noattn"): (
+        "lag-structure", "periodicity", "long-range-beyond-window"),
+    # The 48/48 patch grid phase-locks the 24-period (96 = 2*48 is a multiple
+    # of 24) but destroys resolution of the 168-period: the slow periodic
+    # remainder grows.
+    ("lgssm_multiperiod", "m0-patchtst-coarsepatch"): ("periodicity", "long-range-beyond-window"),
+    # Every channel receives the average forecast, so each residual carries
+    # that channel's deviation from the average; other channels' realized
+    # history repairs the shared part, and the slow level makes the residual
+    # strongly autocorrelated.
+    ("lgssm_multiperiod", "m0-patchtst-channelmix"): ("cross-channel", "lag-structure"),
+    # lgssm_xchannel: the channel-independent backbone (design, not defect)
+    # is blind to the lags-3..7 couplings for every variant; channel->i
+    # repairs directly and own-history lag sees the couplings indirectly
+    # (v1 review C).  channelmix additionally leaves the coupling-driven
+    # per-channel deviations in the residual.
+    ("lgssm_xchannel", "m0-patchtst"): ("cross-channel", "lag-structure"),
+    ("lgssm_xchannel", "m0-patchtst-noattn"): ("cross-channel", "lag-structure"),
+    ("lgssm_xchannel", "m0-patchtst-coarsepatch"): ("cross-channel", "lag-structure"),
+    ("lgssm_xchannel", "m0-patchtst-channelmix"): ("cross-channel", "lag-structure"),
+    # hmm_ar_switch: regime persistence leaves h-step errors autocorrelated
+    # within regimes (lag-structure), and the band coordinate can track the
+    # slow inter-regime residual wander — v1's m0-linear tops were band peaks,
+    # so periodicity is registered as the calibrated co-leader.
+    ("hmm_ar_switch", "m0-patchtst"): ("lag-structure", "periodicity"),
+    ("hmm_ar_switch", "m0-patchtst-noattn"): ("lag-structure", "periodicity"),
+    ("hmm_ar_switch", "m0-patchtst-coarsepatch"): ("lag-structure", "periodicity"),
+    # arfima: d=0.35 long memory — the ACF decays like k^-0.3, so both the
+    # residual history (lag, to 335) and deep raw history (beyond_l, 96-240)
+    # carry signal an L=96 window model cannot see, for every variant.
+    ("arfima", "m0-patchtst"): ("lag-structure", "long-range-beyond-window"),
+    ("arfima", "m0-patchtst-noattn"): ("lag-structure", "long-range-beyond-window"),
+    ("arfima", "m0-patchtst-coarsepatch"): ("lag-structure", "long-range-beyond-window"),
+    # nonlinear_xchannel: the channel-independent backbone is blind to the
+    # lags-3..7 tanh couplings, and the same-horizon realized chains also
+    # carry them (v1's registered rationale, unchanged by the defects).
+    ("nonlinear_xchannel", "m0-patchtst"): ("cross-channel", "horizon-range"),
+    ("nonlinear_xchannel", "m0-patchtst-noattn"): ("cross-channel", "horizon-range"),
+    ("nonlinear_xchannel", "m0-patchtst-coarsepatch"): ("cross-channel", "horizon-range"),
+    ("nonlinear_xchannel", "m0-patchtst-channelmix"): ("cross-channel", "horizon-range"),
+}
+# Why each carried-over gate does not depend on the incumbent (restated in the
+# frozen v2 artifact's carry_over section; verdicts are read from the v1
+# artifact at run time).
+CARRY_OVER_NOTES = {
+    "G0-1": (
+        "oracle negative control: run with m = oracle, so no incumbent is "
+        "involved; it measures the machinery's behaviour at zero true headroom"
+    ),
+    "G0-2": (
+        "CI calibration: the HAC/HLN interval and the greedy total-gain "
+        "estimator are properties of the corrector machinery, not of the "
+        "model whose residuals feed it; the v1 coverage was measured with "
+        "m0-linear cells, the coverage claim is estimator-level"
+    ),
+    "G0-5": (
+        "false-stop: the Bonferroni level wiring, the two-sided-to-one-sided "
+        "conservatism and the eps*MSE threshold never reference the "
+        "incumbent; planted-defect gaps just need to sit far above the stop "
+        "threshold, which the v1 linear defects did"
+    ),
+    "G0-7": (
+        "observation-0: a pure AR(1)/white-noise analytic control with "
+        "m == 0 — no incumbent exists in the gate at all"
+    ),
+}
+# The synthetic P2 v2 task list (main-v2.json); the real task has no oracle,
+# so the G0-6 screening question covers the synthetic three only.
+P2_V2_TASKS = ("hmm_ar_switch", "nonlinear_xchannel", "lgssm_xchannel")
+# The deep incumbent's float64 predict path allocates one activation tensor
+# over B*C rows per call; at full test sizes (52k origins x 4 channels) that
+# is multi-GB per tensor, so deep cells predict in origin chunks.
+_DEEP_PREDICT_CHUNK = 4096
+
 
 @dataclass
 class Cell:
@@ -113,10 +213,21 @@ class Cell:
     test_gap: float = 0.0
     test_total_delta: float = 0.0
     adapter: Any | None = None
+    fit_seconds: float = 0.0
 
 
 def _load_m0(model_id: str) -> Any:
     return _load_module("m0_template_" + model_id.replace("-", "_"), _REPO_ROOT / "experiments" / "templates" / "m0.py").variant(model_id)
+
+
+def _load_model(model_id: str) -> Any:
+    """The linear family from m0.py, the patchtst family from m0_deep.py."""
+    if model_id.startswith("m0-patchtst"):
+        return _load_module(
+            "m0_deep_template_" + model_id.replace("-", "_"),
+            _REPO_ROOT / "experiments" / "templates" / "m0_deep.py",
+        ).variant(model_id)
+    return _load_m0(model_id)
 
 
 def _total_coordinate(peaks: list[int]) -> Coordinate:
@@ -133,6 +244,7 @@ def evaluate_cell(
     *,
     oracle_as_model: bool = False,
     with_card: bool = True,
+    predict_chunk: int | None = None,
 ) -> Cell:
     """Fit the model, predict all segments, build card and certification gains."""
     task = REGISTRY[task_name](seed=seed, sizes=sizes)
@@ -148,11 +260,13 @@ def evaluate_cell(
         pred_cert = ev.predict_oracle(task, task.cert, standalone_start, task.cert.shape[0], cfg)
         pred_test = ev.predict_oracle(task, task.test, standalone_start, task.test.shape[0], cfg)
     else:
-        adapter = _load_m0(model_id)
+        adapter = _load_model(model_id)
+        started = time.perf_counter()
         adapter.fit(train, ev.fit_meta(cfg, channels, seed))
-        pred_diag = ev.predict_adapter(adapter, task.train_diag, diag_start, diag_stop, cfg)
-        pred_cert = ev.predict_adapter(adapter, task.cert, standalone_start, task.cert.shape[0], cfg)
-        pred_test = ev.predict_adapter(adapter, task.test, standalone_start, task.test.shape[0], cfg)
+        fit_seconds = time.perf_counter() - started
+        pred_diag = ev.predict_adapter(adapter, task.train_diag, diag_start, diag_stop, cfg, chunk=predict_chunk)
+        pred_cert = ev.predict_adapter(adapter, task.cert, standalone_start, task.cert.shape[0], cfg, chunk=predict_chunk)
+        pred_test = ev.predict_adapter(adapter, task.test, standalone_start, task.test.shape[0], cfg, chunk=predict_chunk)
 
     seg_diag = ev.build_segment(task.train_diag, diag_start, diag_stop, pred_diag, cfg)
     seg_cert = ev.build_segment(task.cert, standalone_start, task.cert.shape[0], pred_cert, cfg)
@@ -171,6 +285,7 @@ def evaluate_cell(
         seg_cert=seg_cert,
         seg_test=seg_test,
         period_peaks=peaks,
+        fit_seconds=0.0 if oracle_as_model else fit_seconds,
     )
     if with_card:
         cell.card = [
@@ -330,12 +445,18 @@ def gate_g02_calibration(
     }
 
 
-def gate_g03_g04_tightness_localization(cells: list[Cell], cfg: HeadroomConfig) -> dict[str, Any]:
+def gate_g03_g04_tightness_localization(
+    cells: list[Cell],
+    cfg: HeadroomConfig,
+    expected: dict[tuple[str, str], tuple[str, ...]] = EXPECTED_ASPECTS,
+) -> dict[str, Any]:
     """G0-3/G0-4: gain tightness, per-cell scatter, and top-coordinate localization.
 
     The LCB-gap correlation itself is a MAIN-EXPERIMENT metric (it needs the
     incumbent trajectory); here we record the per-cell (lcb, delta, gap)
-    scatter so the paper's §4.4 table can cite it directly.
+    scatter so the paper's §4.4 table can cite it directly.  ``expected`` is
+    the (task, model) -> expected-aspects table; the deep recalibration passes
+    its own pre-registered table.
     """
     ratios: list[float] = []
     hits = total_cells = 0
@@ -343,12 +464,12 @@ def gate_g03_g04_tightness_localization(cells: list[Cell], cfg: HeadroomConfig) 
     per_cell: list[dict[str, Any]] = []
     for cell in cells:
         key = (cell.task_name, cell.model_id)
-        if key not in EXPECTED_ASPECTS:
+        if key not in expected:
             continue
         gap_scale = float(np.mean(np.square(cell.seg_test.r)))
         eligible = cell.test_gap >= 2.0 * cfg.certify_epsilon * gap_scale
         top = max(cell.card, key=lambda g: g.lcb if np.isfinite(g.lcb) else -np.inf)
-        localized = top.coordinate.aspect in EXPECTED_ASPECTS[key]
+        localized = top.coordinate.aspect in expected[key]
         total_cells += 1
         hits += int(localized)
         ratio = cell.test_total_delta / cell.test_gap if cell.test_gap else 0.0
@@ -361,7 +482,7 @@ def gate_g03_g04_tightness_localization(cells: list[Cell], cfg: HeadroomConfig) 
                 "eligible_for_tightness": eligible,
                 "top_coordinate": top.coordinate.label,
                 "top_aspect": top.coordinate.aspect,
-                "expected": list(EXPECTED_ASPECTS[key]),
+                "expected": list(expected[key]),
                 "localized": localized,
             }
         )
@@ -433,16 +554,22 @@ def gate_g05_false_stop(cells: list[Cell], cfg: HeadroomConfig, j_max: int) -> d
     }
 
 
-def gate_g06_screening(cells: list[Cell], cfg: HeadroomConfig) -> dict[str, Any]:
-    """G0-6: tasks where one-shot m0+g leaves >=30% of the gap AND does not hurt.
+def gate_g06_screening(
+    cells: list[Cell],
+    cfg: HeadroomConfig,
+    incumbent: str = "m0-linear",
+    tasks: tuple[str, ...] = SCREENING_TASKS,
+) -> dict[str, Any]:
+    """G0-6: tasks where one-shot <incumbent>+g leaves >=30% of the gap AND does not hurt.
 
     remaining > 1 means the corrector transferred negatively on test; with the
     greedy aggregate that signals a broken task/corrector rather than a hard
-    task, so such cells do not count as qualified.
+    task, so such cells do not count as qualified.  ``incumbent`` selects the
+    model the screening measures (the deep recalibration passes "m0-patchtst").
     """
     per_task: dict[str, list[float]] = {}
     for cell in cells:
-        if cell.model_id != "m0-linear" or cell.task_name not in SCREENING_TASKS:
+        if cell.model_id != incumbent or cell.task_name not in tasks:
             continue
         remaining = cell.test_gap - cell.test_total_delta
         per_task.setdefault(cell.task_name, []).append(
@@ -451,12 +578,17 @@ def gate_g06_screening(cells: list[Cell], cfg: HeadroomConfig) -> dict[str, Any]
     summary = {name: round(float(np.mean(values)), 3) for name, values in per_task.items()}
     qualified = sum(1 for value in summary.values() if 0.3 <= value <= 1.5)
     return {
-        "stats": {"remaining_gap_ratio_by_task": summary, "qualified_tasks": qualified},
+        "stats": {
+            "incumbent_model": incumbent,
+            "remaining_gap_ratio_by_task": summary,
+            "qualified_tasks": qualified,
+        },
         "pass": qualified >= 2,
     }
 
 
-def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
+def _gate_setup(smoke: bool) -> tuple[HeadroomConfig, dict[str, int]]:
+    """The (cfg, sizes) the full-size gates were pre-registered with; the smoke shrink for CI."""
     if smoke:
         cfg = HeadroomConfig(
             input_length=48,
@@ -467,12 +599,17 @@ def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
             budget_candidates=6,
             ridge_alphas=(1.0, 100.0),
         )
-        sizes = {"train": 1600, "diag": 1200, "cert": 1400, "test": 2400}
+        return cfg, {"train": 1600, "diag": 1200, "cert": 1400, "test": 2400}
+    # cert/test sizes follow paper §4.2 (>=2e4 / >=5e4 usable-scale rows).
+    return HeadroomConfig(budget_candidates=25), {
+        "train": 20000, "diag": 10000, "cert": 30000, "test": 52000,
+    }
+
+
+def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
+    cfg, sizes = _gate_setup(smoke)
+    if smoke:
         seeds, reps = 1, 2
-    else:
-        cfg = HeadroomConfig(budget_candidates=25)
-        # cert/test sizes follow paper §4.2 (>=2e4 / >=5e4 usable-scale rows).
-        sizes = {"train": 20000, "diag": 10000, "cert": 30000, "test": 52000}
     j_max = cfg.budget_candidates + 1
     seed_list = list(range(seeds))
 
@@ -508,10 +645,149 @@ def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
     return report
 
 
-def write_report(report: dict[str, Any]) -> None:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    (REPORT_DIR / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    lines = ["# G0 证书校准报告", ""]
+def _carry_over() -> dict[str, Any]:
+    """Per-gate carry-over record: the v1 verdict plus why the gate is model-agnostic."""
+    v1_path = _REPO_ROOT / "experiments" / "specs" / "g0-final-report.json"
+    try:
+        v1 = json.loads(v1_path.read_text(encoding="utf-8"))
+        verdicts = {name: bool(v1["gates"][name]["pass"]) for name in CARRY_OVER_NOTES}
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read the frozen v1 artifact at {v1_path}: {exc}") from exc
+    return {
+        name: {
+            "v1_artifact": "experiments/specs/g0-final-report.json",
+            "v1_pass": verdicts[name],
+            "reason": CARRY_OVER_NOTES[name],
+        }
+        for name in CARRY_OVER_NOTES
+    }
+
+
+def _p2_screening(cells: list[Cell], incumbent: str = "m0-patchtst") -> dict[str, Any]:
+    """The P2-launch question: does one-shot deep-m0+g leave >=30% of the gap on each P2 v2 task?
+
+    Recommendation only — main-v2.json is NOT modified here; the human decides.
+    Fractions follow G0-6's convention (per-cell remaining/gap, then the mean).
+    """
+    per_task: dict[str, Any] = {}
+    for task in P2_V2_TASKS:
+        ratios = [
+            (cell.test_gap - cell.test_total_delta) / cell.test_gap if cell.test_gap > 0 else 0.0
+            for cell in cells
+            if cell.model_id == incumbent and cell.task_name == task
+        ]
+        mean = float(np.mean(ratios)) if ratios else float("nan")
+        per_task[task] = {
+            "remaining_gap_ratio": round(mean, 3),
+            "seeds": len(ratios),
+            "recommendation": "keep" if mean >= 0.30 else "flag",
+        }
+    return {
+        "incumbent": incumbent,
+        "threshold": 0.30,
+        "by_task": per_task,
+        "note": (
+            "recommendation only: main-v2.json is not modified; a flagged task "
+            "carries its measured fraction to the human decision"
+        ),
+    }
+
+
+def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
+    """Deep-incumbent recalibration of G0-3/G0-4/G0-6 (plan §12).
+
+    Runs ONLY the three incumbent-dependent gates, with the deep incumbent
+    plus its three planted defect variants, over the same tasks the v1 gates
+    used for them, at the same full (or smoke) sizes; writes
+    experiments/runs/stage0-v2 (stage0-v2-smoke under --smoke) incrementally
+    and never touches the v1 report directory.  G0-1/2/5/7 carry over from
+    the frozen v1 artifact and are recorded here, not re-run.
+    """
+    cfg, sizes = _gate_setup(smoke)
+    if smoke:
+        seeds = 1
+    j_max = cfg.budget_candidates + 1
+    seed_list = list(range(seeds))
+    report_dir = _REPO_ROOT / "experiments" / "runs" / (
+        "stage0-v2-smoke" if smoke else "stage0-v2"
+    )
+    pairs = list(DEEP_EXPECTED_ASPECTS)
+    report: dict[str, Any] = {
+        "mode": "deep-recalibration",
+        "config": cfg.to_dict(),
+        "sizes": sizes,
+        "seeds": seed_list,
+        "models": {
+            "incumbent": "m0-patchtst",
+            "defect_variants": (
+                "m0-patchtst-noattn",
+                "m0-patchtst-coarsepatch",
+                "m0-patchtst-channelmix",
+            ),
+            "predict_chunk": _DEEP_PREDICT_CHUNK,
+        },
+        "expected_aspects": {
+            f"{task}/{model}": list(aspects)
+            for (task, model), aspects in DEEP_EXPECTED_ASPECTS.items()
+        },
+        "carry_over": _carry_over(),
+        "gates": {},
+    }
+
+    def flush(name: str, gate: dict[str, Any]) -> None:
+        report["gates"][name] = gate
+        report["all_pass"] = all(g.get("pass", False) for g in report["gates"].values())
+        write_report(report, report_dir)
+
+    cells: list[Cell] = []
+    total = len(pairs) * len(seed_list)
+    for task_name, model_id in pairs:
+        for seed in seed_list:
+            cell = evaluate_cell(
+                task_name, seed, model_id, cfg, sizes, j_max,
+                predict_chunk=_DEEP_PREDICT_CHUNK,
+            )
+            cells.append(cell)
+            # Crash-resilient progress: the full pass is a long CPU run, and
+            # the partial report shows exactly which cells completed.
+            report["progress"] = {
+                "done": len(cells),
+                "total": total,
+                "last": f"{task_name}/{model_id}/seed{seed}",
+            }
+            write_report(report, report_dir)
+            print(
+                f"[deep {len(cells)}/{total}] {task_name} seed={seed} {model_id} "
+                f"fit={cell.fit_seconds:.1f}s gap={cell.test_gap:.4f}",
+                flush=True,
+            )
+    report.pop("progress", None)
+
+    flush("G0-3+4", gate_g03_g04_tightness_localization(cells, cfg, expected=DEEP_EXPECTED_ASPECTS))
+    flush("G0-6", gate_g06_screening(cells, cfg, incumbent="m0-patchtst"))
+    report["p2_v2_screening"] = _p2_screening(cells)
+    model_order: list[str] = []
+    for _, model_id in pairs:
+        if model_id not in model_order:
+            model_order.append(model_id)
+    report["fit_seconds_by_model"] = {
+        model_id: [round(cell.fit_seconds, 1) for cell in cells if cell.model_id == model_id]
+        for model_id in model_order
+    }
+    del cells
+    write_report(report, report_dir)
+    return report
+
+
+def write_report(report: dict[str, Any], report_dir: Path = REPORT_DIR) -> None:
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    title = (
+        "G0 深度重校准报告（v2）"
+        if report.get("mode") == "deep-recalibration"
+        else "G0 证书校准报告"
+    )
+    lines = [f"# {title}", ""]
     for name, gate in report.get("gates", {}).items():
         lines.append(f"## {name}: {'PASS' if gate.get('pass') else 'FAIL'}")
         lines.append("```json")
@@ -520,16 +796,25 @@ def write_report(report: dict[str, Any]) -> None:
         lines.append("")
     if "all_pass" in report:
         lines.append(f"**ALL: {'PASS' if report['all_pass'] else 'FAIL'}**")
-    (REPORT_DIR / "report.md").write_text("\n".join(lines), encoding="utf-8")
+    (report_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true", help="tiny sizes for the smoke test")
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="recalibrate only G0-3/4/6 with the deep incumbent and its defect "
+        "variants (writes experiments/runs/stage0-v2, or stage0-v2-smoke with --smoke)",
+    )
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--reps", type=int, default=12)
     args = parser.parse_args()
-    report = run(smoke=args.smoke, seeds=args.seeds, reps=args.reps)
+    if args.deep:
+        report = run_deep(smoke=args.smoke, seeds=args.seeds)
+    else:
+        report = run(smoke=args.smoke, seeds=args.seeds, reps=args.reps)
     print(
         json.dumps(
             {"all_pass": report["all_pass"], "gates": {k: v.get("pass") for k, v in report["gates"].items()}},

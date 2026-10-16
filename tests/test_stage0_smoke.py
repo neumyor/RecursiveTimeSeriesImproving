@@ -42,3 +42,29 @@ def test_stage0_smoke_report_structure_and_core_gates() -> None:
     assert localization["localization_cells"] == len(stage0.EXPECTED_ASPECTS)
     assert 0.0 <= localization["localization_rate"] <= 1.0
     assert "all_pass" in report
+
+
+def test_stage0_deep_smoke_report_structure() -> None:
+    """Tiny-size deep recalibration: the v2 report's wiring, not its verdicts.
+
+    G0-3+4 and G0-6 only mean something at full sizes (the v1 smoke test
+    skips the same gates for the same reason); what is checked here is the
+    deep mode itself: the recalibrated gates alone, the pre-registered deep
+    pairs, the carry-over record, and the P2 screening block.
+    """
+    stage0 = _load_stage0()
+    report = stage0.run_deep(smoke=True)
+    assert set(report["gates"]) == {"G0-3+4", "G0-6"}
+    for gate in report["gates"].values():
+        assert isinstance(gate["pass"], bool)
+    localization = report["gates"]["G0-3+4"]["stats"]
+    assert localization["localization_cells"] == len(stage0.DEEP_EXPECTED_ASPECTS)
+    assert 0.0 <= localization["localization_rate"] <= 1.0
+    screening = report["gates"]["G0-6"]["stats"]
+    assert screening["incumbent_model"] == "m0-patchtst"
+    assert set(screening["remaining_gap_ratio_by_task"]) == set(stage0.SCREENING_TASKS)
+    assert report["carry_over"].keys() == {"G0-1", "G0-2", "G0-5", "G0-7"}
+    assert all(entry["v1_pass"] for entry in report["carry_over"].values())
+    assert set(report["p2_v2_screening"]["by_task"]) == set(stage0.P2_V2_TASKS)
+    assert all(entry["seeds"] == 1 for entry in report["p2_v2_screening"]["by_task"].values())
+    assert "all_pass" in report

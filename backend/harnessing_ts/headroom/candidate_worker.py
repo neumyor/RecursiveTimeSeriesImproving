@@ -45,6 +45,12 @@ CONTRACT_EXIT = 3
 # while batch-statistics peeking produces O(1) gaps.
 _SINGLE_ATOL = 1e-9
 
+# cert predictions are gathered in slices of this many rows (memory bound:
+# one call over the full cert segment transiently allocates multi-GB
+# activations for a deep fp64 model; slice boundaries are result-neutral
+# under the row-independence contract).
+_CERT_CHUNK = 4096
+
 
 class _ContractError(Exception):
     """Adapter-contract failure inside the worker; maps to exit code 3."""
@@ -111,10 +117,18 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
         if not np.allclose(single[0], pred_diag[i], atol=_SINGLE_ATOL):
             batch_invariant = False
             break
-    # cert has no batch ids by contract: one call, one batch.  Cheaters are
-    # flagged on diag before the loop can trust their cert numbers.
+    # cert has no batch ids by contract: batched in fixed-size slices (the
+    # row-independence contract makes slice boundaries result-neutral; one
+    # call would transiently allocate multi-GB activations for a deep model
+    # over the full cert segment).  Cheaters are flagged on diag before the
+    # loop can trust their cert numbers.
     if x_cert.shape[0]:
-        pred_cert = _predict(adapter, x_cert, (x_cert.shape[0], horizon, channels))
+        pred_cert = np.empty((x_cert.shape[0], horizon, channels), dtype=np.float64)
+        for begin in range(0, x_cert.shape[0], _CERT_CHUNK):
+            block = x_cert[begin : begin + _CERT_CHUNK]
+            pred_cert[begin : begin + block.shape[0]] = _predict(
+                adapter, block, (block.shape[0], horizon, channels)
+            )
     else:
         pred_cert = np.empty((0, horizon, channels), dtype=np.float64)
     predict_seconds = time.perf_counter() - start

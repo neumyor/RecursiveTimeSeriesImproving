@@ -37,6 +37,32 @@ weight decay 1e-4): ~4.5s (repeat runs 4.5-5.1s) — ~50x headroom under the
 240s calibration budget, so the loop's 600s candidate timeout is never the
 binding constraint.  Small config (train 3000 x C=3, L=48, H=12, 3 epochs):
 ~1.4s including first-call torch warmup.
+
+Variants (the stage-0 deep recalibration, plan §12; mirrors m0.py's
+``variant()``): ``variant(model_id)`` builds the clean incumbent plus three
+planted defect variants used to re-derive G0-3/G0-4/G0-6 around a deep
+incumbent.  Each variant documents the residual signature the defect is meant
+to leave (what the diagnostic card should localize):
+
+- ``m0-patchtst`` — the clean default; this id is exactly ``create_adapter()``'s
+  model (same class, same defaults, bitwise-identical fit).
+- ``m0-patchtst-noattn`` — the attention branch removed from both encoder
+  blocks; each patch is processed by the FFN alone, so the only cross-patch
+  mixing left is the flattened-head Linear.  Intended signature: impaired
+  within-window temporal integration — lag-structure (and, on periodic tasks,
+  periodicity) tops the card.
+- ``m0-patchtst-coarsepatch`` — patch_len/stride 48/48 (n_patches = 2 at
+  L=96), collapsing within-window periodic resolution.  Intended signature:
+  periodicity (and long-range-beyond-window) tops the card.
+- ``m0-patchtst-channelmix`` — after the instance normalization every channel
+  is replaced by the per-window cross-channel average, so the
+  channel-independent backbone sees one averaged series and every channel's
+  forecast is that average re-leveled by its own window statistics.
+  Intended signature: cross-channel tops the card.  Needs C >= 2.
+
+Every variant keeps the base contract: deterministic seeded fit,
+row-independent fp64 predict, no batch statistics, and a ``model_id`` equal
+to the variant id.
 """
 
 from __future__ import annotations
@@ -55,8 +81,19 @@ torch.set_num_threads(1)
 
 MODEL_ID = "m0-patchtst"
 
+# Named variants: the clean incumbent plus the three stage-0 planted defects
+# (plan §12; the deep recalibration of G0-3/4/6 runs on exactly these).
+M0_NOATTN = "m0-patchtst-noattn"
+M0_COARSEPATCH = "m0-patchtst-coarsepatch"
+M0_CHANNELMIX = "m0-patchtst-channelmix"
+MODEL_IDS = (MODEL_ID, M0_NOATTN, M0_COARSEPATCH, M0_CHANNELMIX)
+
 _PATCH_LEN = 16
 _PATCH_STRIDE = 8
+# The coarsepatch defect: patches of 48 with stride 48 give n_patches = 2 at
+# L=96 (and 1 at L=48), killing within-window periodic resolution.
+_COARSE_PATCH_LEN = 48
+_COARSE_PATCH_STRIDE = 48
 _D_MODEL = 64
 _N_HEADS = 4
 _N_BLOCKS = 2
@@ -105,12 +142,19 @@ class _SelfAttention(nn.Module):
 
 
 class _EncoderBlock(nn.Module):
-    """Pre-norm transformer encoder block (attention + FFN, each with residual)."""
+    """Pre-norm transformer encoder block (attention + FFN, each with residual).
 
-    def __init__(self, d_model: int, n_heads: int, ffn_mult: int) -> None:
+    ``attention=False`` is the noattn defect: the attention branch (and its
+    norm) is not built at all, which is exactly a zero attention output — the
+    residual add becomes a no-op — so each patch is processed by the FFN alone.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, ffn_mult: int, *, attention: bool = True) -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(d_model)
-        self.attn = _SelfAttention(d_model, n_heads)
+        self.attention = bool(attention)
+        if self.attention:
+            self.norm1 = nn.LayerNorm(d_model)
+            self.attn = _SelfAttention(d_model, n_heads)
         self.norm2 = nn.LayerNorm(d_model)
         hidden = ffn_mult * d_model
         self.ffn = nn.Sequential(
@@ -122,19 +166,33 @@ class _EncoderBlock(nn.Module):
 
         (Pre-norm: the captured activation is what the next block consumes.)
         """
-        x = x + self.attn(self.norm1(x))
+        if self.attention:
+            x = x + self.attn(self.norm1(x))
         return x + self.ffn(self.norm2(x))
 
 
 class _PatchTST(nn.Module):
-    """Channel-independent backbone: [B*, 1, L] normalized -> [B*, H] normalized."""
+    """Channel-independent backbone: [B*, 1, L] normalized -> [B*, H] normalized.
 
-    def __init__(self, n_patches: int, horizon: int) -> None:
+    ``patch_len``/``patch_stride`` carry the coarsepatch defect; ``attention``
+    carries the noattn defect (see the module docstring).
+    """
+
+    def __init__(
+        self,
+        n_patches: int,
+        horizon: int,
+        *,
+        attention: bool = True,
+        patch_len: int = _PATCH_LEN,
+        patch_stride: int = _PATCH_STRIDE,
+    ) -> None:
         super().__init__()
-        self.patch_embed = nn.Conv1d(1, _D_MODEL, kernel_size=_PATCH_LEN, stride=_PATCH_STRIDE)
+        self.patch_embed = nn.Conv1d(1, _D_MODEL, kernel_size=patch_len, stride=patch_stride)
         self.pos_embed = nn.Parameter(torch.randn(1, n_patches, _D_MODEL) * _POS_INIT_STD)
         self.blocks = nn.ModuleList(
-            _EncoderBlock(_D_MODEL, _N_HEADS, _FFN_MULT) for _ in range(_N_BLOCKS)
+            _EncoderBlock(_D_MODEL, _N_HEADS, _FFN_MULT, attention=attention)
+            for _ in range(_N_BLOCKS)
         )
         self.head = nn.Linear(n_patches * _D_MODEL, horizon)
 
@@ -170,7 +228,37 @@ class M0DeepAdapter:
 
     model_id: str = MODEL_ID
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        attention: bool = True,
+        patch_len: int = _PATCH_LEN,
+        patch_stride: int = _PATCH_STRIDE,
+        channel_mix: bool = False,
+    ) -> None:
+        """The clean incumbent by default; one defect knob per named variant.
+
+        The named variants are exactly the four legal constructor
+        configurations, so the id is derived rather than passed in (m0.py's
+        pattern) and any other combination raises instead of masquerading as a
+        named variant.
+        """
+        config = (bool(attention), (int(patch_len), int(patch_stride)), bool(channel_mix))
+        legal: dict[tuple[bool, tuple[int, int], bool], str] = {
+            (True, (_PATCH_LEN, _PATCH_STRIDE), False): MODEL_ID,
+            (False, (_PATCH_LEN, _PATCH_STRIDE), False): M0_NOATTN,
+            (True, (_COARSE_PATCH_LEN, _COARSE_PATCH_STRIDE), False): M0_COARSEPATCH,
+            (True, (_PATCH_LEN, _PATCH_STRIDE), True): M0_CHANNELMIX,
+        }
+        if config not in legal:
+            raise ValueError(
+                f"unknown m0-patchtst variant configuration {config!r}; the named "
+                f"variants are built by variant(), expected one of {MODEL_IDS}"
+            )
+        self.model_id = legal[config]
+        self._attention = config[0]
+        self._patch_len, self._patch_stride = config[1]
+        self._channel_mix = config[2]
         self._model: _PatchTST | None = None
         self._L = 0
         self._H = 0
@@ -191,10 +279,12 @@ class M0DeepAdapter:
         C = int(meta["C"])
         if min(L, H, C) < 1:
             raise ValueError(f"meta L, H, C must be positive, got L={L}, H={H}, C={C}")
-        if L < _PATCH_LEN:
-            raise ValueError(f"lookback L={L} cannot fit even one patch of length {_PATCH_LEN}")
+        if L < self._patch_len:
+            raise ValueError(f"lookback L={L} cannot fit even one patch of length {self._patch_len}")
         if train.shape[1] != C:
             raise ValueError(f"train has {train.shape[1]} channels, but meta C={C}")
+        if self._channel_mix and C < 2:
+            raise ValueError(f"{M0_CHANNELMIX} needs at least 2 channels to confuse, got C={C}")
         T = train.shape[0]
         if T < L + H:
             raise ValueError(f"train has {T} rows, need at least L+H={L + H} to build one window")
@@ -222,10 +312,21 @@ class M0DeepAdapter:
         std = np.sqrt(xw.var(axis=1) + _NORM_EPS)
         xn = (xw - mean[:, None, :]) / std[:, None, :]
         yn = (yw - mean[:, None, :]) / std[:, None, :]
+        if self._channel_mix:
+            # The channelmix defect: every channel slot receives the
+            # cross-channel average of the normalized window.  All C slots
+            # share one input while the (per-slot) targets still differ, so
+            # the shared-weight backbone can only learn the channel-average
+            # conditional forecast; per-channel and cross-channel structure
+            # never reaches the model.
+            xn = np.repeat(xn.mean(axis=2)[:, :, None], C, axis=2)
 
         n_windows = origins.size
-        n_patches = (L - _PATCH_LEN) // _PATCH_STRIDE + 1
-        model = _PatchTST(n_patches, H)
+        n_patches = (L - self._patch_len) // self._patch_stride + 1
+        model = _PatchTST(
+            n_patches, H, attention=self._attention,
+            patch_len=self._patch_len, patch_stride=self._patch_stride,
+        )
 
         # Channel independence: [N, C, ...] layouts keep channel folding (a
         # plain reshape of [N, L, C] would interleave channels with time).
@@ -287,6 +388,12 @@ class M0DeepAdapter:
         mean = xw.mean(axis=1)  # [B, C]
         std = np.sqrt(xw.var(axis=1) + _NORM_EPS)
         xn = (xw - mean[:, None, :]) / std[:, None, :]
+        if self._channel_mix:
+            # fit()'s defect, applied identically here: every channel slot
+            # sees the averaged normalized window, so all C forecast rows of
+            # one window are the same normalized average (the per-channel
+            # mean/std below re-level it back onto each channel's scale).
+            xn = np.repeat(xn.mean(axis=2)[:, :, None], self._C, axis=2)
         B = xw.shape[0]
         with torch.no_grad():
             layers: list[tuple[str, torch.Tensor]] | None = [] if return_layers else None
@@ -306,3 +413,21 @@ class M0DeepAdapter:
 def create_adapter() -> M0DeepAdapter:
     """Candidate-contract entry point: the deep incumbent starts here."""
     return M0DeepAdapter()
+
+
+def variant(model_id: str) -> M0DeepAdapter:
+    """Build a named variant; unknown ids raise ValueError rather than silently defaulting.
+
+    The defect and its intended residual signature (what the stage-0 card
+    should localize) are documented per id in the module docstring; see
+    MODEL_IDS for the full list.
+    """
+    if model_id == MODEL_ID:
+        return M0DeepAdapter()
+    if model_id == M0_NOATTN:
+        return M0DeepAdapter(attention=False)
+    if model_id == M0_COARSEPATCH:
+        return M0DeepAdapter(patch_len=_COARSE_PATCH_LEN, patch_stride=_COARSE_PATCH_STRIDE)
+    if model_id == M0_CHANNELMIX:
+        return M0DeepAdapter(channel_mix=True)
+    raise ValueError(f"unknown m0 model id {model_id!r}; expected one of {MODEL_IDS}")

@@ -44,13 +44,37 @@ def target_origins(seg_start: int, seg_stop: int, cfg: HeadroomConfig) -> np.nda
 
 
 def predict_adapter(
-    adapter: Adapter, values: np.ndarray, seg_start: int, seg_stop: int, cfg: HeadroomConfig
+    adapter: Adapter,
+    values: np.ndarray,
+    seg_start: int,
+    seg_stop: int,
+    cfg: HeadroomConfig,
+    chunk: int | None = 4096,
 ) -> np.ndarray:
-    """Adapter predictions [B, H, C] at target_origins(seg_start, seg_stop)."""
+    """Adapter predictions [B, H, C] at target_origins(seg_start, seg_stop).
+
+    Predictions are gathered in blocks of ``chunk`` origins (pass
+    ``chunk=None`` for one predict_batch call).  Per-row results are identical
+    up to BLAS-order rounding (the Adapter contract's row independence), and
+    peak memory drops from one model-sized activation tensor over ALL origins
+    to one over ``chunk`` of them — the deep incumbent's float64 forward at
+    full test sizes otherwise allocates multi-GB activations in one call, so
+    chunking is the DEFAULT; the loop, worker, posthoc, baselines and
+    calibrations all inherit it.
+    """
     origins = target_origins(seg_start, seg_stop, cfg)
-    x, _ = windows(values, origins, cfg)
-    pred = np.asarray(adapter.predict_batch(x), dtype=np.float64)
     expected = (origins.size, cfg.horizon, values.shape[1])
+    if chunk is None:
+        x, _ = windows(values, origins, cfg)
+        pred = np.asarray(adapter.predict_batch(x), dtype=np.float64)
+    else:
+        if isinstance(chunk, bool) or not isinstance(chunk, (int, np.integer)) or chunk < 1:
+            raise ValueError(f"chunk must be a positive int, got {chunk!r}")
+        pred = np.empty(expected, dtype=np.float64)
+        for begin in range(0, origins.size, chunk):
+            block = origins[begin : begin + chunk]
+            x, _ = windows(values, block, cfg)
+            pred[begin : begin + block.size] = adapter.predict_batch(x)
     if pred.shape != expected:
         raise RuntimeError(f"adapter {adapter.model_id} returned shape {pred.shape}, expected {expected}")
     return pred
