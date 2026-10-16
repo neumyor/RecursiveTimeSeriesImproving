@@ -342,7 +342,7 @@ def test_band_filter_passes_target_period_at_production_scale() -> None:
 def test_greedy_total_recovers_planted_ar1_and_not_noise() -> None:
     """The greedy aggregate (replacing the union ridge) must capture a planted
     AR(1) defect and stay near zero on white noise."""
-    from harnessing_ts.headroom.correctors import card_level, certify_level, corrector_gain, fit_greedy
+    from harnessing_ts.headroom.correctors import corrector_gain, fit_greedy
 
     cfg = wide_cfg()
     # Planted AR(1) on the values themselves (m == 0, so the residuals are
@@ -384,14 +384,12 @@ def test_channel_coordinate_excluded_for_univariate_series() -> None:
     assert all(c.kind != "channel" for c in enumerate_coordinates(cfg, [], 1, cfg.horizon))
 
 
-def test_level_helpers_are_stricter_than_95pct() -> None:
-    from harnessing_ts.headroom.correctors import card_level, certify_level
+def test_card_level_is_stricter_than_95pct() -> None:
+    from harnessing_ts.headroom.correctors import card_level
 
     cfg = wide_cfg()
     peaks = [24, 168]
-    j_max = 26
-    cert = certify_level(cfg, j_max, peaks, N_CHANNELS)
     card = card_level(cfg, peaks, N_CHANNELS)
-    assert 0.95 < card < cert < 1.0
-    # Uniform spending: doubling the certification budget lowers the level.
-    assert certify_level(cfg, j_max * 2, peaks, N_CHANNELS) > cert
+    assert 0.95 < card < 1.0
+    # (The certification level is the plain fixed 1 - certifyAlpha since the
+    # 2026-10-16 alpha-ledger removal; only the card keeps a Bonferroni level.)

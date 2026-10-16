@@ -82,7 +82,6 @@ from harnessing_ts.headroom.correctors import (
     all_gains,
     build_features,
     card_level,
-    certify_level,
     fit_greedy,
     select_period_peaks,
 )
@@ -209,18 +208,16 @@ def _dm_acceptance(seg_parent: Any, seg_candidate: Any, cfg: HeadroomConfig) -> 
 def _round0_certification(
     seg_diag: Any, seg_cert: Any, cfg: HeadroomConfig, peaks: list[int], channels: int
 ) -> dict[str, Any]:
-    """The loop's round-0 certification of the incumbent (j = 1 of j_max)."""
-    j_max = cfg.budget_candidates + 1
-    level = certify_level(cfg, j_max, peaks, channels)
+    """The loop's round-0 certification of the incumbent (fixed level)."""
+    level = 1.0 - cfg.certify_alpha
     gains = all_gains(seg_diag, seg_cert, cfg, peaks, level=level)
     mse = ev.mse_by_group(seg_cert, gains)
-    report = certify(gains, mse, cfg, j=1, j_max=j_max)
+    report = certify(gains, mse, cfg)
     total = next(g for g in gains if g.coordinate.label == "total")
     threshold = cfg.certify_epsilon * mse["total"]
     return {
         "gains": gains,
         "report": report,
-        "j_max": j_max,
         "total": total,
         "threshold": threshold,
     }
@@ -529,7 +526,6 @@ def cal2_etth1_acceptance(
         "round0_certification": {
             "saturated": bool(cert["report"].saturated),
             "level": _r(cert["report"].level, 12),
-            "jMax": cert["j_max"],
             "totalUcb": _r(total_ucb),
             "totalThreshold": _r(threshold),
             "totalMargin": _r(threshold - total_ucb),
@@ -597,7 +593,6 @@ def cal3_exchange_rate(
         "round0": {
             "saturated": bool(cert["report"].saturated),
             "level": _r(cert["report"].level, 12),
-            "jMax": cert["j_max"],
             "totalDelta": _r(total.delta),
             "totalLcb": _r(total.lcb),
             "totalUcb": _r(total.ucb),

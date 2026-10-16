@@ -1,15 +1,17 @@
-"""Epsilon-saturation certificate for the incumbent corrector; see docs/headroom-contracts.md §7.
+"""Epsilon-saturation check for the incumbent corrector; see docs/headroom-contracts.md §7.
 
-``gains`` must be pre-computed at the Bonferroni level returned by
-``correctors.certify_level(cfg, j_max, period_peaks, n_channels)`` and passed
-through ``correctors.all_gains(..., level=...)``; certify() rejects gains
-carrying any other level, because a UCB read off-level silently voids the
-family-wise bound.  That level is two-sided — ``mean_ci`` builds one two-sided
-interval per statistic — so each UCB compared below actually sits at the
-one-sided level 1 - alpha_j / (2K) and the family-wise false-early-stop
-probability is bounded by certify_alpha / 2, not certify_alpha.  The
-factor-of-two conservatism is deliberate: it can only make stopping harder,
-never too eager.
+The rule is one sentence: an incumbent is saturated when, on the cert
+segment, EVERY statistic's realized-gain upper confidence bound sits below
+``certify_epsilon`` times that statistic's group MSE — no residual coordinate
+retains a relative improvement beyond epsilon.  ``gains`` must be pre-computed
+at the fixed level ``1 - cfg.certify_alpha`` via
+``correctors.all_gains(..., level=...)``; certify() rejects any other level,
+because an off-level UCB silently changes the rule.  The mean CI is built
+two-sided, so each UCB actually sits at the one-sided level
+``1 - certify_alpha / 2`` — a deliberate factor-of-two conservatism in the
+stopping direction.  There is no cross-version or cross-statistic alpha
+accounting (removed 2026-10-16 by author direction); the false-stop rate is
+an empirical property, measured by G0-5.
 """
 
 from __future__ import annotations
@@ -19,67 +21,44 @@ from dataclasses import dataclass
 from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.correctors import GainReport
 
-# Levels agree only when the caller wired the same Bonferroni arithmetic;
-# anything inside this tolerance is float noise, not a wiring bug.
+# Levels agree only when the caller wired the same fixed level; anything
+# inside this tolerance is float noise, not a wiring bug.
 _LEVEL_TOLERANCE = 1e-9
 
 
 @dataclass(frozen=True)
 class CertReport:
-    """Result of one certification check; field shapes are binding (§7)."""
+    """Result of one saturation check; field shapes are binding (§7)."""
 
-    round_index: int  # j-th certification, counted from 1
     saturated: bool
-    level: float  # per-statistic confidence level 1 - alpha_j / K
+    level: float  # per-statistic confidence level (fixed)
     failures: list[dict[str, str | float]]  # {"label", "ucb", "threshold"} per violating gain
 
 
-def certify(
-    gains: list[GainReport],
-    mse_by_group: dict[str, float],
-    cfg: HeadroomConfig,
-    j: int,
-    j_max: int,
-) -> CertReport:
+def certify(gains: list[GainReport], mse_by_group: dict[str, float], cfg: HeadroomConfig) -> CertReport:
     """Decide whether the incumbent is epsilon-saturated on the cert segment.
 
     The caller invokes certify only when the incumbent changed (round 0 and
-    after each acceptance), so j counts incumbent versions rather than raw
-    candidate rounds, and the total certify_alpha budget is spent uniformly
-    over at most j_max certifications: alpha_j = certify_alpha / j_max. Within
-    one check, Bonferroni splits alpha_j across the K statistics, so every
-    gain must carry the level 1 - alpha_j / K (see the module docstring for
-    the two-sided reading and its alpha/2 conservatism). Saturation means
-    every coordinate's gain UCB lies below certify_epsilon times its group's
-    cert-segment MSE: no aspect retains a relative improvement beyond
-    epsilon.
+    after each acceptance).  Saturation means every statistic's gain UCB lies
+    strictly below certify_epsilon times its group's cert-segment MSE.
     """
-    if j < 1:
-        raise ValueError(f"certify requires a 1-based round index j >= 1, got {j}")
-    if j_max < j:
-        raise ValueError(f"certify requires j_max >= j, got j_max={j_max} < j={j}")
     if not gains:
         raise ValueError("certify requires at least one gain, got an empty list")
     missing = sorted({gain.coordinate.label for gain in gains} - set(mse_by_group))
     if missing:
         raise ValueError(f"certify requires mse_by_group to cover every gain label, missing {missing}")
 
-    # A larger planned j_max leaves each check a smaller alpha share, hence a
-    # higher per-statistic level and wider UCBs: planning more certifications
-    # makes each one individually stricter so the total stays under certify_alpha.
-    level = 1.0 - (cfg.certify_alpha / j_max) / len(gains)
+    level = 1.0 - cfg.certify_alpha
 
-    # Regression guard for the level wiring: an off-level UCB breaks the
-    # family-wise bound without any visible symptom, so refuse to certify.
-    # Written as `not <=` so a NaN level is rejected too.
+    # Regression guard for the level wiring: an off-level UCB changes the
+    # rule without any visible symptom, so refuse to certify.  Written as
+    # `not <=` so a NaN level is rejected too.
     for gain in gains:
         if not abs(float(gain.level) - level) <= _LEVEL_TOLERANCE:
             raise RuntimeError(
                 f"gain {gain.coordinate.label!r} was computed at level {gain.level}, but "
-                f"certification j={j} of j_max={j_max} with K={len(gains)} statistics "
-                f"requires level {level}; pre-compute the gains at the Bonferroni "
-                f"level via correctors.all_gains(..., level=correctors.certify_level("
-                f"cfg, j_max, period_peaks, n_channels))"
+                f"certification requires the fixed level {level}; pre-compute the gains "
+                "via correctors.all_gains(..., level=1 - cfg.certifyAlpha)"
             )
 
     failures: list[dict[str, str | float]] = []
@@ -90,4 +69,4 @@ def certify(
         # room for an epsilon-improvement, so equality counts as a violation.
         if gain.ucb >= threshold:
             failures.append({"label": label, "ucb": gain.ucb, "threshold": threshold})
-    return CertReport(round_index=j, saturated=not failures, level=level, failures=failures)
+    return CertReport(saturated=not failures, level=level, failures=failures)

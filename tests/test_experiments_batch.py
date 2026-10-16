@@ -90,7 +90,6 @@ def _write_spec(path: Path, *, tasks: list[dict], arms: list[str], seeds: list[i
                 "arms": arms,
                 "seeds": seeds,
                 "budget": 3,
-                "jMax": 4,  # accepted but ignored: loop.py derives it
                 "sizes": {"train": 100},
             }
         ),

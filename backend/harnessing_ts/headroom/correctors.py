@@ -578,22 +578,6 @@ def certification_family(
     return coordinates
 
 
-def certify_level(
-    cfg: HeadroomConfig,
-    j_max: int,
-    period_peaks: list[int],
-    n_channels: int,
-) -> float:
-    """Per-statistic confidence level for the j-th certification.
-
-    The uniform alpha spending alpha/j_max is split over the family K by
-    Bonferroni; gains fed to certify() must be computed at exactly this level
-    or the family-wise false-stop bound (Proposition 2) does not hold.
-    """
-    family_size = len(certification_family(cfg, period_peaks, n_channels))
-    return 1.0 - (cfg.certify_alpha / j_max) / family_size
-
-
 def card_level(
     cfg: HeadroomConfig,
     period_peaks: list[int],

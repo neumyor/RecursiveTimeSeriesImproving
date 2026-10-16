@@ -70,7 +70,6 @@ from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.correctors import (
     all_gains,
     card_level,
-    certify_level,
     corrector_gain,
     fit_greedy,
     select_period_peaks,
@@ -591,18 +590,16 @@ def _analyze_run_inner(
                 off_target += 1
 
     # ---- cert-level total LCB vs true test gap (accepted incumbents) ------------------
-    # j is the incumbent's chain position: m0 certified at j=1, the first
-    # acceptance at j=2, exactly like the loop's alpha-spending ledger.
-    j_max = max(len(rounds), 1) + 1  # == budget_candidates + 1 for a completed run
-    channels = int(replay.train_diag.shape[1])
+    # Fixed certification level (the alpha ledger is gone; the loop's
+    # certification log is a record, not a budget).
+    cert_level = 1.0 - cfg.certify_alpha
     points: list[list[float]] = []
     for inc in incumbents[1:]:  # the spec's "accepted incumbents": m0 excluded
         state = replay.candidate_state(inc["id"])
         fitted = replay.fitted_total(inc["id"])
         if state is None or fitted is None:
             continue
-        level = certify_level(cfg, j_max, state["peaks"], channels)
-        lcb = float(corrector_gain(fitted, state["seg_cert"], cfg, level=level).lcb)
+        lcb = float(corrector_gain(fitted, state["seg_cert"], cfg, level=cert_level).lcb)
         inc["certTotalLcb"] = lcb
         if inc["gap"] is not None:
             points.append([lcb, inc["gap"]])

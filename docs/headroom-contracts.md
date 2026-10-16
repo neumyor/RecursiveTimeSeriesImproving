@@ -240,24 +240,24 @@ def dm_one_sided_p(d: np.ndarray, bandwidth: int) -> float
 
 ## 7. `headroom/certify.py`
 
+> 2026-10-16 §13 修订：删除 α 消耗记帐（跨版本均匀分配 + Bonferroni 摊销 + 累计误停界）；
+> 停止规则退化为固定水平检验，误停率为 G0-1/G0-5 的实测性质。
+
 ```python
 @dataclass(frozen=True)
 class CertReport:
-    round_index: int        # 第 j 次检验（从 1 起）
     saturated: bool
-    level: float            # 1 - alpha_j / |K|
+    level: float            # 固定水平 1 - certify_alpha
     failures: list[dict]    # [{"label", "ucb", "threshold"}] 未通过项
 
 def certify(gains: list[GainReport], mse_by_group: dict[str, float],
-            cfg: HeadroomConfig, j: int, j_max: int) -> CertReport
-    # K = gains 列表；alpha_j = certify_alpha / j_max（均匀，只在 incumbent 改变时消耗，
-    # 由调用方保证 j 的计数）。
-    # gains 必须已按 correctors.certify_level(cfg, j_max, period_peaks, n_channels) 的
-    # Bonferroni 水平预先计算；certify 逐项校验 gain.level 与该水平一致，
-    # 不一致抛 RuntimeError（水平不对，Bonferroni 族界就不成立）。
-    # mean_ci 是双侧区间，因此每个 UCB 实际是单侧 1 - alpha_j/(2K) 置信界：
-    # 族误停概率 <= alpha/2，比命题 2 的 alpha 界更保守。
-    # 判停条件：所有项 ucb < certify_epsilon * mse_by_group[label]。
+            cfg: HeadroomConfig) -> CertReport
+    # 一句话规则：cert 段上每个统计量的可实现增益 UCB 都 < certify_epsilon * 该项 MSE
+    # 即判定饱和。固定水平，无跨版本/跨统计量预算。
+    # gains 必须已按 level=1 - certify_alpha 预先计算（all_gains）；certify 逐项校验
+    # gain.level 一致，不一致抛 RuntimeError（水平不对，规则就变了）。
+    # mean_ci 是双侧区间，因此每个 UCB 实际是单侧 1 - alpha/2 置信界：只在让停止
+    # 更保守的方向上偏。
     # mse_by_group：cert 段上按每项 scope 的平均残差 MSE——total→全部 (o,h,c) cell，
     # hgroup[h1,h2]→其步长区间，channel->i→通道 i，其余坐标→全部 cell
     # （experiments/evaluate.py::mse_by_group 实现该 scope）

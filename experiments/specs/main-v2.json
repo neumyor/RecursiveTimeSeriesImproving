@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "registeredAt": "2026-10-16",
   "name": "p2-main-v2",
-  "description": "Pre-registered main experiment after the 2026-10-16 author-directed revision (docs/residual-headroom-final-coding-plan.zh-CN.md §12): agent-built validated probes replace the bj arm, the incumbent is PatchTST-lite, and residual-signature evolution guidance runs in every arm. Supersedes main.json before any valid P2 run (the single v1 attempt was voided for account-balance reasons, not results). Frozen before any v2 run; changes after the first v2 run require a new spec version and disclosure in the paper.",
+  "description": "Pre-registered main experiment after the 2026-10-16 author-directed revision (docs/residual-headroom-final-coding-plan.zh-CN.md §12): agent-built validated probes replace the bj arm, the incumbent is PatchTST-lite, and residual-signature evolution guidance runs in every arm. Supersedes main.json before any valid P2 run (the single v1 attempt was voided for account-balance reasons, not results). Frozen before any v2 run; changes after the first v2 run require a new spec version and disclosure in the paper. Revision 2026-10-16b (author-directed, before any v2 run): the alpha-spending ledger of the certification stop (uniform alpha/J_max across incumbent versions + Bonferroni amortization over the statistic family + the cumulative false-stop bound) is DELETED. The stop rule is now a fixed-level test: on every incumbent change, the incumbent is saturated iff every statistic's realized-gain 95% UCB < certifyEpsilon * its group MSE. False-stop behavior is measured empirically (G0-1/G0-5 re-run, g0-final-report-v3); the analytic guarantee (former Proposition 2) is not claimed.",
   "tasks": [
     {
       "name": "hmm_ar_switch",
@@ -43,7 +43,6 @@
   ],
   "armSeedSharing": "the three arms share the same seed set within each task: (task, seed) is a natural block for the seed-blocked permutation test",
   "budget": 25,
-  "jMax": 26,
   "sizes": {
     "train": 20000,
     "diag": 10000,
@@ -122,6 +121,6 @@
     "cal1-hac-bandwidth": "floor frozen at max_lag+H=359: coverage 1.0/1.0 at every tested floor, widening costs 14-26%",
     "cal2-etth1-acceptance": "null false-accept 0/20, planted detection 8/8 at 2869 diag origins",
     "cal3-exchange-rate": "card reports no headroom (all LCB<0); certificate declines to stop at 735 cert origins (power envelope)",
-    "g0-recalibration": "G0-3 (tightness) / G0-4 (localization) / G0-6 (screening) must be re-run with deep-m0 defect variants before P2 v2 (G0-1/2/5/7 are model-agnostic and carry over); the recalibrated artifact will be frozen as experiments/specs/g0-final-report-v2.json"
+    "g0-recalibration": "G0 must be measured under the fixed-level stop rule (revision 2026-10-16b): all seven gates with the linear incumbent (frozen as experiments/specs/g0-final-report-v3.json) and G0-3/4/6 with the deep incumbent (frozen as experiments/specs/g0-final-report-v3-deep.json) before any P2 v2 run; the earlier v1-rule artifacts (g0-final-report.json, g0-final-report-v2.json) are historical record"
   }
 }

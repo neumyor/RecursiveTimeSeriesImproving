@@ -13,10 +13,9 @@ every gate.  ``--deep`` runs ONLY the three incumbent-dependent gates
 (G0-3/G0-4/G0-6) with the deep incumbent and its planted defect variants,
 writing experiments/runs/stage0-v2 (or stage0-v2-smoke with --smoke); the
 v1 report directory is never touched.  Confidence levels are wired end to
-end: card gains use correctors.card_level, certification gains use
-correctors.certify_level (a two-sided level, so each UCB is one-sided
-conservative; family false-stop <= alpha/2), and certify() enforces the
-match.  Thresholds follow final-plan §5; where a hard threshold would be
+end: card gains use correctors.card_level; certification gains use the fixed
+level 1 - certifyAlpha (a two-sided CI, so each UCB is one-sided
+conservative), and certify() enforces the match.  Thresholds follow final-plan §5; where a hard threshold would be
 flaky under binomial noise at the achievable cell count, the pass bound is
 the conservative binomial quantile and the exact numbers are reported.
 """
@@ -56,7 +55,6 @@ from harnessing_ts.headroom.correctors import (
     Coordinate,
     all_gains,
     card_level,
-    certify_level,
     corrector_gain,
     coordinate_gain,
     fit_greedy,
@@ -240,7 +238,6 @@ def evaluate_cell(
     model_id: str,
     cfg: HeadroomConfig,
     sizes: dict[str, int],
-    j_max: int,
     *,
     oracle_as_model: bool = False,
     with_card: bool = True,
@@ -293,7 +290,7 @@ def evaluate_cell(
             for g in all_gains(seg_a, seg_b, cfg, peaks, level=card_level(cfg, peaks, channels))
             if g.coordinate.kind not in {"total", "hgroup"}
         ]
-        cert_lvl = certify_level(cfg, j_max, peaks, channels)
+        cert_lvl = 1.0 - cfg.certify_alpha
         cell.cert_gains = all_gains(seg_diag, seg_cert, cfg, peaks, level=cert_lvl)
         cell.cert_mse = ev.mse_by_group(seg_cert, cell.cert_gains)
 
@@ -350,7 +347,7 @@ def gate_g07_observation0() -> dict[str, Any]:
     return {"stats": results, "pass": ar_pass and white_pass}
 
 
-def gate_g01_oracle_negative_control(cells: list[Cell], cfg: HeadroomConfig, j_max: int) -> dict[str, Any]:
+def gate_g01_oracle_negative_control(cells: list[Cell], cfg: HeadroomConfig) -> dict[str, Any]:
     """G0-1: with m = oracle, LCB ≤ 0 almost always and round-0 certification saturates."""
     lcb_below = saturated = 0
     total_lcbs: list[float] = []
@@ -359,7 +356,7 @@ def gate_g01_oracle_negative_control(cells: list[Cell], cfg: HeadroomConfig, j_m
         total = next(g for g in cell.cert_gains if g.coordinate.label == "total")
         lcb_below += int(total.lcb <= 0.0)
         total_lcbs.append(round(total.lcb, 5))
-        saturated += int(certify(cell.cert_gains, cell.cert_mse, cfg, j=1, j_max=j_max).saturated)
+        saturated += int(certify(cell.cert_gains, cell.cert_mse, cfg).saturated)
         # Sample-size -> saturation-rate curve: subsample cert origins.
         for n_sample in (5000, 10000, 20000):
             origins = cell.seg_cert.origins
@@ -368,9 +365,9 @@ def gate_g01_oracle_negative_control(cells: list[Cell], cfg: HeadroomConfig, j_m
             sub = ev.restrict(cell.seg_cert, origins[:n_sample])
             gains = all_gains(
                 cell.seg_diag, sub, cfg, cell.period_peaks,
-                level=certify_level(cfg, j_max, cell.period_peaks, cell.seg_cert.r.shape[2]),
+                level=1.0 - cfg.certify_alpha,
             )
-            ok = certify(gains, ev.mse_by_group(sub, gains), cfg, j=1, j_max=j_max).saturated
+            ok = certify(gains, ev.mse_by_group(sub, gains), cfg).saturated
             curve[n_sample] = curve.get(n_sample, 0.0) + int(ok)
     n = len(cells)
     counted = {size: round(hits / n, 3) for size, hits in curve.items()}
@@ -388,9 +385,7 @@ def gate_g01_oracle_negative_control(cells: list[Cell], cfg: HeadroomConfig, j_m
     }
 
 
-def gate_g02_calibration(
-    cfg: HeadroomConfig, sizes: dict[str, int], j_max: int, reps: int
-) -> dict[str, Any]:
+def gate_g02_calibration(cfg: HeadroomConfig, sizes: dict[str, int], reps: int) -> dict[str, Any]:
     """G0-2: two-sided CI coverage of the total gain against an independent long truth.
 
     The truth comes from a DIFFERENT seed's 1e5-step realization of the same
@@ -402,7 +397,7 @@ def gate_g02_calibration(
         hits_lcb = hits_ucb = 0
         ratios: list[float] = []
         for rep in range(reps):
-            cell = evaluate_cell(name, 10_000 + rep, "m0-linear", cfg, sizes, j_max, with_card=False)
+            cell = evaluate_cell(name, 10_000 + rep, "m0-linear", cfg, sizes, with_card=False)
             peaks = select_period_peaks(cell.seg_diag_a.e_full, cell.seg_diag_a.origins, cfg)
             fitted = fit_greedy(cell.seg_diag, cfg, peaks)
             # The certificate's coverage claim is about the segment it is
@@ -512,13 +507,14 @@ def gate_g03_g04_tightness_localization(
     }
 
 
-def gate_g05_false_stop(cells: list[Cell], cfg: HeadroomConfig, j_max: int) -> dict[str, Any]:
+def gate_g05_false_stop(cells: list[Cell], cfg: HeadroomConfig) -> dict[str, Any]:
     """G0-5: certification must not stop while a real gap remains.
 
     These planted-defect cells carry gaps far above eps*MSE, so any stop is a
-    false stop; the level wiring that makes the bound hold is enforced by
-    certify() itself (gain.level must match the Bonferroni level).  Cells that
-    DO saturate are cross-checked against their test-side true delta.
+    false stop; the fixed level wiring is enforced by certify() itself.
+    Cells that DO saturate are cross-checked against their test-side true
+    delta (the empirical false-stop measurement is the honesty mechanism now
+    that no analytic bound is claimed).
     """
     saturated = 0
     truth_violations = 0
@@ -526,7 +522,7 @@ def gate_g05_false_stop(cells: list[Cell], cfg: HeadroomConfig, j_max: int) -> d
     for cell in cells:
         if (cell.task_name, cell.model_id) not in EXPECTED_ASPECTS:
             continue
-        report = certify(cell.cert_gains, cell.cert_mse, cfg, j=1, j_max=j_max)
+        report = certify(cell.cert_gains, cell.cert_mse, cfg)
         saturated += int(report.saturated)
         if report.saturated:
             mse_scale = float(np.mean(np.square(cell.seg_test.r)))
@@ -610,7 +606,6 @@ def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
     cfg, sizes = _gate_setup(smoke)
     if smoke:
         seeds, reps = 1, 2
-    j_max = cfg.budget_candidates + 1
     seed_list = list(range(seeds))
 
     report: dict[str, Any] = {"config": cfg.to_dict(), "sizes": sizes, "seeds": seed_list, "gates": {}}
@@ -623,22 +618,22 @@ def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
     flush("G0-7", gate_g07_observation0())
 
     oracle_cells = [
-        evaluate_cell(name, seed, "oracle", cfg, sizes, j_max, oracle_as_model=True)
+        evaluate_cell(name, seed, "oracle", cfg, sizes, oracle_as_model=True)
         for name in ALL_TASKS
         for seed in seed_list
     ]
-    flush("G0-1", gate_g01_oracle_negative_control(oracle_cells, cfg, j_max))
+    flush("G0-1", gate_g01_oracle_negative_control(oracle_cells, cfg))
     del oracle_cells
 
-    flush("G0-2", gate_g02_calibration(cfg, sizes, j_max, reps))
+    flush("G0-2", gate_g02_calibration(cfg, sizes, reps))
 
     pair_cells = [
-        evaluate_cell(task_name, seed, model_id, cfg, sizes, j_max)
+        evaluate_cell(task_name, seed, model_id, cfg, sizes)
         for (task_name, model_id) in EXPECTED_ASPECTS
         for seed in seed_list
     ]
     flush("G0-3+4", gate_g03_g04_tightness_localization(pair_cells, cfg))
-    flush("G0-5", gate_g05_false_stop(pair_cells, cfg, j_max))
+    flush("G0-5", gate_g05_false_stop(pair_cells, cfg))
     flush("G0-6", gate_g06_screening(pair_cells, cfg))
     del pair_cells
 
@@ -706,7 +701,6 @@ def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
     cfg, sizes = _gate_setup(smoke)
     if smoke:
         seeds = 1
-    j_max = cfg.budget_candidates + 1
     seed_list = list(range(seeds))
     report_dir = _REPO_ROOT / "experiments" / "runs" / (
         "stage0-v2-smoke" if smoke else "stage0-v2"
@@ -744,7 +738,7 @@ def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
     for task_name, model_id in pairs:
         for seed in seed_list:
             cell = evaluate_cell(
-                task_name, seed, model_id, cfg, sizes, j_max,
+                task_name, seed, model_id, cfg, sizes,
                 predict_chunk=_DEEP_PREDICT_CHUNK,
             )
             cells.append(cell)

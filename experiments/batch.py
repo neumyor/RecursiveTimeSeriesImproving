@@ -92,9 +92,9 @@ class Spec:
 def load_spec(path: Path) -> Spec:
     """Parse and validate the frozen matrix spec (any problem is batch-fatal).
 
-    Unknown top-level keys (jMax, sizes, ...) are accepted and ignored:
-    loop.py derives jMax = budget + 1 itself and its CLI takes no sizes flag,
-    so those fields are registry bookkeeping, not driver inputs.
+    Unknown top-level keys (sizes, ...) are accepted and ignored:
+    the loop's CLI takes no sizes flag, so those fields are registry
+    bookkeeping, not driver inputs.
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -155,14 +155,23 @@ def load_spec(path: Path) -> Spec:
         raise BatchError(f"spec {path}: duplicate arms or seeds would collide in run dirs")
     if raw.get("schemaVersion", 1) >= 2:
         # Spec v2 froze a precondition: its m0-dependent G0 gates must be
-        # recalibrated with the deep incumbent before any v2 run.  Refuse to
-        # launch until the frozen v2 artifact exists (procedural honesty for
-        # the spec's own calibrationEvidence.g0-recalibration field).
-        artifact = _REPO_ROOT / "experiments" / "specs" / "g0-final-report-v2.json"
-        if not artifact.is_file():
+        # recalibrated with the deep incumbent before any v2 run, and the
+        # alpha-ledger removal (revision 2026-10-16b) requires the gates to be
+        # measured under the new fixed-level stop rule.  Refuse to launch
+        # until both frozen v3 artifacts exist.
+        missing = [
+            str(artifact)
+            for artifact in (
+                _REPO_ROOT / "experiments" / "specs" / "g0-final-report-v3.json",
+                _REPO_ROOT / "experiments" / "specs" / "g0-final-report-v3-deep.json",
+            )
+            if not artifact.is_file()
+        ]
+        if missing:
             raise BatchError(
-                "spec v2 requires the deep-m0 G0 recalibration to be frozen first: "
-                f"{artifact} is missing (run experiments/stage0.py --deep)"
+                "spec v2 requires the G0 artifacts frozen under the fixed-level stop rule "
+                f"first: missing {', '.join(missing)} (run experiments/stage0.py and "
+                "experiments/stage0.py --deep)"
             )
     return Spec(tasks=tuple(tasks), arms=tuple(arms), seeds=tuple(seeds), budget=budget)
 

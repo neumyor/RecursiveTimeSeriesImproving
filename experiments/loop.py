@@ -70,7 +70,6 @@ from harnessing_ts.headroom.correctors import (
     _min_bandwidth,
     all_gains,
     card_level,
-    certify_level,
     select_period_peaks,
 )
 from harnessing_ts.headroom.feedback import render_feedback
@@ -232,7 +231,6 @@ class HeadroomLoop:
         # template to stay fast, production always runs the PatchTST-lite.
         self.m0_template = m0_template
         self.rounds_path = self.run_dir / "rounds.jsonl"
-        self.j_max = cfg.budget_candidates + 1
         self.train: np.ndarray | None = None
         self.values: np.ndarray | None = None  # train+diag contiguous
         self.cert_values: np.ndarray | None = None
@@ -718,27 +716,20 @@ class HeadroomLoop:
             self._segments_incumbent_id = incumbent_id
         return LoopState(round_index=len(rounds) + 1, incumbent_id=incumbent_id, history=history)
 
-    def _certification_count(self) -> int:
-        """j for the next certification: the log is the alpha-spending ledger.
-
-        Deriving j from the append-only certification log (not the rounds
-        ledger) makes the acceptance transaction idempotent: a crash between
-        certification and the rounds append cannot double-spend alpha.
-        """
-        assert self.heldout is not None
-        return len(_read_jsonl(self.heldout / "certification.jsonl"))
-
     def _certify_incumbent(self, state: LoopState, incumbent_id: str) -> None:
-        """Append one certification of the CURRENT incumbent (heldout only)."""
+        """Append one certification of the CURRENT incumbent (heldout only).
+
+        The rule is one sentence: on the cert segment, every statistic's
+        realized-gain 95% UCB must sit below epsilon times its group MSE for
+        the incumbent to count as saturated.  The log is a record, not a
+        budget; there is no cross-version alpha accounting (2026-10-16
+        author-directed simplification).
+        """
         assert self.heldout is not None and self.seg_diag is not None and self.seg_cert is not None
-        j = self._certification_count() + 1
-        if j > self.j_max:
-            return  # alpha ledger is full; the bound already covers this case
-        channels = self.seg_cert.r.shape[2]
-        level = certify_level(self.cfg, self.j_max, self.period_peaks, channels)
+        level = 1.0 - self.cfg.certify_alpha
         gains = all_gains(self.seg_diag, self.seg_cert, self.cfg, self.period_peaks, level=level)
         mse = ev.mse_by_group(self.seg_cert, gains)
-        report = certify(gains, mse, self.cfg, j=j, j_max=self.j_max)
+        report = certify(gains, mse, self.cfg)
         _append_jsonl(
             self.heldout / "certification.jsonl",
             {
