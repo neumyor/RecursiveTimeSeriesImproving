@@ -248,6 +248,8 @@ class HeadroomLoop:
         self._activation_origins: np.ndarray | None = None
         self._incumbent_model_id: str = "m0"
         self._probe_cache: tuple[tuple[str, int], list[dict[str, Any]]] | None = None
+        self._probe_seconds = 0.0
+        self._last_probe_output_count = 0
         self._probes_module: Any | None = None
 
     # ---------------------------------------------------------------- setup
@@ -327,8 +329,8 @@ class HeadroomLoop:
         """Re-predict the workspace incumbent on diag/cert, rebuild segments."""
         assert self.train is not None and self.values is not None and self.cert_values is not None
         module = _load_module("rhg_incumbent", self.ws / "models" / "incumbent" / "model.py")
-        _pin_torch_threads()
         adapter = module.create_adapter()
+        _pin_torch_threads()  # after the factory: a candidate importing torch inside create_adapter escapes a pre-factory pin
         self._incumbent_model_id = str(getattr(adapter, "model_id", "m0"))
         adapter.fit(self.train, ev.fit_meta(self.cfg, self.values.shape[1], self.seed))
         pred_diag = ev.predict_adapter(adapter, self.values, self.diag_start, self.values.shape[0], self.cfg)
@@ -348,8 +350,9 @@ class HeadroomLoop:
 
         The activations live in memory only: probes receive them as an input
         artifact, the agent never gets a file to read.  ``activations[i]``
-        corresponds to residual row ``origins[i]`` of the diagnostic segment,
-        so probes can relate hidden state to realized error.  Adapters without
+        corresponds to residual row ``positions[i]`` of the diagnostic
+        segment (the positions recorded in meta["activationOrigins"]), so
+        probes can relate hidden state to realized error.  Adapters without
         the ``return_layers`` extension (e.g. a hand-written linear fallback)
         simply yield an empty activation dict.
         """
@@ -370,10 +373,13 @@ class HeadroomLoop:
         if not (isinstance(result, tuple) and len(result) == 2):
             return
         _, info = result
-        layers = info.get("layers", []) if isinstance(info, dict) else []
-        if not layers:
+        try:
+            layers = info.get("layers", []) if isinstance(info, dict) else []
+            self._activations = {str(name): np.asarray(arr) for name, arr in layers}
+        except Exception:  # a garbage layer dump degrades to activation-less
             return
-        self._activations = {str(name): np.asarray(arr) for name, arr in layers}
+        if not self._activations:
+            return
         self._activation_origins = positions
 
     def _integrity_check(self, incumbent_id: str) -> None:
@@ -445,10 +451,9 @@ class HeadroomLoop:
             "mseByHGroup": _hgroup_mse(self.seg_diag),
             "round": state.round_index,
             "budgetLeft": self.cfg.budget_candidates - state.round_index + 1,
-            "eFull": self.seg_diag.e_full,
         }
         if self.arm == "self-built":
-            probe_rows, validation_rows = self._probe_feedback(state)
+            probe_rows, validation_rows, self._probe_seconds = self._probe_feedback(state)
             body = render_feedback(
                 self.arm,
                 incumbent,
@@ -514,7 +519,7 @@ class HeadroomLoop:
                 "L": self.cfg.input_length,
                 "H": self.cfg.horizon,
                 "C": int(self.seg_diag.values.shape[1]),
-                "T": int(self.values.shape[0]) if self.values is not None else 0,
+                "T": int(self.values.shape[0]),
                 "seed": self.seed,
                 "incumbent": self._incumbent_model_id,
                 "task": "real-deidentified" if self.real_csv is not None else "synthetic",
@@ -533,7 +538,17 @@ class HeadroomLoop:
         rows: list[dict[str, Any]] = []
         for entry in self._probe_library():
             source = self.ws / "probes" / entry["probeId"] / "probe.py"
-            row: dict[str, Any] = {"probeId": entry["probeId"], "signalKey": entry["measures"]}
+            row: dict[str, Any] = {"probeId": entry["probeId"], "measures": entry["measures"]}
+            if "sourceSha" in entry and source.is_file():
+                if _file_digest(source) != entry["sourceSha"]:
+                    # Validation froze this probe's source; an edit after
+                    # validation must not run unvalidated.  The agent
+                    # resubmits under a new id.
+                    row["error"] = (
+                        "probe source changed after validation; re-submit it under a new probe id"
+                    )
+                    rows.append(row)
+                    continue
             try:
                 row["output"] = infra.run_probe(source, artifacts)
             except Exception as exc:  # a broken probe loses its row, not the round
@@ -541,12 +556,23 @@ class HeadroomLoop:
             rows.append(row)
         return rows
 
-    def _probe_feedback(self, state: LoopState) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """(probe output rows, validation rows); outputs cached per (incumbent, library)."""
+    def _probe_feedback(self, state: LoopState) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+        """(probe output rows, validation rows); outputs cached per (incumbent, library).
+
+        Cache-safety rests on the library being append-only (a re-validated
+        probe always takes a new id), so its length is a sufficient identity;
+        an acceptance changes the incumbent key and invalidates the cache.
+        """
         key = (state.incumbent_id, len(self._probe_library()))
         if self._probe_cache is None or self._probe_cache[0] != key:
+            started = time.monotonic()
             self._probe_cache = (key, self._run_library_probes())
-        return self._probe_cache[1], self._probe_validation_rows(state.round_index)
+            self._probe_seconds = time.monotonic() - started
+        else:
+            self._probe_seconds = 0.0  # cached: this round spent nothing on runs
+        rows = self._probe_cache[1]
+        self._last_probe_output_count = len(rows)
+        return rows, self._probe_validation_rows(state.round_index), self._probe_seconds
 
     def _read_probe_proposal(self, probe_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
         """Structural check of one probe proposal; problems become verdicts."""
@@ -571,25 +597,27 @@ class HeadroomLoop:
             return None, 'expectedDirection must be "higher" or "lower"'
         return proposal, None
 
-    def _collect_probes(self, state: LoopState) -> int:
+    def _collect_probes(self, state: LoopState) -> tuple[int, int]:
         """Validate newly written probes on planted fixtures; keep the passers.
 
-        Returns how many NEW probes were seen.  The verdict reaches the agent
-        in the NEXT round's feedback; a rejected probe stays on disk — the
-        agent revises it under a new id (ids are never reused, like candidates).
+        Returns (submitted, kept): how many NEW probes were seen and how many
+        passed validation.  The verdict reaches the agent in the NEXT round's
+        feedback; a rejected probe stays on disk — the agent revises it under
+        a new id (ids are never reused, like candidates).
         """
         probes_dir = self.ws / "probes"
         if not probes_dir.is_dir():
-            return 0
+            return 0, 0
         infra = self._probe_infra()
         library = self._probe_library()
         seen = {row["probeId"] for row in library}
         seen |= {row["probeId"] for row in _read_jsonl(probes_dir / "validation.jsonl")}
-        fresh = 0
+        submitted = 0
+        kept = 0
         for probe_dir in sorted(probes_dir.iterdir()):
             if not probe_dir.is_dir() or probe_dir.name in seen:
                 continue
-            fresh += 1
+            submitted += 1
             record: dict[str, Any] = {
                 "probeId": probe_dir.name,
                 "round": state.round_index,
@@ -605,18 +633,20 @@ class HeadroomLoop:
                 record["ok"] = bool(result["ok"])
                 record["detail"] = result.get("reason") or "validated"
                 if result["ok"]:
+                    kept += 1
                     library.append(
                         {
                             "probeId": probe_dir.name,
                             "kind": proposal["kind"],
                             "measures": proposal["measures"],
                             "signalKey": proposal["signalKey"],
+                            "sourceSha": _file_digest(probe_dir / "probe.py"),
                             "round": state.round_index,
                         }
                     )
                     _write_json(probes_dir / "library.json", library)
             _append_jsonl(probes_dir / "validation.jsonl", record)
-        return fresh
+        return submitted, kept
 
     # ----------------------------------------------------------- LLM runner
 
@@ -670,6 +700,7 @@ class HeadroomLoop:
                 "accepted": r["accepted"],
                 "diagMse": r["diagMse"],
                 "status": r["status"],
+                "evalNote": r.get("evalNote"),
             }
             for r in rounds
         ]
@@ -801,8 +832,8 @@ class HeadroomLoop:
         best = max(drops, key=lambda aspect: drops[aspect])
         return (best,) if drops[best] > 0.0 else ()
 
-    def _evolution_recommendation(self, state: LoopState) -> tuple[str, str] | None:
-        """(inspiration parent id, trigger) when the diverse-parent switch fires.
+    def _evolution_recommendation(self, state: LoopState) -> tuple[str, str, float] | None:
+        """(inspiration parent id, trigger, its diag MSE) when the switch fires.
 
         Triggers: the latest certification of the incumbent line is saturated,
         or the last INSPIRATION_ASPECT_RUN acceptances all closed the same
@@ -842,9 +873,13 @@ class HeadroomLoop:
                 best = row
         if best is None:
             return None
-        return str(best["candidateId"]), "saturated" if saturated and not concentrated else "concentrated"
+        return (
+            str(best["candidateId"]),
+            "saturated" if saturated and not concentrated else "concentrated",
+            float(best["diagMse"]),
+        )
 
-    def _parent_block(self, state: LoopState, inspiration: tuple[str, str] | None) -> str:
+    def _parent_block(self, state: LoopState, inspiration: tuple[str, str, float] | None) -> str:
         """The diversity-switch paragraph for round.md; empty when no switch.
 
         Wording is arm-neutral and number-free: no aspect names, no heldout
@@ -853,11 +888,7 @@ class HeadroomLoop:
         """
         if inspiration is None:
             return ""
-        parent_id, trigger = inspiration
-        rounds = _read_jsonl(self.rounds_path)
-        diag_mse = next(
-            (float(row["diagMse"]) for row in rounds if row["candidateId"] == parent_id), None
-        )
+        parent_id, trigger, diag_mse = inspiration
         cause = (
             "The measured remaining-improvement bound of the incumbent line has fallen "
             "below the actionable threshold."
@@ -867,7 +898,7 @@ class HeadroomLoop:
                 "same kind of residual structure."
             )
         )
-        mse_note = f" (its evaluated diagnostic MSE was {diag_mse:.4f})" if diag_mse is not None else ""
+        mse_note = f" (its evaluated diagnostic MSE was {diag_mse:.4f})"
         return (
             f"{cause}\n\n"
             "Diversity switch for this round: start your candidate from a different "
@@ -902,21 +933,34 @@ class HeadroomLoop:
     async def _round(self, state: LoopState) -> None:
         assert self.seg_diag is not None and self.train is not None and self.heldout is not None
         self._integrity_check(state.incumbent_id)
+        self._last_probe_output_count = 0  # set by _render_feedback for the self-built arm
         gains = self._feedback_gains()
         feedback_block = self._render_feedback(state, gains)
         system_prompt = (_REPO_ROOT / "experiments" / "prompts" / "system.md").read_text(encoding="utf-8")
         inspiration = self._evolution_recommendation(state)
         failure_block = ""
+        if state.history and state.history[-1].get("evalNote"):
+            # An evaluated candidate rejected for a specific reason (the
+            # determinism gate) must teach the agent that reason — otherwise
+            # the rejection is indistinguishable from a plain DM miss.
+            previous = state.history[-1]
+            failure_block = (
+                f"Note on your previous candidate {previous['candidateId']}: "
+                f"{previous['evalNote']}."
+            )
         candidate_id = ""
         candidate_seconds: dict[str, float] = {}
         proposal: dict[str, Any] | None = None
         error: str | None = None
+        eval_note: str | None = None
         status = "failed"
         diag_mse: float | None = None
         dm_p: float | None = None
         accepted = False
         attempts = 0
-        probes_validated = 0
+        probes_submitted = 0
+        probes_kept = 0
+        probes_seconds = 0.0
         round_seen: set[str] = set()
         tokens_before = workspace_usage(self.ws)
         started = time.monotonic()
@@ -928,7 +972,11 @@ class HeadroomLoop:
             if self.arm == "self-built":
                 # Probes are tools, not deliverables: validation never costs a
                 # repair turn, and the verdict rides the next round's feedback.
-                probes_validated += self._collect_probes(state)
+                started = time.monotonic()
+                submitted, kept = self._collect_probes(state)
+                probes_seconds += time.monotonic() - started
+                probes_submitted += submitted
+                probes_kept += kept
             candidate_id, source, proposal, problem = self._collect_candidate(state, round_seen)
             if problem is not None:
                 error = problem
@@ -940,6 +988,7 @@ class HeadroomLoop:
             )
             if status == "evaluated":
                 error = None
+                eval_note = round_error  # None on a plain DM miss
                 break
             error = round_error
             failure_block = f"Your candidate failed evaluation: {round_error}."
@@ -960,13 +1009,17 @@ class HeadroomLoop:
                 "dmP": dm_p,
                 "accepted": accepted,
                 "error": error,
+                "evalNote": eval_note,
                 "proposal": proposal or {},
                 "tokens": tokens,
                 "feedbackChars": len(feedback_block),
                 "attempts": attempts,
                 "candidateSeconds": candidate_seconds,
                 "inspirationParent": inspiration[0] if inspiration else None,
-                "probesValidated": probes_validated,
+                "probesSubmitted": probes_submitted,
+                "probesKept": probes_kept,
+                "probesSeconds": round(probes_seconds + self._probe_seconds, 2),
+                "probeOutputsRendered": self._last_probe_output_count,
                 "seconds": round(time.monotonic() - started, 1),
             },
         )
@@ -1102,8 +1155,8 @@ class HeadroomLoop:
         # legitimately differs between the subprocess and this process; the
         # threads are pinned so the in-process draw itself is stable.
         module = _load_module("rhg_cand_accept", source)
-        _pin_torch_threads()
         adapter = module.create_adapter()
+        _pin_torch_threads()
         adapter.fit(self.train, ev.fit_meta(self.cfg, self.values.shape[1], self.seed))
         pred_inproc = ev.predict_adapter(
             adapter, self.values, self.diag_start, self.values.shape[0], self.cfg

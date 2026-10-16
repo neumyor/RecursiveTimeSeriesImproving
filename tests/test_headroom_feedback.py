@@ -85,17 +85,12 @@ def _make_gains() -> list[_Gain]:
     return gains
 
 
-def _make_efull(rows: int = 600, channels: int = 2, seed: int = 7) -> np.ndarray:
-    return np.random.default_rng(seed).normal(0.0, 1.0, size=(rows, channels))
-
-
-def _make_incumbent(e_full: np.ndarray | None = None) -> dict[str, Any]:
+def _make_incumbent() -> dict[str, Any]:
     return {
         "diagMse": 0.4123,
         "mseByHGroup": {"hgroup[1,12]": 0.4012, "hgroup[13,24]": 0.4234},
         "round": 3,
         "budgetLeft": 17,
-        "eFull": _make_efull() if e_full is None else e_full,
     }
 
 
@@ -123,7 +118,7 @@ def _card_rows(text: str) -> list[str]:
 
 def test_scalar_is_exactly_the_scaffold() -> None:
     out = render_feedback(
-        "scalar", _make_incumbent(_make_efull()), _make_gains(), _make_history(2), HeadroomConfig()
+        "scalar", _make_incumbent(), _make_gains(), _make_history(2), HeadroomConfig()
     )
     assert out.startswith("# Improvement round 3 — 17 candidates remaining\n\n")
     assert "Incumbent diagnostic MSE: 0.4123" in out
@@ -137,7 +132,7 @@ def test_scalar_is_exactly_the_scaffold() -> None:
 
 
 def test_all_arms_share_the_identical_scaffold() -> None:
-    incumbent = _make_incumbent(_make_efull())
+    incumbent = _make_incumbent()
     history = _make_history(3)
     gains = _make_gains()
     scalar = render_feedback("scalar", incumbent, gains, history, HeadroomConfig())
@@ -179,7 +174,7 @@ def test_fixed_never_renders_card_content_into_self_built() -> None:
         _make_gains(),
         _make_history(1),
         HeadroomConfig(),
-        probe_rows=[{"probeId": "p1", "signalKey": "dominant period", "output": {"period": 24.0}}],
+        probe_rows=[{"probeId": "p1", "measures": "dominant period", "output": {"period": 24.0}}],
     )
     assert "Remaining improvement by coordinate" not in out
     assert "band(P=24)" not in out
@@ -229,7 +224,7 @@ def test_unknown_arm_is_rejected() -> None:
 
 
 def test_no_forbidden_words_in_any_arm() -> None:
-    incumbent = _make_incumbent(_make_efull())
+    incumbent = _make_incumbent()
     gains = _make_gains()
     history = _make_history(2)
     for arm in ARMS:
@@ -239,7 +234,7 @@ def test_no_forbidden_words_in_any_arm() -> None:
             gains,
             history,
             HeadroomConfig(),
-            probe_rows=[{"probeId": "p1", "signalKey": "m", "output": {"x": 1.0}}],
+            probe_rows=[{"probeId": "p1", "measures": "m", "output": {"x": 1.0}}],
             validation_rows=[{"probeId": "p1", "ok": True, "detail": "validated"}],
         )
         for word in FORBIDDEN_SUBSTRINGS:
@@ -270,10 +265,10 @@ def test_self_built_renders_probe_outputs_and_validation() -> None:
         _make_history(1),
         HeadroomConfig(),
         probe_rows=[
-            {"probeId": "p-period", "signalKey": "dominant residual period", "output": {"period": 24.0}},
+            {"probeId": "p-period", "measures": "dominant residual period", "output": {"period": 24.0}},
             {
                 "probeId": "p-attn",
-                "signalKey": "block0 activation norm",
+                "measures": "block0 activation norm",
                 "error": "ProbeTimeout: ran past 120.0s",
             },
         ],
@@ -297,19 +292,21 @@ def test_self_built_truncates_chatty_probe_output() -> None:
         [],
         _make_history(1),
         HeadroomConfig(),
-        probe_rows=[{"probeId": "p", "signalKey": "m", "output": chatty}],
+        probe_rows=[{"probeId": "p", "measures": "m", "output": chatty}],
     )
     assert "… (truncated)" in out
     assert len(out.split("| p | m | ", 1)[1].split(" |", 1)[0]) <= 620
 
 
-def test_self_built_caps_the_number_of_probe_rows() -> None:
+def test_self_built_shows_the_newest_probe_rows() -> None:
+    """The 8 NEWEST probes render (the agent iterates on its latest tools);
+    the note counts the earlier ones that are hidden."""
     rows = [
-        {"probeId": f"p{i:02d}", "signalKey": "m", "output": {"i": i}} for i in range(10)
+        {"probeId": f"p{i:02d}", "measures": "m", "output": {"i": i}} for i in range(10)
     ]
     out = render_feedback(
         "self-built", _make_incumbent(), [], _make_history(1), HeadroomConfig(), probe_rows=rows
     )
-    assert "| p00 |" in out and "| p07 |" in out
-    assert "| p08 |" not in out
-    assert "2 older probes not shown" in out
+    assert "| p02 |" in out and "| p09 |" in out
+    assert "| p00 |" not in out and "| p01 |" not in out
+    assert "2 earlier probes not shown" in out

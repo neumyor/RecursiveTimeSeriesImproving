@@ -33,7 +33,7 @@ appended as attempts finish:
 
 Usage:
     uv run --extra research python experiments/batch.py \
-        --spec experiments/specs/main.json [--workers 8] [--only task=...,arm=...]
+        --spec experiments/specs/main-v2.json [--workers 8] [--only task=...,arm=...]
 """
 
 import argparse
@@ -153,6 +153,17 @@ def load_spec(path: Path) -> Spec:
         raise BatchError(f"spec {path}: budget must be a positive int")
     if len(set(arms)) != len(arms) or len(set(seeds)) != len(seeds):
         raise BatchError(f"spec {path}: duplicate arms or seeds would collide in run dirs")
+    if raw.get("schemaVersion", 1) >= 2:
+        # Spec v2 froze a precondition: its m0-dependent G0 gates must be
+        # recalibrated with the deep incumbent before any v2 run.  Refuse to
+        # launch until the frozen v2 artifact exists (procedural honesty for
+        # the spec's own calibrationEvidence.g0-recalibration field).
+        artifact = _REPO_ROOT / "experiments" / "specs" / "g0-final-report-v2.json"
+        if not artifact.is_file():
+            raise BatchError(
+                "spec v2 requires the deep-m0 G0 recalibration to be frozen first: "
+                f"{artifact} is missing (run experiments/stage0.py --deep)"
+            )
     return Spec(tasks=tuple(tasks), arms=tuple(arms), seeds=tuple(seeds), budget=budget)
 
 
@@ -209,10 +220,10 @@ def parse_only(value: str) -> list[str]:
 
 
 def cell_matches(cell: Cell, tokens: list[str]) -> bool:
-    """OR semantics, so rerun lists work: `--only a-card-3,a-bj-5` reruns
+    """OR semantics, so rerun lists work: `--only a-fixed-3,a-self-built-5` reruns
     exactly those two cells.  A token is a bare substring of the cell id, or
     `key=value` with key in {task, arm, seed, cell} matched as a substring of
-    that field (`task=ett,arm=card` = every ett cell plus every card cell).
+    that field (`task=ett,arm=fixed` = every ett cell plus every fixed cell).
     """
     if not tokens:
         return True

@@ -460,10 +460,14 @@ def test_build_env_is_a_whitelist(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env["CUDA_VISIBLE_DEVICES"] == ""
 
 
-def test_incumbent_template_passes_the_source_check() -> None:
-    """Regression: every candidate derives from the m0 template, whose
-    `from __future__ import annotations` line the whitelist must allow."""
+def test_incumbent_templates_pass_the_source_check() -> None:
+    """Regression: every candidate derives from an m0 template, whose
+    `from __future__ import annotations` line the whitelist must allow.
+    Both templates are covered: the linear one (still used by the fast test
+    suite and the model-agnostic G0 gates) and the PatchTST-lite deep one
+    (the v2 default incumbent — its torch imports must stay whitelisted)."""
     from pathlib import Path
 
-    template = Path(__file__).resolve().parents[1] / "experiments" / "templates" / "m0.py"
-    check_source(template.read_text(encoding="utf-8"))
+    templates = Path(__file__).resolve().parents[1] / "experiments" / "templates"
+    check_source((templates / "m0.py").read_text(encoding="utf-8"))
+    check_source((templates / "m0_deep.py").read_text(encoding="utf-8"))

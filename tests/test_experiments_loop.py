@@ -389,9 +389,14 @@ def test_self_built_arm_validates_and_runs_probes(tmp_path: Path) -> None:
     assert '"ac24"' in prompts[1]
 
     rounds = _rounds(run_dir)
-    assert rounds[0]["probesValidated"] == 2
-    assert rounds[1]["probesValidated"] == 0
-    assert rounds[2]["probesValidated"] == 0
+    assert rounds[0]["probesSubmitted"] == 2
+    assert rounds[0]["probesKept"] == 1
+    assert rounds[1]["probesSubmitted"] == 0
+    assert rounds[2]["probesSubmitted"] == 0
+    # The library renders from round 2 on; validation cost wall time in round 1.
+    assert rounds[0]["probeOutputsRendered"] == 0
+    assert rounds[1]["probeOutputsRendered"] == 1
+    assert rounds[0]["probesSeconds"] > 0
     # The candidate side of the round is untouched by probe writing.
     assert all(row["status"] == "evaluated" for row in rounds)
 
@@ -430,10 +435,8 @@ def test_self_built_samples_activations_with_alignment(tmp_path: Path) -> None:
     assert loop._activations["b0"].shape == (256, 3, 4)
     positions = loop._activation_origins
     assert positions.shape == (256,)
-    # alignment: activations[i] belongs to residual row positions[i]
-    np.testing.assert_array_equal(
-        loop.seg_diag.origins[positions][:5], loop.seg_diag.origins[positions][:5]
-    )
+    # Evenly spaced over the segment's residual rows (the alignment claim:
+    # activations[i] belongs to residual row positions[i]).
     assert positions[0] == 0 and positions[-1] == loop.seg_diag.origins.size - 1
 
     artifacts = loop._probe_artifacts()
@@ -544,7 +547,7 @@ def test_evolution_switch_fires_on_concentration(tmp_path: Path) -> None:
     state = loop_module.LoopState(round_index=6, incumbent_id="c3", history=[])
 
     rec = loop._evolution_recommendation(state)
-    assert rec == ("c-other", "concentrated")
+    assert rec == ("c-other", "concentrated", 0.50)
     block = loop._parent_block(state, rec)
     assert "models/candidates/c-other/model.py" in block
     assert "0.5000" in block
@@ -574,7 +577,7 @@ def test_evolution_switch_fires_on_cert_saturation(tmp_path: Path) -> None:
     )
     state = loop_module.LoopState(round_index=2, incumbent_id="m0", history=[])
     rec = loop._evolution_recommendation(state)
-    assert rec == ("c-other", "saturated")
+    assert rec == ("c-other", "saturated", 0.50)
     block = loop._parent_block(state, rec)
     assert "below the actionable threshold" in block
 
@@ -628,3 +631,89 @@ def test_evolution_disabled_by_config(tmp_path: Path) -> None:
     )
     state = loop_module.LoopState(round_index=1, incumbent_id="m0", history=[])
     assert loop._evolution_recommendation(state) is None
+
+
+_MEAN_CANDIDATE = """\
+import numpy as np
+
+
+class MeanPredictor:
+    def __init__(self) -> None:
+        self.model_id = "__CID__"
+        self._mean = None
+        self._H = 0
+
+    def fit(self, train, meta):
+        self._mean = np.asarray(train, dtype=np.float64).mean(axis=0)
+        self._H = int(meta["H"])
+
+    def predict_batch(self, x):
+        b = x.shape[0]
+        out = np.broadcast_to(self._mean[None, None, :], (b, self._H, self._mean.shape[0]))
+        return np.array(out, dtype=np.float64)
+
+
+def create_adapter() -> MeanPredictor:
+    return MeanPredictor()
+"""
+
+
+def test_deep_incumbent_round_trip(tmp_path: Path) -> None:
+    """The v2 default incumbent (PatchTST-lite) must traverse the real loop
+    path: in-process fit in load_state, round feedback over its residuals,
+    the round-0 deep posthoc card, and candidate evaluation against it.
+    Every torch candidate in P2 v2 derives from this template."""
+    loop_module = _load_loop()
+    script_pos = {"pos": 0}
+
+    def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
+        class _Runner(ScriptedRunner):
+            async def send(self, prompt: str) -> list[Any]:
+                self.calls.append(prompt)
+                pos = script_pos["pos"]
+                script_pos["pos"] += 1
+                candidate_id = f"c-mean-{pos}"
+                candidate_dir = ws / "models" / "candidates" / candidate_id
+                candidate_dir.mkdir(parents=True, exist_ok=True)
+                (candidate_dir / "model.py").write_text(
+                    _MEAN_CANDIDATE.replace("__CID__", candidate_id), encoding="utf-8"
+                )
+                (candidate_dir / "proposal.json").write_text(
+                    json.dumps(
+                        {
+                            "candidateId": candidate_id,
+                            "targetAspect": "level-bias",
+                            "aspectDetail": "constant mean",
+                            "mechanism": "predict the channel mean",
+                            "expectation": "diag MSE changes",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return []
+
+        return _Runner()
+
+    run_dir = tmp_path / "run-deep"
+    loop = loop_module.HeadroomLoop(
+        run_dir=run_dir,
+        task_name="lgssm_xchannel",
+        arm="fixed",
+        seed=0,
+        cfg=_small_cfg(loop_module),
+        sizes=SMALL_SIZES,
+        runner_factory=factory,
+        m0_template="m0_deep.py",
+    )
+    asyncio.run(loop.run())
+    rounds = _rounds(run_dir)
+    assert len(rounds) == 3
+    assert all(row["status"] == "evaluated" for row in rounds)
+    # The round-0 deep incumbent card exists, so evolution signatures and the
+    # chain analysis always have a parent card to diff against.
+    assert (loop.heldout / "posthoc" / "m0.json").is_file()
+    assert any(
+        p.name == "c-mean-0.json" for p in (loop.heldout / "posthoc").glob("*.json")
+    )
+    # The in-process fit used the deep template's own model id.
+    assert loop._incumbent_model_id in ("m0-patchtst", "c-mean-0")

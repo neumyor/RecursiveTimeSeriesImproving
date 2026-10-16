@@ -13,14 +13,16 @@ blind.
 - `probes/<probe-id>/probe.py` and `probes/<probe-id>/probe_proposal.json`.
 - `<probe-id>` must match `[a-z0-9][a-z0-9-]{0,63}`.
 - Probe ids are never reused or edited in place: to revise a probe, write a
-  new one under a new id. Old probes keep running until superseded.
+  new one under a new id. Old probes keep running; each round shows the
+  newest 8. Editing a validated probe's file invalidates it — the harness
+  detects the change and refuses to run it.
 
 ## probe.py contract
 
 The file must define `create_probe()`, returning an object with:
 
 - `probe_id: str` — must equal the probe directory name;
-- `run(artifacts: dict) -> dict`: returns your diagnostic summary — a flat,
+- `run(artifacts: dict) -> dict`: returns your diagnostic summary — a small
   JSON-serializable dict of at most a few KB. Put the numbers you want to
   watch every round in it.
 
@@ -30,16 +32,19 @@ segment:
 - `residuals["e"]`: `[T, C]` float array — the incumbent's realized 1-step
   forecast-error series (its own past mistakes; NaN-padded at head and tail).
 - `residuals["r"]`: `[n, H, C]` float array — the incumbent's H-step residuals
-  per forecast origin, aligned with `residuals["origins"]`.
+  per forecast origin, aligned with `residuals["origins"]` (time indices).
 - `activations`: dict mapping layer name to a `[m, P, D]` float32 array of the
   incumbent's hidden-layer activations on `m` evenly spaced diagnostic
-  windows. `activations[name][i]` belongs to the same forecast as residual
-  row `meta["activationOrigins"][i]` of `residuals["r"]` — so you can ask
-  which internal states precede which errors. Empty dict if the incumbent has
-  no activation path.
+  windows. `activations[name][i]` belongs to the same forecast as residual row
+  `meta["activationOrigins"][i]` of `residuals["r"]` — those are ROW indices
+  into `r`, not time indices; the forecast's time index is
+  `residuals["origins"][meta["activationOrigins"][i]]`. So you can ask which
+  internal states precede which errors. Empty dict if the incumbent has no
+  activation path.
 - `meta`: `{"L", "H", "C", "T", "seed", "incumbent", "task", "activationOrigins"}`.
 
-Allowed imports: `numpy`, `math`, `scipy`. No file, network, or system access.
+Allowed imports: `numpy`, `math`, `scipy`, `torch` (CPU). No file, network, or
+system access.
 `run` must be deterministic: identical calls return identical dicts.
 
 ## probe_proposal.json

@@ -44,6 +44,7 @@ CSV: the loop never stores the path anywhere the agent could see it.
 
 import argparse
 from dataclasses import replace
+import hashlib
 import importlib.util
 import itertools
 import json
@@ -295,6 +296,31 @@ class _Replay:
                 if cand_id == "m0"
                 else self.ws / "models" / "candidates" / cand_id / "model.py"
             )
+            if cand_id == "m0":
+                # A wrong template silently recomputes every gap baseline
+                # (ngap divides by gap(m0)).  The run's heldout side recorded
+                # the sha of m0 as first copied, so the digest selects the
+                # template; --m0-template stays as an explicit override but is
+                # still verified, and no match fails loudly.
+                recorded = _read_json(self.heldout / "incumbent-reference.json")["sha"]
+                if hashlib.sha256(source.read_bytes()).hexdigest() != recorded:
+                    match = next(
+                        (
+                            path
+                            for path in sorted(
+                                (_REPO_ROOT / "experiments" / "templates").glob("m0*.py")
+                            )
+                            if hashlib.sha256(path.read_bytes()).hexdigest() == recorded
+                        ),
+                        None,
+                    )
+                    if match is None:
+                        raise _RunError(
+                            "no template under experiments/templates matches this run's "
+                            "incumbent reference sha; pass --m0-template with the exact "
+                            "template the loop used"
+                        )
+                    source = match
             if not source.is_file():
                 raise _RunError(f"candidate source is missing: {source}")
             text = source.read_text(encoding="utf-8")
@@ -657,6 +683,8 @@ def _analyze_run_inner(
         "stopPoint": stop_point,
         "ngapAtStop": ngap_at_stop,
         "postStopGain": post_stop_gain,
+        "evolution": _evolution_accounting(rounds, replay.card),
+        "probes": _probe_accounting(run_dir, rounds),
         "audit": {
             "flagged": bool(violations),
             "violations": violations,
@@ -668,6 +696,101 @@ def _analyze_run_inner(
 
 
 # --- arm-level statistics ---------------------------------------------------------------
+
+
+
+def _aspect_lcb(card_rows: list[dict[str, Any]] | None) -> dict[str, float]:
+    """Per aspect, the strongest remaining-improvement bound in a posthoc card."""
+    strongest: dict[str, float] = {}
+    if not card_rows:
+        return strongest
+    for row in card_rows:
+        aspect = str(row.get("aspect"))
+        lcb = row.get("lcb")
+        value = float("-inf") if lcb is None else float(lcb)
+        strongest[aspect] = max(strongest.get(aspect, float("-inf")), value)
+    return strongest
+
+
+def _residual_signature(
+    child_card: list[dict[str, Any]] | None, parent_card: list[dict[str, Any]] | None
+) -> tuple[str, ...]:
+    """Aspect families one candidate closed vs its parent (loop._candidate_signature)."""
+    parent_lcb = _aspect_lcb(parent_card)
+    child_lcb = _aspect_lcb(child_card)
+    closed = {a for a, v in parent_lcb.items() if v > 0.0 and child_lcb.get(a, float("-inf")) <= 0.0}
+    if closed:
+        return tuple(sorted(closed))
+    drops = {a: parent_lcb[a] - child_lcb.get(a, float("-inf")) for a, v in parent_lcb.items() if v > 0.0}
+    if not drops:
+        return ()
+    best = max(drops, key=lambda aspect: drops[aspect])
+    return (best,) if drops[best] > 0.0 else ()
+
+
+def _evolution_accounting(
+    rounds: list[dict[str, Any]], card_of: "Callable[[str], list[dict[str, Any]] | None]"
+) -> dict[str, Any]:
+    """Spec v2 diagnostics: switchCount and postSwitchDiversity.
+
+    The diversity switch recommends a parent with a residual signature
+    disjoint from the incumbent line's; the diagnostic checks whether the
+    first ACCEPTANCE after a switch actually closed a disjoint family.
+    """
+    by_id = {str(row.get("candidateId")): row for row in rounds if row.get("candidateId")}
+    accepted = [row for row in rounds if row.get("accepted")]
+
+    def signature_of(candidate_id: str) -> tuple[str, ...]:
+        row = by_id.get(candidate_id)
+        if row is None or candidate_id == "m0":
+            return ()
+        return _residual_signature(card_of(candidate_id), card_of(str(row.get("parent", "m0"))))
+
+    switches: list[dict[str, Any]] = []
+    for row in rounds:
+        if not row.get("inspirationParent"):
+            continue
+        reference = signature_of(str(row.get("parent", "m0")))
+        after = next((a for a in accepted if int(a["round"]) > int(row["round"])), None)
+        entry: dict[str, Any] = {
+            "round": int(row["round"]),
+            "inspirationParent": row["inspirationParent"],
+            "preSwitchSignature": list(reference),
+        }
+        if after is None:
+            entry["firstAcceptedAfter"] = None
+            entry["disjoint"] = None
+        else:
+            sig_after = signature_of(str(after["candidateId"]))
+            entry["firstAcceptedAfter"] = after["candidateId"]
+            entry["postSwitchSignature"] = list(sig_after)
+            entry["disjoint"] = bool(sig_after) and set(sig_after).isdisjoint(reference)
+        switches.append(entry)
+    return {
+        "switchCount": len(switches),
+        "switches": switches,
+    }
+
+
+def _probe_accounting(run_dir: Path, rounds: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Spec v2 probeAccounting: written/validated/kept, render reach, wall-clock."""
+    validation_path = run_dir / "ws" / "probes" / "validation.jsonl"
+    if not validation_path.is_file():
+        return None
+    validations = _read_jsonl(validation_path)
+    library_path = run_dir / "ws" / "probes" / "library.json"
+    library = json.loads(library_path.read_text(encoding="utf-8")) if library_path.is_file() else []
+    return {
+        "written": len(validations),
+        "validated": sum(1 for row in validations if row.get("ok")),
+        "kept": len(library),
+        "roundsWithProbeOutput": (
+            sum(1 for row in rounds if int(row.get("probeOutputsRendered", 0) > 0) / len(rounds))
+            if rounds
+            else None
+        ),
+        "probesSeconds": sum(float(row.get("probesSeconds", 0.0)) for row in rounds),
+    }
 
 
 def _stats(values: list[float]) -> dict[str, Any]:

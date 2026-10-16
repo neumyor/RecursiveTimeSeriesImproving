@@ -13,8 +13,10 @@ diagnostic mean squared error is better. Your only job is to write better models
   instructions explicitly authorize another artifact (e.g. a diagnostic probe).
 - `<candidate-id>` must match `[a-z0-9][a-z0-9-]{0,63}`.
 - When a candidate is accepted, it replaces the incumbent.
-- Do not read other candidates' directories or any evaluation data. Evaluation inputs reach a
-  model only through `predict_batch` and contain no target values.
+- Do not read other candidates' directories or any evaluation data. The one exception: when a
+  round instruction explicitly names one specific candidate file as your starting point, you may
+  read exactly that file. Evaluation inputs reach a model only through `predict_batch` and
+  contain no target values.
 
 ## model.py contract
 

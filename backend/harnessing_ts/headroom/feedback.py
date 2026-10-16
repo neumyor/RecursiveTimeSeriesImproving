@@ -75,7 +75,8 @@ def render_feedback(
     per (seed, row count) and independent of global RNG state.
 
     Probe rows (self-built arm only) are dicts from the loop: ``probeId``,
-    ``signalKey``, ``output`` (JSON-serializable dict) or ``error``.  The
+    ``measures``, ``output`` (JSON-serializable dict) or ``error``.  Rows
+    arrive oldest-first and only the NEWEST ``_PROBE_MAX_ROWS`` render.  The
     static how-to-write-probes guide is NOT rendered here — the loop appends
     it (it is prompt text, and it lives in experiments/prompts/probes.md).
     Validation rows carry ``probeId``, ``ok``, ``detail``.
@@ -143,38 +144,37 @@ def _probe_table(
         )
     else:
         lines += ["| probe | signal | output |", "| --- | --- | --- |"]
-        for row in probe_rows[:_PROBE_MAX_ROWS]:
+        # Rows arrive in library order (oldest first); show the NEWEST probes
+        # — the agent's latest tools are the ones it is iterating on, and the
+        # spec freezes "8 newest rows".
+        for row in probe_rows[-_PROBE_MAX_ROWS:]:
             if "error" in row and row["error"]:
                 output = f"ERROR: {row['error']}"
             else:
                 output = json.dumps(_probe_safe(row.get("output")), ensure_ascii=False)
                 if len(output) > _PROBE_OUTPUT_CHARS:
                     output = output[:_PROBE_OUTPUT_CHARS] + "… (truncated)"
-            lines.append(f"| {row['probeId']} | {row.get('signalKey', '')} | {output} |")
+            lines.append(f"| {row['probeId']} | {row.get('measures', '')} | {output} |")
         if len(probe_rows) > _PROBE_MAX_ROWS:
-            lines.append(f"({_len_note(probe_rows)})")
+            lines.append(f"({len(probe_rows) - _PROBE_MAX_ROWS} earlier probes not shown)")
     sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
 
 def _probe_safe(value: Any) -> Any:
-    """JSON-renderable view of a probe output (NaN -> null, numpy -> plain)."""
+    """JSON-renderable view of a probe output.
+
+    Probe outputs reach the loop through a JSON round-trip (the isolated
+    worker), so only plain Python arrives; the one live conversion is the
+    worker's bare NaN token, which strict JSON readers reject -> null.
+    """
     if isinstance(value, dict):
         return {key: _probe_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_probe_safe(item) for item in value]
-    if isinstance(value, (np.floating, float)):
-        number = float(value)
-        return None if np.isnan(number) else number
-    if isinstance(value, np.integer):
-        return int(value)
-    if isinstance(value, np.ndarray):
-        return _probe_safe(value.tolist())
+    if isinstance(value, float):
+        return None if np.isnan(value) else value
     return value
-
-
-def _len_note(probe_rows: list[dict[str, Any]]) -> str:
-    return f"{len(probe_rows) - _PROBE_MAX_ROWS} older probes not shown"
 
 
 def _split_gains(gains: list[GainReport]) -> tuple[list[GainReport], GainReport | None]:

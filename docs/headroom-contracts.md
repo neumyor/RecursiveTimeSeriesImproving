@@ -26,7 +26,8 @@
 class HeadroomConfig:
     input_length: int = 96                  # L
     horizon: int = 24                       # H（主实验 H=24）
-    arm: str = "card"                       # scalar | bj | card | placebo
+    arm: str = "fixed"                      # scalar | fixed | self-built | placebo（§12 修订）
+    evolution: bool = True                  # 残差签名演化引导，三臂共用（§12.3）
     budget_candidates: int = 25
     candidate_timeout_seconds: float = 600.0
     acceptance_alpha: float = 0.05          # DM 接受检验
@@ -305,14 +306,22 @@ oracle 正确性检验（单测）：LGSSM 的 Kalman h 步预测与高蒙特卡
 
 ## 9. `headroom/feedback.py`
 
+> 2026-10-16 §12 修订：bj 臂退役；card 更名 fixed；新增 self-built 臂（agent 自建探针的
+> 输出作为其中段内容，探针契约见 experiments/prompts/probes.md 与 experiments/probes.py，
+> 本节其余文字以修订前的四臂设计为历史记录保留）。外框一致性规则不变。
+
 ```python
 def render_feedback(arm: str, incumbent: dict, gains: list[GainReport],
                     history: list[dict], cfg: HeadroomConfig,
-                    placebo_perm: tuple[int, ...] | None = None) -> str
+                    placebo_perm: tuple[int, ...] | None = None,
+                    probe_rows: list[dict] | None = None,
+                    validation_rows: list[dict] | None = None) -> str
     # 返回 markdown。外框四臂一致：标题、incumbent diag MSE、按 hgroup 的 MSE、
     # 历史候选表（round, id, accepted, diagMse）。
     # scalar：无附加内容。
-    # bj：1 步残差 ACF 前 48 阶（按 lag 顺序）、逐通道 Ljung–Box（按 lag 渲染 Q 与跨通道
+    # self-built：上轮探针校验结论（kept/rejected）+ 已入库探针在 incumbent 上的最新输出
+    #     （最新 8 行、每行 ≤600 字符）；后端诊断内容不进入该臂。
+    # bj（已退役）：1 步残差 ACF 前 48 阶（按 lag 顺序）、逐通道 Ljung–Box（按 lag 渲染 Q 与跨通道
     #     最小 p）、周期图前 5 峰；不含任何增益/排序。
     # card：坐标增益行 = 点估计 + 解析置信下界，按调用方传入的 LCB 降序排列——调用方在
     #        correctors.card_level(cfg, period_peaks, n_channels) 的 Bonferroni 水平上计算
