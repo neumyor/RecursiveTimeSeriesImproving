@@ -709,16 +709,20 @@ def _aspect_lcb(card_rows: list[dict[str, Any]] | None) -> dict[str, float]:
     return strongest
 
 
-def _residual_signature(
+def _diagnostic_attribution(
     child_card: list[dict[str, Any]] | None, parent_card: list[dict[str, Any]] | None
 ) -> tuple[str, ...]:
-    """Aspect families one candidate closed vs its parent (loop._candidate_signature)."""
+    """Diagnostic-only direction attribution: the aspect whose remaining-
+    improvement bound dropped the most.  The MECHANISM is the LLM judge
+    (revision III); this single rule exists so postSwitchDiversity keeps its
+    pre-registered meaning as a measurement."""
     parent_lcb = _aspect_lcb(parent_card)
     child_lcb = _aspect_lcb(child_card)
-    closed = {a for a, v in parent_lcb.items() if v > 0.0 and child_lcb.get(a, float("-inf")) <= 0.0}
-    if closed:
-        return tuple(sorted(closed))
-    drops = {a: parent_lcb[a] - child_lcb.get(a, float("-inf")) for a, v in parent_lcb.items() if v > 0.0}
+    drops = {
+        aspect: parent_lcb[aspect] - child_lcb.get(aspect, float("-inf"))
+        for aspect, value in parent_lcb.items()
+        if value > 0.0
+    }
     if not drops:
         return ()
     best = max(drops, key=lambda aspect: drops[aspect])
@@ -741,7 +745,7 @@ def _evolution_accounting(
         row = by_id.get(candidate_id)
         if row is None or candidate_id == "m0":
             return ()
-        return _residual_signature(card_of(candidate_id), card_of(str(row.get("parent", "m0"))))
+        return _diagnostic_attribution(card_of(candidate_id), card_of(str(row.get("parent", "m0"))))
 
     switches: list[dict[str, Any]] = []
     for row in rounds:

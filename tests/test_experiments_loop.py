@@ -24,7 +24,7 @@ def _load_loop():
     return module
 
 
-def _small_cfg(loop_module: Any):
+def _small_cfg(loop_module: Any, evolution: bool = False):
     return loop_module.HeadroomConfig(
         arm="fixed",
         input_length=48,
@@ -36,6 +36,7 @@ def _small_cfg(loop_module: Any):
         budget_candidates=3,
         candidate_timeout_seconds=60.0,
         ridge_alphas=(1.0, 100.0),
+        evolution=evolution,
     )
 
 
@@ -460,177 +461,284 @@ def test_self_built_samples_activations_with_alignment(tmp_path: Path) -> None:
     assert artifacts["meta"]["activationOrigins"] == []
 
 
-# ---------------------------------------------------------------- evolution
+# ----------------------------------------------------------- diversity judge
 
-def _write_card(run_heldout: Path, candidate_id: str, open_aspects: dict[str, float]) -> None:
-    """A heldout posthoc card whose aspects carry the given lcb values."""
-    rows = [
-        {
-            "label": f"l{i}",
-            "aspect": aspect,
-            "delta": lcb,
-            "lcb": lcb,
-            "ucb": lcb + 0.01,
-            "mu2": 0.0,
-            "by_horizon": [],
-        }
-        for i, (aspect, lcb) in enumerate(open_aspects.items())
-    ]
-    (run_heldout / "posthoc").mkdir(parents=True, exist_ok=True)
-    (run_heldout / "posthoc" / f"{candidate_id}.json").write_text(
-        json.dumps({"round": 1, "proposal": {}, "diagMse": 0.5, "dmP": None, "card": rows}),
-        encoding="utf-8",
-    )
+_SWITCH_VERDICT = json.dumps(
+    {
+        "switch": True,
+        "parent": "c-other",
+        "reason": "The recent chain keeps chipping at the same kind of structure; "
+        "try the cross-channel direction.",
+    }
+)
+_NO_SWITCH_VERDICT = json.dumps(
+    {"switch": False, "parent": None, "reason": "continue from the incumbent."}
+)
 
 
-def _evolution_loop(loop_module: Any, tmp_path: Path, arm: str = "fixed"):
+class _ScriptedJudge:
+    """Mock judge session: scripted parts (or an exception) per send."""
+
+    def __init__(self, script: list[Any], calls: list[str]) -> None:
+        self._script = script
+        self._calls = calls
+
+    async def send(self, prompt: str) -> list[Any]:
+        self._calls.append(prompt)
+        if not self._script:
+            return [_NO_SWITCH_VERDICT]
+        step = self._script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return [step]
+
+    async def close(self) -> None:
+        return None
+
+
+def _judge_factory_for(script: list[Any], calls: list[str]) -> Any:
+    def factory(judge_ws: Path, system_prompt: str) -> Any:
+        return _ScriptedJudge(script, calls)
+
+    return factory
+
+
+def _judge_loop(
+    loop_module: Any,
+    tmp_path: Path,
+    ledger_rows: list[dict[str, Any]],
+    *,
+    cert_rows: list[dict[str, Any]] | None = None,
+    script: list[Any] | None = None,
+    evolution: bool = True,
+) -> tuple[Any, Any, list[str]]:
+    """A prepared loop with a crafted ledger and a scripted judge."""
+    calls: list[str] = []
     loop = loop_module.HeadroomLoop(
-        run_dir=tmp_path / "run-evo",
+        run_dir=tmp_path / "run-judge",
         task_name="lgssm_xchannel",
-        arm=arm,
+        arm="fixed",
         seed=0,
-        cfg=_small_cfg(loop_module),
+        cfg=_small_cfg(loop_module, evolution=evolution),
         sizes=SMALL_SIZES,
+        judge_factory=_judge_factory_for(script or [], calls),
         m0_template="m0.py",
     )
     loop.prepare()
-    loop.load_state()  # segments are needed by _render_round; ledger stays read-only
-    return loop
-
-
-def _ledger_row(round_index: int, cid: str, parent: str, accepted: bool, diag_mse: float) -> str:
-    return json.dumps(
-        {
-            "round": round_index,
-            "candidateId": cid,
-            "parent": parent,
-            "arm": "fixed",
-            "status": "evaluated",
-            "diagMse": diag_mse,
-            "dmP": 0.01,
-            "accepted": accepted,
-            "error": None,
-            "proposal": {},
-            "tokens": {},
-            "feedbackChars": 100,
-            "attempts": 1,
-            "candidateSeconds": {"fit": 1.0, "predict": 0.1},
-            "inspirationParent": None,
-            "probesValidated": 0,
-            "seconds": 2.0,
-        }
+    loop.load_state()
+    loop.rounds_path.write_text(
+        "\n".join(json.dumps(row) for row in ledger_rows) + "\n", encoding="utf-8"
     )
+    if cert_rows is not None:
+        (loop.heldout / "certification.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in cert_rows) + "\n", encoding="utf-8"
+        )
+    state = loop_module.LoopState(
+        round_index=len(ledger_rows) + 1,
+        incumbent_id=str(ledger_rows[-1]["candidateId"]) if ledger_rows[-1].get("accepted") else "m0",
+        history=[],
+    )
+    return loop, state, calls
 
 
-def test_evolution_switch_fires_on_concentration(tmp_path: Path) -> None:
+def _row(
+    round_index: int, cid: str, parent: str, accepted: bool, diag_mse: float = 0.5
+) -> dict[str, Any]:
+    return {
+        "round": round_index,
+        "candidateId": cid,
+        "parent": parent,
+        "arm": "fixed",
+        "status": "evaluated",
+        "diagMse": diag_mse,
+        "dmP": 0.01,
+        "accepted": accepted,
+        "error": None,
+        "proposal": {
+            "targetAspect": "lag-structure",
+            "aspectDetail": "recent lags",
+            "mechanism": "less ridge shrinkage",
+        },
+        "tokens": {},
+        "inspirationParent": None,
+        "judgeCause": None,
+        "probesSubmitted": 0,
+        "seconds": 2.0,
+    }
+
+
+def test_judge_triggers_fire_from_pure_ledger_rules(tmp_path: Path) -> None:
     loop_module = _load_loop()
-    loop = _evolution_loop(loop_module, tmp_path)
-    heldout = loop.heldout
-    # m0 leaves periodicity and lag-structure open.
-    _write_card(heldout, "m0", {"periodicity": 0.05, "lag-structure": 0.04})
-    # Three consecutive acceptances each chip at lag-structure (the largest
-    # lcb drop) without closing anything: the concentration trigger.
-    _write_card(heldout, "c1", {"periodicity": 0.05, "lag-structure": 0.02})
-    _write_card(heldout, "c2", {"periodicity": 0.05, "lag-structure": 0.012})
-    _write_card(heldout, "c3", {"periodicity": 0.05, "lag-structure": 0.006})
-    # An unaccepted branch that closed periodicity: the different signature.
-    _write_card(heldout, "c-other", {"lag-structure": 0.04})
-    _write_card(heldout, "c-lag", {"lag-structure": 0.045})
-    rows = [
-        _ledger_row(1, "c1", "m0", True, 0.49),
-        _ledger_row(2, "c2", "c1", True, 0.48),
-        _ledger_row(3, "c3", "c2", True, 0.47),
-        _ledger_row(4, "c-other", "m0", False, 0.50),
-        _ledger_row(5, "c-lag", "m0", False, 0.55),
+    cert = [{"round": 0, "incumbentId": "m0", "saturated": True, "level": 0.95, "failures": []}]
+
+    def rows(n: int, accepted_last: bool = False) -> list[dict[str, Any]]:
+        out = [_row(i + 1, f"c{i + 1}", "m0", False) for i in range(n - 1)]
+        out.append(_row(n, f"c{n}", "m0", accepted_last))
+        return out
+
+    cases = {
+        "acceptance": (rows(2, accepted_last=True), None),
+        "rejections": (rows(3, accepted_last=False), None),
+        # fewer than three rejections, but the cert is saturated and no
+        # judge call happened at or after that certification round
+        "saturation": (rows(1, accepted_last=False), cert),
+        "none": (rows(1, accepted_last=False), []),
+    }
+    for cause, (ledger, certs) in cases.items():
+        loop, state, calls = _judge_loop(loop_module, tmp_path / cause, ledger, cert_rows=certs)
+        verdict = asyncio.run(loop._judge_recommendation(state))
+        if cause == "none":
+            assert not calls and verdict is None
+            continue
+        assert calls, f"{cause}: the judge must be called"
+        assert loop._last_judge["cause"] == cause
+    # A standing saturated state does not re-ask after a call was recorded.
+    ledger = rows(1)
+    ledger[0]["judgeCause"] = "saturation"
+    loop, state, calls = _judge_loop(loop_module, tmp_path / "standing", ledger, cert_rows=cert)
+    asyncio.run(loop._judge_recommendation(state))
+    assert not calls
+
+
+def test_judge_valid_switch_renders_in_the_round_prompt(tmp_path: Path) -> None:
+    loop_module = _load_loop()
+    ledger = [
+        _row(1, "c1", "m0", False),
+        _row(2, "c-other", "m0", False, 0.42),
+        _row(3, "c2", "m0", True),
     ]
-    loop.rounds_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
-    state = loop_module.LoopState(round_index=6, incumbent_id="c3", history=[])
+    loop, state, calls = _judge_loop(
+        loop_module, tmp_path, ledger, script=[_SWITCH_VERDICT]
+    )
+    verdict = asyncio.run(loop._judge_recommendation(state))
+    assert verdict is not None
+    parent, reason, cause = verdict
+    assert (parent, cause) == ("c-other", "acceptance")
+    assert "cross-channel direction" in reason
+    # The digest carried the ledger and the measured card for the judge.
+    assert "c-other" in calls[0] and "diagMse" in calls[0]
+    assert loop._last_judge["failed"] is False
+    prompt = loop._render_round(state, "feedback", "", verdict)
+    assert "Diversity switch" in prompt
+    assert "models/candidates/c-other/model.py" in prompt
+    assert "0.4200" in prompt  # the MSE comes from the ledger, not the judge
+    assert reason in prompt
 
-    rec = loop._evolution_recommendation(state)
-    assert rec == ("c-other", "concentrated", 0.50)
-    block = loop._parent_block(state, rec)
-    assert "models/candidates/c-other/model.py" in block
-    assert "0.5000" in block
-    # Neutral wording: the aspect names stay heldout.
-    assert "lag-structure" not in block and "periodicity" not in block
-    # And the rendered round carries the switch while the no-switch render
-    # does not.
-    with_switch = loop._render_round(state, "fb", "", rec)
-    assert "Diversity switch" in with_switch
-    without = loop._render_round(state, "fb", "", None)
-    assert "Diversity switch" not in without
 
-
-def test_evolution_switch_fires_on_cert_saturation(tmp_path: Path) -> None:
+def test_judge_invalid_parent_falls_back_to_greedy(tmp_path: Path) -> None:
     loop_module = _load_loop()
-    loop = _evolution_loop(loop_module, tmp_path)
-    heldout = loop.heldout
-    _write_card(heldout, "m0", {"periodicity": 0.05, "lag-structure": 0.04})
-    _write_card(heldout, "c-other", {"lag-structure": 0.04})
-    loop.rounds_path.write_text(
-        _ledger_row(1, "c-other", "m0", False, 0.50) + "\n", encoding="utf-8"
+    bogus = json.dumps(
+        {"switch": True, "parent": "c-does-not-exist", "reason": "try a different direction"}
     )
-    (heldout / "certification.jsonl").write_text(
-        json.dumps({"round": 0, "incumbentId": "m0", "saturated": True, "level": 0.05, "failures": []})
-        + "\n",
-        encoding="utf-8",
+    ledger = [
+        _row(1, "c1", "m0", False),
+        _row(2, "c-other", "m0", False, 0.42),
+        _row(3, "c2", "m0", True),
+    ]
+    loop, state, calls = _judge_loop(
+        loop_module, tmp_path, ledger, script=[bogus, bogus]
     )
-    state = loop_module.LoopState(round_index=2, incumbent_id="m0", history=[])
-    rec = loop._evolution_recommendation(state)
-    assert rec == ("c-other", "saturated", 0.50)
-    block = loop._parent_block(state, rec)
-    assert "below the actionable threshold" in block
-
-
-def test_evolution_stays_silent_without_a_trigger(tmp_path: Path) -> None:
-    loop_module = _load_loop()
-    loop = _evolution_loop(loop_module, tmp_path)
-    heldout = loop.heldout
-    _write_card(heldout, "m0", {"periodicity": 0.05, "lag-structure": 0.04})
-    _write_card(heldout, "c1", {"lag-structure": 0.04})
-    _write_card(heldout, "c2", {"periodicity": 0.05})
-    # Only two acceptances (need three) and no saturation.
-    loop.rounds_path.write_text(
-        _ledger_row(1, "c1", "m0", True, 0.49) + "\n" + _ledger_row(2, "c2", "c1", True, 0.48) + "\n",
-        encoding="utf-8",
-    )
-    state = loop_module.LoopState(round_index=3, incumbent_id="c2", history=[])
-    assert loop._evolution_recommendation(state) is None
+    verdict = asyncio.run(loop._judge_recommendation(state))
+    assert verdict is None
+    assert len(calls) == 2  # one retry, then the guardrail gives up
+    assert loop._last_judge["failed"] is True
     assert loop._parent_block(state, None) == ""
 
 
-def test_evolution_disabled_by_config(tmp_path: Path) -> None:
+def test_judge_transient_failure_retries_then_greedy(tmp_path: Path) -> None:
     loop_module = _load_loop()
-    cfg = loop_module.HeadroomConfig(
-        arm="fixed",
-        input_length=48,
-        horizon=8,
-        lag_segments=((0, 7), (8, 15), (16, 31)),
-        fir_len_cap=48,
-        beyond_l_lags=2,
-        band_period_range=(4, 24),
-        budget_candidates=3,
-        candidate_timeout_seconds=60.0,
-        ridge_alphas=(1.0, 100.0),
-        evolution=False,
+    ledger = [
+        _row(1, "c1", "m0", False),
+        _row(2, "c-other", "m0", False, 0.42),
+        _row(3, "c2", "m0", True),
+    ]
+    loop, state, calls = _judge_loop(
+        loop_module, tmp_path, ledger, script=[RuntimeError("endpoint down"), _SWITCH_VERDICT]
     )
-    loop = loop_module.HeadroomLoop(
-        run_dir=tmp_path / "run-evo-off",
-        task_name="lgssm_xchannel",
-        arm="fixed",
-        seed=0,
-        cfg=cfg,
-        sizes=SMALL_SIZES,
-        m0_template="m0.py",
+    verdict = asyncio.run(loop._judge_recommendation(state))
+    assert verdict is not None  # the retry succeeded
+    assert len(calls) == 2
+    assert loop._last_judge["failed"] is False
+    loop, state, calls = _judge_loop(
+        loop_module,
+        tmp_path / "both-fail",
+        ledger,
+        script=[RuntimeError("endpoint down"), TimeoutError("slow")],
     )
-    loop.prepare()
-    (loop.heldout / "certification.jsonl").write_text(
-        json.dumps({"round": 0, "incumbentId": "m0", "saturated": True, "level": 0.05, "failures": []})
-        + "\n",
-        encoding="utf-8",
+    assert asyncio.run(loop._judge_recommendation(state)) is None
+    assert loop._last_judge["failed"] is True
+
+
+def test_judge_reason_leak_filter_rejects_numbers_and_status_words(tmp_path: Path) -> None:
+    loop_module = _load_loop()
+    leaky_digits = json.dumps(
+        {"switch": True, "parent": "c-other", "reason": "the last candidate improved by 12 percent"}
     )
-    state = loop_module.LoopState(round_index=1, incumbent_id="m0", history=[])
-    assert loop._evolution_recommendation(state) is None
+    leaky_status = json.dumps(
+        {"switch": True, "parent": "c-other", "reason": "the incumbent line is now saturated"}
+    )
+    ledger = [
+        _row(1, "c1", "m0", False),
+        _row(2, "c-other", "m0", False, 0.42),
+        _row(3, "c2", "m0", True),
+    ]
+    loop, state, calls = _judge_loop(
+        tmp_path=tmp_path / "digits",
+        loop_module=loop_module,
+        ledger_rows=ledger,
+        script=[leaky_digits, _SWITCH_VERDICT],
+    )
+    assert asyncio.run(loop._judge_recommendation(state)) is not None
+    assert len(calls) == 2  # the leaky verdict was discarded, the retry won
+    loop, state, calls = _judge_loop(
+        tmp_path=tmp_path / "status",
+        loop_module=loop_module,
+        ledger_rows=ledger,
+        script=[leaky_status, leaky_status],
+    )
+    assert asyncio.run(loop._judge_recommendation(state)) is None
+    assert loop._last_judge["failed"] is True
+
+
+def test_judge_reads_heldout_cards_in_the_digest(tmp_path: Path) -> None:
+    loop_module = _load_loop()
+    ledger = [
+        _row(1, "c1", "m0", False),
+        _row(2, "c-other", "m0", False, 0.42),
+        _row(3, "c2", "m0", True),
+    ]
+    loop, state, calls = _judge_loop(loop_module, tmp_path, ledger, script=[_SWITCH_VERDICT])
+    card = {
+        "round": 2,
+        "proposal": {},
+        "diagMse": 0.42,
+        "dmP": None,
+        "card": [
+            {"label": "lag", "aspect": "lag-structure", "delta": 0.02, "lcb": 0.011,
+             "ucb": 0.03, "mu2": 0.0, "by_horizon": []}
+        ],
+    }
+    (loop.heldout / "posthoc").mkdir(parents=True, exist_ok=True)
+    (loop.heldout / "posthoc" / "c2.json").write_text(json.dumps(card), encoding="utf-8")
+    digest = loop._evolution_digest(state)
+    assert "remaining improvement by aspect: lag-structure: 0.0110" in digest
+    assert "claimed: lag-structure; recent lags; less ridge shrinkage" in digest
+    # The judge workspace lives inside heldout, never under ws/.
+    assert str(loop._judge_ws()).startswith(str(loop.heldout))
+
+
+def test_judge_disabled_by_config_never_calls(tmp_path: Path) -> None:
+    loop_module = _load_loop()
+    ledger = [
+        _row(1, "c1", "m0", False),
+        _row(2, "c-other", "m0", False, 0.42),
+        _row(3, "c2", "m0", True),
+    ]
+    loop, state, calls = _judge_loop(
+        loop_module, tmp_path, ledger, script=[_SWITCH_VERDICT], evolution=False
+    )
+    assert asyncio.run(loop._judge_recommendation(state)) is None
+    assert not calls  # cfg.evolution=False: not even one session is opened
 
 
 _MEAN_CANDIDATE = """\

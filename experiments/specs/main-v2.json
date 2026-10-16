@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "registeredAt": "2026-10-16",
   "name": "p2-main-v2",
-  "description": "Pre-registered main experiment after the 2026-10-16 author-directed revision (docs/residual-headroom-final-coding-plan.zh-CN.md §12): agent-built validated probes replace the bj arm, the incumbent is PatchTST-lite, and residual-signature evolution guidance runs in every arm. Supersedes main.json before any valid P2 run (the single v1 attempt was voided for account-balance reasons, not results). Frozen before any v2 run; changes after the first v2 run require a new spec version and disclosure in the paper. Revision 2026-10-16b (author-directed, before any v2 run): the alpha-spending ledger of the certification stop (uniform alpha/J_max across incumbent versions + Bonferroni amortization over the statistic family + the cumulative false-stop bound) is DELETED. The stop rule is now a fixed-level test: on every incumbent change, the incumbent is saturated iff every statistic's realized-gain 95% UCB < certifyEpsilon * its group MSE. False-stop behavior is measured empirically (G0-1/G0-5 re-run, g0-final-report-v3); the analytic guarantee (former Proposition 2) is not claimed.",
+  "description": "Pre-registered main experiment after the 2026-10-16 author-directed revision (docs/residual-headroom-final-coding-plan.zh-CN.md §12): agent-built validated probes replace the bj arm, the incumbent is PatchTST-lite, and residual-signature evolution guidance runs in every arm. Supersedes main.json before any valid P2 run (the single v1 attempt was voided for account-balance reasons, not results). Frozen before any v2 run; changes after the first v2 run require a new spec version and disclosure in the paper. Revision 2026-10-16b (author-directed, before any v2 run): the alpha-spending ledger of the certification stop (uniform alpha/J_max across incumbent versions + Bonferroni amortization over the statistic family + the cumulative false-stop bound) is DELETED. The stop rule is now a fixed-level test: on every incumbent change, the incumbent is saturated iff every statistic's realized-gain 95% UCB < certifyEpsilon * its group MSE. False-stop behavior is measured empirically (G0-1/G0-5 re-run, g0-final-report-v3); the analytic guarantee (former Proposition 2) is not claimed. Revision 2026-10-16c (author-directed, before any v2 run): evolution guidance's mechanical attribution (residual signatures + disjoint-selection argmin) is replaced by an LLM diversity judge — a no-tool session reads the measurement archive (ledger + heldout posthoc cards) and returns one guarded suggestion. Deterministic: call timing (after each acceptance, after 3 rejected/failed rounds, once per new saturated certification), JSON contract, real-candidate-id guardrail, mechanical leak filter on the reason, one retry then greedy fallback. Judge sessions live in heldout (never under ws/), are arm-blind, and are logged per round (inspirationParent/judgeReason/judgeTokens/judgeFailed).",
   "tasks": [
     {
       "name": "hmm_ar_switch",
@@ -70,9 +70,11 @@
     "library": "validated probes re-run on every incumbent; outputs rendered (<=600 chars per probe, 8 newest rows); rejection never costs a candidate repair turn"
   },
   "evolutionGuidance": {
-    "mechanism": "every evaluated candidate gets a residual-coordinate signature (aspects closed vs parent from the heldout posthoc card; largest-bound-drop fallback); the round prompt recommends the best evaluated candidate with a nonempty disjoint signature as the starting point when the latest certification is saturated or the last 3 acceptances share one aspect family",
-    "armFairness": "identical mechanism in all three arms; the switch paragraph is arm-neutral and carries no heldout numbers — its only figure is the inspiration candidate's ledger-visible diagnostic MSE (the same number its round's history table showed). The saturation trigger does surface a one-bit heldout certificate verdict to every arm identically; the paper text therefore describes the loop as cert-informed at the diversity level, and RQ3's post-stop gain is reported under an active diversity-switch protocol rather than naive continuation. The feedback-arm contrast stays clean.",
-    "ablation": "cfg.evolution=false exists for a post-hoc ablation run; not part of this spec's matrix"
+    "mechanism": "measurement archive + LLM judge + deterministic guardrails: on ledger-rule triggers (each acceptance; 3 consecutive rejected/failed rounds; once per new saturated certification) a no-tool judge LLM reads the archive (ledger rows + heldout posthoc cards) and answers one JSON object {switch, parent, reason}",
+    "guardrails": "parent must be a real evaluated non-incumbent id or the verdict is discarded; the reason passes a mechanical leak filter (no digits, no forbidden vocabulary; candidate id and MSE are appended by the loop from the ledger); any failure (exception, empty turn, invalid verdict, filtered reason) costs one retry, then greedy continuation with judgeFailed recorded",
+    "isolation": "judge sessions and logs live inside the heldout directory (its prompt carries heldout cards; ws/ is agent-readable) — never under ws/; judge tokens counted from its own session tree into the ledger's judgeTokens field; the judge prompt carries no arm information and treatment is identical across arms; resume restores verdicts from the ledger and never re-asks",
+    "armFairness": "identical mechanism in every arm; the reason is leak-filtered prose, and the only figure in the switch paragraph is the inspiration candidate's ledger-visible diagnostic MSE",
+    "ablation": "cfg.evolution=false disables the judge entirely; a deterministic-rule (former signature mechanism) judge variant is a post-hoc ablation, not in this matrix"
   },
   "negativeControls": [
     {
@@ -111,10 +113,11 @@
     "switchCount": "per run, number of rounds with a non-null inspirationParent (diversity-switch firings)",
     "postSwitchDiversity": "whether the first accepted candidate after a switch closes an aspect family disjoint from the pre-switch reference signature (null when no acceptance follows a switch)",
     "probeAccounting": "per self-built run: probes written, validated, kept; per-round probe wall-clock and the fraction of rounds whose prompt carried >=1 probe output",
-    "audit": "out-of-workspace read paths in agent tool logs; diag-gain >> cert-gain candidates; per-arm token and wall-clock accounting"
+    "audit": "out-of-workspace read paths in agent tool logs; diag-gain >> cert-gain candidates; per-arm token and wall-clock accounting",
+    "judgeAccounting": "per run: judge calls, judgeFailed count, judge token totals (judgeTokens per round), switchCount (rounds with non-null inspirationParent), postSwitchDiversity unchanged"
   },
   "acceptanceGateFromG1": {
-    "g1Pass": "unattended smoke of the NEW self-built prompt: failure rate < 30% over 10 candidates, >=1 probe validated and rendered, done.json within 24h (the fixed/scalar prompts are unchanged from the G1-passed v1 wording apart from arm-neutral additions)",
+    "g1Pass": "unattended smoke of the NEW self-built prompt: failure rate < 30% over 10 candidates, >=1 probe validated and rendered, at least one judge call triggered with the guardrail path (retry/fallback or filtered verdict) exercised at least once, done.json within 24h",
     "ifG1Fails": "prompt iteration is allowed until this spec's runs begin; after the first P2 v2 run, prompts are frozen"
   },
   "calibrationEvidence": {

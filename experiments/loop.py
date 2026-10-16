@@ -81,6 +81,11 @@ from harnessing_ts.settings.llm import build_sdk_invocation_config, read_effecti
 from harnessing_ts.state.message_log import MessageLog
 
 AGENT_TOOLS = ["read", "glob", "grep", "write", "edit"]
+# The diversity judge's system prompt: role, JSON contract, neutral-wording
+# constraints.  Arm-free by construction (no arm is ever named).
+JUDGE_SYSTEM_PROMPT = (_REPO_ROOT / "experiments" / "prompts" / "judge.md").read_text(
+    encoding="utf-8"
+)
 HELDOUT_ROOT = Path.home() / ".rhg-heldout"
 MAX_REPAIRS = 2
 SEND_RETRIES = 2  # extra attempts after a transient DSH runtime failure
@@ -102,9 +107,26 @@ ASPECT_VOCABULARY = (
     "level-bias",
     "other",
 )
-# Diverse-parent switch (plan §12.3): fires on certificate saturation or
-# INSPIRATION_ASPECT_RUN consecutive acceptances closing the same family.
-INSPIRATION_ASPECT_RUN = 3
+# Diversity judge (plan §12.3 + revision III): called after each acceptance,
+# after a streak of JUDGE_STREAK_ROUNDS rejected/failed rounds, and once per
+# new saturated certification — about 10-15 calls per run, never every round.
+JUDGE_STREAK_ROUNDS = 3
+JUDGE_RETRIES = 1  # one retry on any judge failure, then greedy continuation
+# The judge's reason must contain no digits (candidate ids and scores are
+# added by the loop from the ledger) and none of the forbidden vocabulary —
+# the same list the feedback tests enforce on arm wording.
+_JUDGE_FORBIDDEN_WORDS = (
+    "ecg",
+    "ett",
+    "electricity",
+    "traffic",
+    "weather",
+    "exchange",
+    "headroom",
+    "certified",
+    "certificate",
+    "saturated",
+)
 # Activation sample size handed to probes (plan §12.2): evenly spaced
 # diagnostic windows, per-layer, of the current incumbent.
 ACTIVATION_WINDOWS = 256
@@ -203,6 +225,40 @@ def _pin_torch_threads() -> None:
         torch.set_num_threads(1)
 
 
+@dataclass(frozen=True)
+class _JudgeVerdict:
+    """The judge's validated decision; the guardrails ran before construction."""
+
+    switch: bool
+    parent: str | None
+    reason: str
+
+
+def _extract_json_object(text: str) -> Any:
+    """First JSON object in the text (first brace to last brace: enough for a
+    no-tool one-shot judge that answers with a single object)."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _reason_ok(reason: str) -> bool:
+    """Mechanical leak filter on the judge's reason: no digits (candidate ids
+    and scores are added by the loop from the ledger), no forbidden
+    vocabulary, bounded length."""
+    if not reason.strip() or len(reason) > 400:
+        return False
+    if any(character.isdigit() for character in reason):
+        return False
+    lowered = reason.lower()
+    return not any(word in lowered for word in _JUDGE_FORBIDDEN_WORDS)
+
+
 class HeadroomLoop:
     def __init__(
         self,
@@ -215,6 +271,7 @@ class HeadroomLoop:
         sizes: dict[str, int] | None = None,
         real_csv: Path | None = None,
         runner_factory: Callable[[Path, str, int], RoundRunner] | None = None,
+        judge_factory: Callable[[Path, str], RoundRunner] | None = None,
         m0_template: str = "m0_deep.py",
     ) -> None:
         self.run_dir = run_dir.resolve()
@@ -227,6 +284,9 @@ class HeadroomLoop:
         self.sizes = sizes or {"train": 20000, "diag": 10000, "cert": 30000, "test": 52000}
         self.real_csv = real_csv
         self.runner_factory = runner_factory or self._dsh_runner_factory
+        # The diversity judge runs in its own no-tool session; mockable like
+        # the runner (tests inject a scripted judge).
+        self.judge_factory = judge_factory or self._dsh_judge_factory
         # The revision's deep default (plan §12.2); tests use the linear
         # template to stay fast, production always runs the PatchTST-lite.
         self.m0_template = m0_template
@@ -245,6 +305,7 @@ class HeadroomLoop:
         self._activations: dict[str, np.ndarray] | None = None
         self._activation_origins: np.ndarray | None = None
         self._incumbent_model_id: str = "m0"
+        self._last_judge: dict[str, Any] = {"cause": None}
         self._probe_cache: tuple[tuple[str, int], list[dict[str, Any]]] | None = None
         self._probe_seconds = 0.0
         self._last_probe_output_count = 0
@@ -420,7 +481,7 @@ class HeadroomLoop:
         state: LoopState,
         feedback_block: str,
         failure_block: str,
-        inspiration: tuple[str, str] | None,
+        inspiration: tuple[str, str, str] | None,
     ) -> str:
         assert self.seg_diag is not None
         diag_mse = float(np.mean(np.square(self.seg_diag.r)))
@@ -665,6 +726,24 @@ class HeadroomLoop:
         )
         return _SdkRoundRunner(runner)
 
+    def _dsh_judge_factory(self, judge_ws: Path, system_prompt: str) -> RoundRunner:
+        """The real judge session: no tools, one call, logs inside heldout."""
+        sdk = build_sdk_invocation_config(read_effective_llm_config(self.ws))
+        runner = SdkRunner(
+            SdkRunnerConfig(
+                cwd=judge_ws,
+                system_prompt=system_prompt,
+                allowed_tools=[],
+                log=MessageLog(judge_ws / "logs" / "judge.jsonl"),
+                model=sdk.model,
+                provider=sdk.provider,
+                max_tokens=sdk.max_tokens,
+                env=sdk.env,
+                session_role="main",
+            )
+        )
+        return _SdkRoundRunner(runner)
+
     async def _send_with_retries(self, state: LoopState, system_prompt: str, round_text: str) -> None:
         """Send one round prompt, retrying transient DSH runtime failures.
 
@@ -804,97 +883,184 @@ class HeadroomLoop:
             strongest[aspect] = max(strongest.get(aspect, -np.inf), value)
         return strongest
 
-    def _candidate_signature(self, candidate_id: str, parent_id: str) -> tuple[str, ...]:
-        """Aspect families this evaluated candidate closed vs its parent.
+    def _judge_ws(self) -> Path:
+        """The judge's isolated workspace, inside heldout (never under ws/).
 
-        Closed = the parent's card showed remaining improvement on an aspect
-        and the candidate's does not.  If nothing fully closed, the fallback is
-        the single aspect whose bound dropped the most (a real improvement that
-        shrank every coordinate without finishing one still has a direction).
-        An aspect absent from the candidate's card (e.g. its period peaks
-        vanished, so no band rows exist) counts as closed: no detectable
-        remaining structure on that aspect.
+        The judge's prompt carries heldout posthoc cards and the agent's read
+        tools cover all of ws/, so its sessions and logs must live here.
+        Token accounting reads the same .dsh-sessions tree (usage.workspace_usage
+        is directory-parameterized; it never depended on ws/).
         """
-        parent_lcb = self._aspect_lcb(self._posthoc_card(parent_id))
-        child_lcb = self._aspect_lcb(self._posthoc_card(candidate_id))
-        closed = {a for a, value in parent_lcb.items() if value > 0.0 and child_lcb.get(a, -np.inf) <= 0.0}
-        if closed:
-            return tuple(sorted(closed))
-        drops = {a: parent_lcb[a] - child_lcb.get(a, -np.inf) for a, value in parent_lcb.items() if value > 0.0}
-        if not drops:
-            return ()
-        best = max(drops, key=lambda aspect: drops[aspect])
-        return (best,) if drops[best] > 0.0 else ()
+        assert self.heldout is not None
+        path = self.heldout / "judge-ws"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
-    def _evolution_recommendation(self, state: LoopState) -> tuple[str, str, float] | None:
-        """(inspiration parent id, trigger, its diag MSE) when the switch fires.
+    def _judge_trigger(self, state: LoopState) -> str | None:
+        """'acceptance' | 'rejections' | 'saturation' | None — pure ledger rules.
 
-        Triggers: the latest certification of the incumbent line is saturated,
-        or the last INSPIRATION_ASPECT_RUN acceptances all closed the same
-        single aspect family.  The recommendation is then the best evaluated
-        candidate (lowest diagnostic MSE) whose signature is nonempty and
-        disjoint from the incumbent line's latest signature — the diversity
-        axis is the residual-coordinate space the certificate measures, which
-        is the time-series-specific part of the mechanism.
+        When to ask the judge is bookkeeping, not measurement: after each
+        acceptance, after a streak of rejected/failed rounds, and once per new
+        saturated certification (the last-call check keeps a standing
+        saturated state from re-asking every round).
         """
-        if not self.cfg.evolution:
-            return None
         assert self.heldout is not None
         rounds = _read_jsonl(self.rounds_path)
-        accepted = [row for row in rounds if row.get("accepted")]
+        if not rounds:
+            return None
+        if rounds[-1].get("accepted"):
+            return "acceptance"
+        tail = rounds[-JUDGE_STREAK_ROUNDS:]
+        if len(tail) == JUDGE_STREAK_ROUNDS and not any(row.get("accepted") for row in tail):
+            return "rejections"
         cert = _read_jsonl(self.heldout / "certification.jsonl")
-        saturated = bool(cert) and bool(cert[-1].get("saturated"))
-        recent = accepted[-INSPIRATION_ASPECT_RUN:]
-        recent_signatures = [
-            self._candidate_signature(row["candidateId"], row["parent"]) for row in recent
+        if cert and cert[-1].get("saturated"):
+            last_call = max(
+                (int(row["round"]) for row in rounds if row.get("judgeCause")), default=0
+            )
+            if last_call <= int(cert[-1]["round"]):
+                return "saturation"
+        return None
+
+    def _evolution_digest(self, state: LoopState) -> str:
+        """Structured archive for the judge: the ledger plus heldout cards.
+
+        The judge reads the measured cards directly, so "what did this
+        candidate fix" needs no mechanical attribution rule.  Heldout-only
+        content: this text must never be written under ws/.
+        """
+        rounds = _read_jsonl(self.rounds_path)
+        lines = [
+            "# Candidate archive",
+            f"Current incumbent: {state.incumbent_id}.",
+            "diagMse is the evaluated score (lower is better).  The card lists the",
+            "measured remaining improvement per structural aspect, lower-bound",
+            "estimates (aspect: value) — what the candidate still leaves on the table.",
+            "",
         ]
-        concentrated = (
-            len(recent_signatures) == INSPIRATION_ASPECT_RUN
-            and all(len(signature) == 1 for signature in recent_signatures)
-            and len(set(recent_signatures)) == 1
-        )
-        if not (saturated or concentrated):
-            return None
-        reference = recent_signatures[-1] if recent_signatures else ()
-        best: dict[str, Any] | None = None
         for row in rounds:
-            if row.get("status") != "evaluated" or row["candidateId"] == state.incumbent_id:
-                continue
-            signature = self._candidate_signature(row["candidateId"], row["parent"])
-            if not signature or set(signature) & set(reference):
-                continue
-            if best is None or float(row["diagMse"]) < float(best["diagMse"]):
-                best = row
-        if best is None:
-            return None
-        return (
-            str(best["candidateId"]),
-            "saturated" if saturated and not concentrated else "concentrated",
-            float(best["diagMse"]),
+            proposal = row.get("proposal") or {}
+            lines.append(
+                f"- {row['candidateId']}: parent={row.get('parent')} "
+                f"diagMse={row.get('diagMse')} accepted={bool(row.get('accepted'))} "
+                f"status={row.get('status')}"
+            )
+            claimed = "; ".join(
+                str(proposal.get(key))
+                for key in ("targetAspect", "aspectDetail", "mechanism")
+                if proposal.get(key)
+            )
+            if claimed:
+                lines.append(f"  claimed: {claimed}")
+            card = self._posthoc_card(str(row["candidateId"]))
+            if card:
+                strongest = self._aspect_lcb(card)
+                measured = ", ".join(
+                    f"{aspect}: {value:.4f}" for aspect, value in sorted(strongest.items())
+                )
+                lines.append(f"  remaining improvement by aspect: {measured}")
+        lines += ["", "# Your decision", "Answer with the JSON object per your instructions."]
+        return "\n".join(lines)
+
+    def _parse_verdict(self, parts: list[Any], state: LoopState) -> "_JudgeVerdict | None":
+        """Validate one judge turn against the deterministic guardrails."""
+        text = "\n".join(
+            part if isinstance(part, str) else str(getattr(part, "text", "") or "")
+            for part in parts
         )
+        obj = _extract_json_object(text)
+        if not isinstance(obj, dict) or not {"switch", "parent", "reason"} <= set(obj):
+            return None
+        switch = obj["switch"]
+        parent = obj["parent"]
+        reason = obj["reason"]
+        if not isinstance(switch, bool) or not isinstance(reason, str):
+            return None
+        if not switch:
+            return _JudgeVerdict(switch=False, parent=None, reason="")
+        if not isinstance(parent, str) or not _reason_ok(reason):
+            return None
+        rounds = _read_jsonl(self.rounds_path)
+        valid = {
+            str(row["candidateId"])
+            for row in rounds
+            if row.get("status") == "evaluated" and row["candidateId"] != state.incumbent_id
+        }
+        if parent not in valid:
+            return None
+        return _JudgeVerdict(switch=True, parent=parent, reason=reason.strip())
 
-    def _parent_block(self, state: LoopState, inspiration: tuple[str, str, float] | None) -> str:
-        """The diversity-switch paragraph for round.md; empty when no switch.
+    async def _judge_recommendation(self, state: LoopState) -> tuple[str, str, str] | None:
+        """Ask the judge for a starting point; (parent, reason, cause) or None.
 
-        Wording is arm-neutral and number-free: no aspect names, no heldout
-        figures — the same sentence in every arm, so the feedback-arm
-        contrast stays clean (plan §12.3).
+        The judge is an LLM reading the measurement archive — direction
+        judgment and attribution are its job; every gate around it is
+        deterministic: the verdict must be one JSON object (switch/parent/
+        reason), the parent must be a real evaluated non-incumbent id, and
+        the reason must pass the mechanical leak filter (no digits, no
+        forbidden vocabulary).  Any failure — exception, empty turn,
+        unparseable or invalid verdict — costs one retry and then falls back
+        to greedy continuation (no switch), recorded as judgeFailed.
+        """
+        if not self.cfg.evolution:
+            self._last_judge = {"cause": None}
+            return None
+        cause = self._judge_trigger(state)
+        if cause is None:
+            self._last_judge = {"cause": None}
+            return None
+        judge_ws = self._judge_ws()
+        tokens_before = workspace_usage(judge_ws)
+        verdict: _JudgeVerdict | None = None
+        failed = False
+        for _attempt in range(1 + JUDGE_RETRIES):
+            runner = self.judge_factory(judge_ws, JUDGE_SYSTEM_PROMPT)
+            try:
+                parts = await runner.send(self._evolution_digest(state))
+                verdict = self._parse_verdict(parts, state)
+                if verdict is not None:
+                    break
+            except Exception:
+                pass  # transient judge failure: one retry, then greedy
+            finally:
+                await runner.close()
+        else:
+            failed = True
+        after = workspace_usage(judge_ws)
+        tokens = {
+            key: after.get(key, 0) - tokens_before.get(key, 0)
+            for key in ("inputTokens", "outputTokens", "cacheReadTokens", "reasoningTokens")
+        }
+        self._last_judge = {
+            "cause": cause,
+            "failed": failed or verdict is None,
+            "tokens": tokens,
+            "parent": verdict.parent if (verdict is not None and verdict.switch) else None,
+            "reason": verdict.reason if (verdict is not None and verdict.switch) else None,
+        }
+        if verdict is None or not verdict.switch:
+            return None
+        return verdict.parent, verdict.reason, cause
+
+    def _parent_block(self, state: LoopState, inspiration: tuple[str, str, str] | None) -> str:
+        """The diversity-switch paragraph; empty when no switch.
+
+        The reason is the judge's leak-filtered prose; the candidate id and
+        its evaluated diagnostic MSE come from the ledger, never from the
+        judge's text.  Identical treatment in every arm.
         """
         if inspiration is None:
             return ""
-        parent_id, trigger, diag_mse = inspiration
-        cause = (
-            "The measured remaining-improvement bound of the incumbent line has fallen "
-            "below the actionable threshold."
-            if trigger == "saturated"
-            else (
-                f"The last {INSPIRATION_ASPECT_RUN} accepted improvements all targeted the "
-                "same kind of residual structure."
-            )
+        parent_id, reason, _cause = inspiration
+        rounds = _read_jsonl(self.rounds_path)
+        diag_mse = next(
+            (float(row["diagMse"]) for row in rounds if row["candidateId"] == parent_id), None
         )
-        mse_note = f" (its evaluated diagnostic MSE was {diag_mse:.4f})"
+        mse_note = (
+            f" (its evaluated diagnostic MSE was {diag_mse:.4f})" if diag_mse is not None else ""
+        )
         return (
-            f"{cause}\n\n"
+            f"{reason}\n\n"
             "Diversity switch for this round: start your candidate from a different "
             f"direction — copy `models/candidates/{parent_id}/model.py`{mse_note} as your "
             "starting point and modify it, instead of starting from the incumbent. "
@@ -931,7 +1097,7 @@ class HeadroomLoop:
         gains = self._feedback_gains()
         feedback_block = self._render_feedback(state, gains)
         system_prompt = (_REPO_ROOT / "experiments" / "prompts" / "system.md").read_text(encoding="utf-8")
-        inspiration = self._evolution_recommendation(state)
+        inspiration = await self._judge_recommendation(state)  # (parent, reason, cause) | None
         failure_block = ""
         if state.history and state.history[-1].get("evalNote"):
             # An evaluated candidate rejected for a specific reason (the
@@ -1010,6 +1176,10 @@ class HeadroomLoop:
                 "attempts": attempts,
                 "candidateSeconds": candidate_seconds,
                 "inspirationParent": inspiration[0] if inspiration else None,
+                "judgeCause": self._last_judge.get("cause"),
+                "judgeReason": self._last_judge.get("reason"),
+                "judgeFailed": bool(self._last_judge.get("failed")),
+                "judgeTokens": self._last_judge.get("tokens"),
                 "probesSubmitted": probes_submitted,
                 "probesKept": probes_kept,
                 "probesSeconds": round(probes_seconds + self._probe_seconds, 2),

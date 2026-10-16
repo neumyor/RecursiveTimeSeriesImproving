@@ -52,6 +52,7 @@ def _small_cfg(budget: int = 3) -> Any:
         budget_candidates=budget,
         candidate_timeout_seconds=60.0,
         ridge_alphas=(1.0, 100.0),
+        evolution=False,  # tests never call the (real) diversity judge
     )
 
 
