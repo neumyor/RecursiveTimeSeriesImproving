@@ -838,7 +838,10 @@ def artifacts_from_series(
     # r[o, h, c] = x[o+h+1, c] - mean_c: the mean-predictor residual at origin o.
     r = np.stack([values[o + 1 : o + 1 + horizon] - mean for o in residual_origins])
     e = np.full((t_len, channels), np.nan)
-    e[1 : t_len - horizon] = values[1 : t_len - horizon] - mean
+    # Realized through row T-H INCLUSIVE, mirroring segment_data's e_full
+    # (residuals.py): the last origin with a fully realized H-step target is
+    # T-1-H, whose 1-step residual lands on row T-H.
+    e[1 : t_len - horizon + 1] = values[1 : t_len - horizon + 1] - mean
     meta: dict[str, Any] = {
         "L": input_length,
         "H": horizon,

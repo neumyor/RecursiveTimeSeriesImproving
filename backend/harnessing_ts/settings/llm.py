@@ -21,6 +21,10 @@ class LlmConfig:
     apiKey: str | None = None
     baseUrl: str | None = None
     protocol: LlmProtocol | None = None
+    # Cap the runtime's per-request max_tokens: the DSH default is 256k, which
+    # gateways that validate against the model's own output limit reject with
+    # a 400 that the runtime swallows as an empty turn.
+    maxTokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,7 @@ def read_effective_llm_config(workspace_path: Path) -> LlmConfig:
         apiKey=env_config.apiKey or file_config.apiKey,
         baseUrl=env_config.baseUrl or file_config.baseUrl,
         protocol=env_config.protocol or file_config.protocol,
+        maxTokens=env_config.maxTokens or file_config.maxTokens,
     )
 
 
@@ -54,7 +59,7 @@ def build_sdk_invocation_config(cfg: LlmConfig) -> SdkInvocationConfig:
         env["DEEPSEEK_API_KEY"] = cfg.apiKey.strip()
     if cfg.baseUrl and cfg.baseUrl.strip():
         env["DEEPSEEK_BASE_URL"] = cfg.baseUrl.strip()
-    return SdkInvocationConfig(model=model, env=env)
+    return SdkInvocationConfig(model=model, max_tokens=cfg.maxTokens, env=env)
 
 
 def mask_sdk_invocation_config(cfg: SdkInvocationConfig) -> dict[str, Any]:
@@ -78,6 +83,7 @@ def mask_llm_config(cfg: LlmConfig) -> dict[str, Any]:
         **({"apiKey": _mask_secret(cfg.apiKey)} if cfg.apiKey else {}),
         **({"baseUrl": cfg.baseUrl} if cfg.baseUrl else {}),
         **({"protocol": cfg.protocol} if cfg.protocol else {}),
+        **({"maxTokens": cfg.maxTokens} if cfg.maxTokens else {}),
     }
 
 
@@ -93,24 +99,30 @@ def _read_llm_config_file(workspace_path: Path) -> LlmConfig:
 
 
 def _read_llm_env_config() -> LlmConfig:
+    env_max_tokens = os.getenv("TS_HARNESS_LLM_MAX_TOKENS")
     return _sanitize_config({
         "authMode": os.getenv("TS_HARNESS_LLM_AUTH_MODE"),
         "protocol": os.getenv("TS_HARNESS_LLM_PROTOCOL"),
         "model": os.getenv("TS_HARNESS_LLM_MODEL"),
         "apiKey": os.getenv("TS_HARNESS_LLM_API_KEY"),
         "baseUrl": os.getenv("TS_HARNESS_LLM_BASE_URL"),
+        "maxTokens": int(env_max_tokens) if env_max_tokens and env_max_tokens.isdigit() else None,
     })
 
 
 def _sanitize_config(raw: dict[str, Any]) -> LlmConfig:
     auth = raw.get("authMode") if raw.get("authMode") in {"manual", "sdk-default"} else "sdk-default"
     protocol = raw.get("protocol") if raw.get("protocol") in {"deepseek", "openai-compat"} else None
+    max_tokens = raw.get("maxTokens")
+    if max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1):
+        max_tokens = None
     return LlmConfig(
         authMode=auth,
         model=raw.get("model") if isinstance(raw.get("model"), str) else "",
         apiKey=raw.get("apiKey") if isinstance(raw.get("apiKey"), str) else None,
         baseUrl=raw.get("baseUrl") if isinstance(raw.get("baseUrl"), str) else None,
         protocol=protocol,
+        maxTokens=max_tokens,
     )
 
 

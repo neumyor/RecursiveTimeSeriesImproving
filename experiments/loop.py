@@ -820,6 +820,9 @@ class HeadroomLoop:
         and the candidate's does not.  If nothing fully closed, the fallback is
         the single aspect whose bound dropped the most (a real improvement that
         shrank every coordinate without finishing one still has a direction).
+        An aspect absent from the candidate's card (e.g. its period peaks
+        vanished, so no band rows exist) counts as closed: no detectable
+        remaining structure on that aspect.
         """
         parent_lcb = self._aspect_lcb(self._posthoc_card(parent_id))
         child_lcb = self._aspect_lcb(self._posthoc_card(candidate_id))
