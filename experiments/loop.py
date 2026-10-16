@@ -198,7 +198,7 @@ def _reason_ok(reason: str) -> bool:
     """Mechanical leak filter on the judge's reason: no digits (candidate ids
     and scores are added by the loop from the ledger), no forbidden
     vocabulary, bounded length."""
-    if not reason.strip() or len(reason) > 400:
+    if not reason.strip() or len(reason) > 600:
         return False
     if any(character.isdigit() for character in reason):
         return False

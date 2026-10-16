@@ -22,9 +22,13 @@ Rules:
   recent candidates were rejected. Then "parent" must be the id of an
   evaluated candidate that is NOT the current incumbent and whose remaining
   structure differs from the concentrated direction.
+- Copy the parent id EXACTLY as it appears in the archive, character for
+  character. Never invent, abbreviate, reformat, or guess an id: a
+  recommended id that does not appear verbatim in the archive is discarded.
 - switch is false means: continue from the incumbent. Then "parent" is null.
-- The reason is plain, neutral prose for the improvement agent. It must
-  contain NO numbers, NO candidate ids, NO dataset or domain names, and NO
-  status language (words like "certified" or "saturated"). The system adds
-  the candidate id and its score itself. Say which direction the next
-  candidate should explore and why.
+- The reason is at most two short sentences of plain descriptive language
+  for the improvement agent. It must contain NO numbers, NO candidate ids,
+  NO dataset or domain names, no measurement jargon (words like "headroom"),
+  and no status language (words like "certified" or "saturated"). The
+  system adds the candidate id and its score itself. Say which direction
+  the next candidate should explore and why.
