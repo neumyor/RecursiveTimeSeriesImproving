@@ -408,6 +408,19 @@ def test_crash_carries_stderr_tail(tmp_path: Path) -> None:
     assert "RuntimeError: boom: candidate fit exploded" in message
 
 
+def test_stderr_tail_carries_a_long_traceback_in_full() -> None:
+    from harnessing_ts.headroom.candidate import _STDERR_TAIL_CHARS, _tail
+
+    traceback = "Traceback (most recent call last):\n" + "\n".join(
+        f'  File "model.py", line {i}, in fit' for i in range(300)
+    ) + "\nRuntimeError: boom"
+    assert len(traceback) > 1_200  # a shallow tail would cut the stack away
+    assert _tail(traceback) == traceback
+    longer = "x" * (_STDERR_TAIL_CHARS + 10)
+    assert _tail(longer) == longer[-_STDERR_TAIL_CHARS:]
+    assert _tail("") == "(no output captured)"
+
+
 def test_contract_violation_inside_worker(tmp_path: Path) -> None:
     source = tmp_path / "model.py"
     series = ar_series(200)

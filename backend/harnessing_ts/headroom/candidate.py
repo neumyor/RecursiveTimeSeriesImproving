@@ -103,7 +103,7 @@ _SMOKE_WINDOWS = 4
 # The smoke budget is a fraction of the evaluation budget: a fit that cannot
 # finish on four windows within a minute is a hang, not a slow model.
 _SMOKE_TIMEOUT_CAP = 60.0
-_STDERR_TAIL_CHARS = 1200
+_STDERR_TAIL_CHARS = 16000
 _RESULT_KEYS = ("pred_diag", "batch_invariant", "fit_seconds", "predict_seconds")
 
 
@@ -399,7 +399,7 @@ def _check_candidate_id(candidate_id: str) -> None:
 
 
 def _tail(output: str) -> str:
-    """Last 1200 chars: enough to carry a traceback, small enough for the loop log."""
+    """Last 16000 chars: a full traceback reaches the agent's repair turn uncut."""
     return output[-_STDERR_TAIL_CHARS:] if output else "(no output captured)"
 
 
