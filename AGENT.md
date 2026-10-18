@@ -48,14 +48,14 @@ uv run ts-harness --dry-run finish-node --summary "..." --goal-met true --output
 维护时优先保持现有模块边界：
 
 - `backend/harnessing_ts/server.py`：FastAPI app factory、路由注册、后台任务、静态前端托管、启动配置校验。不要在这里新增业务规则。
-- `backend/harnessing_ts/api/payloads.py`：`/api/bootstrap` 和 `/api/live` 聚合 payload。
+- `backend/harnessing_ts/api/payloads.py`：`/api/bootstrap` 聚合 payload 和 SSE `live_snapshot` payload。
 - `backend/harnessing_ts/orchestrator.py`：应用 facade，协调 workspace store、main/node sessions、knowledge services、runner 生命周期和高层能力禁用。
 - `backend/harnessing_ts/node_state.py`：node chain 路由、`finish_node` 结构校验、pipeline completion、variant-aware output path 约束。
-- `backend/harnessing_ts/variants/profiles.py`：功能码、兼容别名、canonicalization、profile registry、capabilities、node overrides、variant help/catalog 的单一事实源。
+- `backend/harnessing_ts/variants/profiles.py`：功能码、canonicalization、profile registry、capabilities、node overrides、variant help/catalog 的单一事实源。
 - `backend/harnessing_ts/variants/prompts/`：非默认 profile 的 prompt overlay。完整 profile `NOD-KGR-KTL-CRV-SUB-ADA` 不依赖 overlay。
 - `backend/harnessing_ts/tools/compose_tools.py`：main/node allowed tools 和 native tools 的 variant-aware 组装。
 - `backend/harnessing_ts/agent/session_factory.py`：DeepSeek Harness runner 构造、prompt、MCP bridge、allowed tools、LLM invocation config。
-- `backend/harnessing_ts/mcp/server.py`：DSH stdio MCP bridge 和 callback 绑定。Web-server 路径通过 loopback-only `/internal/dsh/mcp` 回调当前 orchestrator，只暴露已由当前 variant 允许的 callback。
+- `backend/harnessing_ts/mcp/server.py`：DSH stdio MCP bridge 和 callback 绑定。bridge 按 runner role（main / node / knowledge_builder）注册工具；工具可见性由 DSH 侧 allowlist 决定，调用权限由 loopback-only `/internal/dsh/mcp` 的 capability 校验决定。
 - `backend/dsh_runtime/`：锁定 DSH JSON-RPC runtime、MCP、文件系统、Web 与子智能体插件；`setup-server` 会执行 `npm ci` 并校验入口文件。
 - `backend/harnessing_ts/state/`：workspace 文件/JSON/JSONL repository 和布局。
 - `backend/harnessing_ts/knowledge_graph.py` / `knowledge_prompts.py`：知识图谱构建、检索和 direct reference QA。
@@ -67,7 +67,7 @@ uv run ts-harness --dry-run finish-node --summary "..." --goal-met true --output
 
 ## 变体系统
 
-`TS_HARNESS_VARIANT` 只在进程启动时解析。运行时不得新增 variant switch API。旧 `V0`-`V6` 仅作为兼容别名，状态、timeline、API 和 UI 应显示 canonical ID。
+`TS_HARNESS_VARIANT` 只在进程启动时解析，只接受 canonical feature-code ID。运行时不得新增 variant switch API。
 
 功能码：
 
@@ -84,13 +84,13 @@ uv run ts-harness --dry-run finish-node --summary "..." --goal-met true --output
 
 已注册 profile：
 
-- `NOD-KGR-KTL-CRV-SUB-ADA`（旧 `V0`）：完整版本。
-- `NOD-RQA-KTL-CRV-SUB-ADA`（旧 `V1`）：无 knowledge graph，保留 direct reference QA、KTL、CRV、SUB、ADA。
-- `NOD-RQA-KTL-SUB-ADA`（旧 `V2`）：在 direct reference QA 基础上禁用 CRV。
-- `NOD-RQA-CRV-SUB-ADA`（旧 `V3`）：在 direct reference QA 基础上禁用 KTL。
-- `NOD-RQA-SUB-ADA`（旧 `V4`）：在 direct reference QA 基础上同时禁用 CRV 和 KTL。
-- `DIR`（旧 `V5`）：普通单 agent tool-use baseline。
-- `NOD-FQA-KTL-CXR-SUB-ADA`（旧 `V6`）：构建 extractor，但下游仅将其源码/规则作为 QA 材料，禁止执行 extractor。
+- `NOD-KGR-KTL-CRV-SUB-ADA`：完整版本。
+- `NOD-RQA-KTL-CRV-SUB-ADA`：无 knowledge graph，保留 direct reference QA、KTL、CRV、SUB、ADA。
+- `NOD-RQA-KTL-SUB-ADA`：在 direct reference QA 基础上禁用 CRV。
+- `NOD-RQA-CRV-SUB-ADA`：在 direct reference QA 基础上禁用 KTL。
+- `NOD-RQA-SUB-ADA`：在 direct reference QA 基础上同时禁用 CRV 和 KTL。
+- `DIR`：普通单 agent tool-use baseline。
+- `NOD-FQA-KTL-CXR-SUB-ADA`：构建 extractor，但下游仅将其源码/规则作为 QA 材料，禁止执行 extractor。
 
 硬约束：
 
@@ -146,11 +146,10 @@ Node prompt 和 native tools 约束：
 
 ## 前端契约
 
-- 前端不应假设 variant ID 形如 `V\d`。variant 是任意 canonical feature-code string。
-- 前端应基于 `variant.capabilities` 禁用或标记功能，不应只解析 ID 字符串。
+- 前端不得假设 variant ID 的具体形态，应基于 `variant.capabilities` 禁用或标记功能，不应解析 ID 字符串。
 - Bootstrap/live payload 的稳定聚合位置是 `backend/harnessing_ts/api/payloads.py`。
-- `/api/events` SSE 是主同步路径；`/api/live` 保留用于兼容和诊断。
-- 变体 pill 中完整 profile 和 ablation profile 的样式由显式 class 控制，不得恢复 `.variant-v0` 之类旧假设。
+- `/api/events` SSE 是主同步路径。
+- 变体 pill 中完整 profile 和 ablation profile 的样式由显式 class 控制。
 
 ## 运行记录
 
@@ -200,7 +199,6 @@ bun run build
 
 - `uv run ts-harness variants` 和 `uv run ts-harness variants --json`。
 - default variant resolves to `NOD-KGR-KTL-CRV-SUB-ADA`。
-- legacy aliases `V0`-`V6` resolve to canonical IDs。
 - unordered IDs canonicalize, e.g. `RQA-NOD-SUB-ADA` -> `NOD-RQA-SUB-ADA`。
 - invalid/unknown/valid-but-unregistered combinations fail with actionable messages。
 - no-`KTL` profiles do not expose knowledge-to-tools node, extractor tools, extractor metadata, or extractor execution.

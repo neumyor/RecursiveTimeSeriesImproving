@@ -19,8 +19,8 @@ The system is not a research agent. It does not center on comparing methods, fin
 The current implementation keeps runtime orchestration, domain routing rules, filesystem state, SDK wiring, and API response shaping in separate modules:
 
 - `backend/harnessing_ts/server.py`: FastAPI app factory, route registration, background task wiring, and static frontend serving.
-- `backend/harnessing_ts/api/payloads.py`: aggregate response construction for `/api/bootstrap` and `/api/live`.
-- `backend/harnessing_ts/api/realtime.py`: SSE fan-out for session parts, builder state, runtime state, and workspace file changes. The browser uses the SSE bootstrap snapshot and does not poll `/api/live`.
+- `backend/harnessing_ts/api/payloads.py`: aggregate response construction for `/api/bootstrap` and the SSE `live_snapshot` payload.
+- `backend/harnessing_ts/api/realtime.py`: SSE fan-out for session parts, builder state, runtime state, and workspace file changes. The browser receives all state updates over the SSE stream.
 - `backend/harnessing_ts/orchestrator.py`: application facade that coordinates workspace state, main/node sessions, pending control, knowledge operations, and runner lifecycle.
 - `backend/harnessing_ts/node_state.py`: node-chain routing and validation, including `loopDecision`, `nextNode`, pipeline completion, and iterative-solving output requirements.
 - `backend/harnessing_ts/agent/sdk_runner.py`: DeepSeek Harness wrapper for JSON-RPC turn execution, session id capture, interrupt/close, and runtime recovery.
@@ -29,7 +29,7 @@ The current implementation keeps runtime orchestration, domain routing rules, fi
 - `backend/harnessing_ts/config/deepseek-harness/cordis.yml`: the project composition for the DSH JSON-RPC server, persistence, local filesystem/shell, opt-in Web providers, subagents, tool allowlist, and MCP client.
 - `backend/dsh_runtime/`: package-locked Node runtime dependencies and the role/variant-aware DSH tool allowlist plugin. `setup-server` runs `npm ci` and verifies the required runtime entrypoints.
 - `backend/harnessing_ts/state/workspace_store.py`: repository facade for workspace JSON/JSONL state, logs, file reads, uploads, resets, runtime settings, and run/artifact records.
-- `backend/harnessing_ts/state/workspace_layout.py`: runtime workspace directory layout, built-in `tools/read_docx.py`, and DOCX reference text derivatives.
+- `backend/harnessing_ts/state/workspace_layout.py`: runtime workspace directory layout and DOCX reference text derivatives, extracted in-process by `state/read_docx.py`.
 - `backend/harnessing_ts/knowledge_graph.py`: file-backed knowledge-base tables, deterministic tools, graph view/search/cards, and builder/reasoner execution.
 - `backend/harnessing_ts/knowledge_prompts.py`: prompt text for the Literature Knowledge Builder and Knowledge Reasoning Agent.
 - `backend/harnessing_ts/chain_summary.py`: independent chain builder agent that reads runtime logs, reports, runs, tools, and user artifacts, then writes structured decision-chain JSON for frontend charts and sample evidence cards.
@@ -53,7 +53,7 @@ Every bridged MCP call is fenced by actor, epoch, and lease. `pausing` rejects n
 
 ## DSH MCP Security Boundary
 
-`dsh-mcp-client` starts `harnessing_ts.mcp.server` over stdio. In a web-server run, the bridge forwards stateful calls to the live orchestrator through `/internal/dsh/mcp`, which accepts loopback clients only. Each runner receives a newly generated capability bound to its resolved workspace, role, node session, and allowed `mcp__ts_harness__*` tools; the capability is revoked when the runner closes.
+`dsh-mcp-client` starts `harnessing_ts.mcp.server` over stdio. The bridge forwards stateful calls to the live orchestrator through `/internal/dsh/mcp`, which accepts loopback clients only. Each runner receives a newly generated capability bound to its resolved workspace, role, node session, and allowed `mcp__ts_harness__*` tools; the capability is revoked when the runner closes.
 
 The control URL and capability use the reserved `DSH_MCP_CONTROL_URL` and `DSH_MCP_CAPABILITY` variables. DSH subprocesses scrub `DSH_*` values before model-executed shell commands run. The Cordis MCP configuration explicitly forwards those variables to the bridge process, which is the only intended child recipient. They are not public server settings and must never be surfaced to model prompts, browser payloads, logs, or reverse proxies.
 
@@ -142,7 +142,7 @@ Every HarnessingTS MCP tool call must include an `intend` argument: one short se
 
 The backend projects assistant messages and `tool/call` / `tool/result` JSON-RPC events into the workspace JSONL transcript. The raw payload of each stored tool event remains available for audit. DSH keeps the complete durable session stream in `.dsh-sessions/`; the HarnessingTS timeline records application-level state and audit effects rather than claiming to duplicate every wire event.
 
-The backend projects DSH `tool/call` / `tool/result` events into the same intent-bearing, correlated tool-call cards used by the former Claude integration, while retaining the complete JSON-RPC event as the card's raw audit payload. The frontend renders these concise, expandable cards across main, node, knowledge-graph-builder, and chain-summary-builder views, but suppresses unprojected telemetry and other raw protocol events.
+The backend projects DSH `tool/call` / `tool/result` events into intent-bearing, correlated tool-call cards, while retaining the complete JSON-RPC event as the card's raw audit payload. The frontend renders these concise, expandable cards across main, node, knowledge-graph-builder, and chain-summary-builder views; raw protocol events without a projected part are never persisted to the application transcript.
 
 ## MCP Boundary
 

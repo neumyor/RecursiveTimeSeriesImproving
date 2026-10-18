@@ -88,7 +88,7 @@ Open [http://127.0.0.1:4327](http://127.0.0.1:4327).
 Useful launch options:
 
 ```bash
-# Show registered ablation profiles and legacy aliases.
+# Show registered ablation profiles.
 uv run ts-harness variants
 
 # Run the UI without calling DeepSeek Harness.
@@ -148,15 +148,15 @@ Feature codes:
 
 Registered profiles:
 
-| Canonical ID | Legacy alias | Description |
-|---|---|---|
-| `NOD-KGR-KTL-CRV-SUB-ADA` | `V0` | Full RecursiveECG. |
-| `NOD-RQA-KTL-CRV-SUB-ADA` | `V1` | Full node workflow without the knowledge graph; `query_knowledge` answers directly from references. |
-| `NOD-RQA-KTL-SUB-ADA` | `V2` | Direct reference QA with case review removed. |
-| `NOD-RQA-CRV-SUB-ADA` | `V3` | Direct reference QA with `knowledge-to-tools` and reference feature extractor removed. |
-| `NOD-RQA-SUB-ADA` | `V4` | Direct reference QA with both case review and knowledge tools removed. |
-| `DIR` | `V5` | Ordinary single-agent tool-use baseline with no node chain or harness MCP tools. |
-| `NOD-FQA-KTL-CXR-SUB-ADA` | `V6` | Builds the reference feature extractor, then uses its source/rules as downstream QA material; case review remains but extractor execution is disabled. |
+| Canonical ID | Description |
+|---|---|
+| `NOD-KGR-KTL-CRV-SUB-ADA` | Full RecursiveECG. |
+| `NOD-RQA-KTL-CRV-SUB-ADA` | Full node workflow without the knowledge graph; `query_knowledge` answers directly from references. |
+| `NOD-RQA-KTL-SUB-ADA` | Direct reference QA with case review removed. |
+| `NOD-RQA-CRV-SUB-ADA` | Direct reference QA with `knowledge-to-tools` and reference feature extractor removed. |
+| `NOD-RQA-SUB-ADA` | Direct reference QA with both case review and knowledge tools removed. |
+| `DIR` | Ordinary single-agent tool-use baseline with no node chain or harness MCP tools. |
+| `NOD-FQA-KTL-CXR-SUB-ADA` | Builds the reference feature extractor, then uses its source/rules as downstream QA material; case review remains but extractor execution is disabled. |
 
 A removed feature is not merely optional. It is blocked by tool availability and backend checks where applicable. For example, no-`KTL` profiles cannot enter `knowledge-to-tools`, cannot validate or run the reference feature extractor, and do not expose extractor metadata through the API.
 
@@ -275,13 +275,4 @@ The Vite development UI is available at `http://127.0.0.1:5173`:
 ```bash
 cd frontend
 bun run dev
-```
-
-## Optional Training Scaffold
-
-Training support is optional and not needed for normal use.
-
-```bash
-uv sync --extra training
-uv run ts-harness training-template
 ```
