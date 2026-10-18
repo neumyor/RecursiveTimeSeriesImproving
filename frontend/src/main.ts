@@ -5,13 +5,13 @@ import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, f
 import {
   Activity,
   AlertTriangle,
+  Archive,
   ArrowDown,
   ArrowUp,
-  Archive,
   Bot,
   Boxes,
-  ChevronLeft,
   Check,
+  ChevronLeft,
   ChevronRight,
   Circle,
   Clock3,
@@ -38,8 +38,8 @@ import {
   Upload,
   X,
   XCircle,
-  type IconNode,
 } from 'lucide';
+import type { IconNode } from 'lucide';
 import { marked } from 'marked';
 import type { Bootstrap, FileTreeNode, JsonMap } from './types';
 
@@ -97,14 +97,9 @@ const state = {
     mainBaseUrl: string;
     mainApiKey: string;
   },
-  settingsSaveTimer: 0,
-  knowledgeQuestion: '',
-  knowledgeAnswer: null as JsonMap | null,
-  knowledgeQueryBusy: false,
-  chainStatusSignature: '',
-  chainChartSignature: '',
-  chainContentSignature: '',
   renderSignatures: new Map<string, string>(),
+  messageFingerprints: new Map<string, string>(),
+  settingsFormVersion: 0,
   realtimeWaiters: [] as Array<{
     predicate: (data: Bootstrap) => boolean;
     resolve: (data: Bootstrap) => void;
@@ -213,38 +208,8 @@ app.innerHTML = `
           <span>详细设置</span>
         </summary>
         <div class="graph-settings-body">
-        <label>
-          <span>抽取深度</span>
-          <input id="graphExtractionDepthInput" type="number" min="1" max="4" step="1" />
-        </label>
-        <label>
-          <span>认证方式</span>
-          <select id="graphAuthMode">
-            <option value="manual">手动配置</option>
-            <option value="sdk-default">SDK 默认</option>
-          </select>
-        </label>
-        <label>
-          <span>协议</span>
-          <select id="graphProtocol">
-            <option value="">自动</option>
-            <option value="deepseek">deepseek</option>
-            <option value="openai-compat">openai-compat</option>
-          </select>
-        </label>
-        <label>
-          <span>模型</span>
-          <input id="graphModelInput" type="text" placeholder="默认继承主模型" />
-        </label>
-        <label>
-          <span>接口地址</span>
-          <input id="graphBaseUrlInput" type="text" placeholder="默认继承主接口地址" />
-        </label>
-        <label>
-          <span>API 密钥</span>
-          <input id="graphApiKeyInput" type="password" placeholder="留空表示保持当前密钥" />
-        </label>
-        <button id="saveGraphLlmBtn" type="button" class="secondary full-width"><span data-icon="Check"></span><span>保存构建模型</span></button>
+        <p class="meta">构建模型与抽取深度集中在设置页面管理。</p>
+        <button id="openGraphSettingsBtn" type="button" class="secondary full-width"><span data-icon="SlidersHorizontal"></span><span>打开工作区设置</span></button>
         </div>
       </details>
 
@@ -260,6 +225,7 @@ app.innerHTML = `
   </aside>
 
   <main class="main-pane">
+    <div id="connectionBanner" class="connection-banner" role="status" hidden>与服务器的实时连接已断开，正在自动重连…</div>
     <header class="toolbar">
       <div class="toolbar-main">
         <div class="title-group">
@@ -293,7 +259,10 @@ app.innerHTML = `
           </div>
         </div>
       </header>
-      <div id="settingsContent" class="settings-content"></div>
+      <div id="settingsContent" class="settings-content">
+        <div id="settingsWorkspaceSection"></div>
+        <div id="settingsFormSection"></div>
+      </div>
     </section>
     <section id="knowledgeGraphView" class="knowledge-graph-view" hidden>
       <div class="graph-header">
@@ -457,13 +426,13 @@ app.innerHTML = `
 const iconMap: Record<string, IconNode> = {
   Activity,
   AlertTriangle,
+  Archive,
   ArrowDown,
   ArrowUp,
-  Archive,
   Bot,
   Boxes,
-  ChevronLeft,
   Check,
+  ChevronLeft,
   ChevronRight,
   Circle,
   Clock3,
@@ -537,13 +506,7 @@ const els = {
   graphInspector: query('#graphInspector'),
   graphBuildStatus: query('#graphBuildStatus'),
   graphLeftActions: query<HTMLElement>('#graphLeftActions'),
-  graphAuthMode: query<HTMLSelectElement>('#graphAuthMode'),
-  graphProtocol: query<HTMLSelectElement>('#graphProtocol'),
-  graphModelInput: query<HTMLInputElement>('#graphModelInput'),
-  graphApiKeyInput: query<HTMLInputElement>('#graphApiKeyInput'),
-  graphBaseUrlInput: query<HTMLInputElement>('#graphBaseUrlInput'),
-  graphExtractionDepthInput: query<HTMLInputElement>('#graphExtractionDepthInput'),
-  saveGraphLlmBtn: query<HTMLButtonElement>('#saveGraphLlmBtn'),
+  openGraphSettingsBtn: query<HTMLButtonElement>('#openGraphSettingsBtn'),
   buildGraphBtn: query<HTMLButtonElement>('#buildGraphBtn'),
   rebuildGraphBtn: query<HTMLButtonElement>('#rebuildGraphBtn'),
   continueGraphBtn: query<HTMLButtonElement>('#continueGraphBtn'),
@@ -577,7 +540,10 @@ const els = {
   settingsBtn: query<HTMLButtonElement>('#settingsBtn'),
   settingsView: query<HTMLElement>('#settingsView'),
   settingsContent: query<HTMLElement>('#settingsContent'),
+  settingsWorkspaceSection: query<HTMLElement>('#settingsWorkspaceSection'),
+  settingsFormSection: query<HTMLElement>('#settingsFormSection'),
   settingsDoneBtn: query<HTMLButtonElement>('#settingsDoneBtn'),
+  connectionBanner: query<HTMLElement>('#connectionBanner'),
   resetChatBtn: query<HTMLButtonElement>('#resetChatBtn'),
   clearAllLogsBtn: query<HTMLButtonElement>('#clearAllLogsBtn'),
   dialog: query<HTMLDialogElement>('#detailDialog'),
@@ -618,8 +584,8 @@ els.messageInput.addEventListener('keydown', (event) => {
   // the matrix of browsers and IMEs:
   //   1. event.isComposing  — modern Chromium / WebKit / Firefox (Chrome 66+,
   //      Firefox 68+, Safari 13+). True while a composition is active.
-  //   2. event.keyCode === 229 — the legacy "IME processed" indicator that
-  //      every browser still emits as a fallback (deprecated but universal).
+  //   2. event.keyCode === 229 — the compatibility "IME processed" indicator
+  //      that every browser still emits as a fallback.
   //   3. event.key === 'Process' — what older WebKit and some mobile IMEs
   //      set on the keydown of a key the IME consumed.
   //   4. imeActive — the composition-state flag tracked above, for the
@@ -654,30 +620,38 @@ els.backToChatBtn.addEventListener('click', () => {
   history.pushState({}, '', '/');
   render();
 });
-els.settingsBtn.addEventListener('click', () => {
+function openSettingsView() {
   state.view = 'settings';
+  state.settingsFormVersion += 1;
   history.pushState({}, '', '/settings');
   render();
-});
+}
+els.settingsBtn.addEventListener('click', openSettingsView);
+els.openGraphSettingsBtn.addEventListener('click', openSettingsView);
 els.settingsDoneBtn.addEventListener('click', () => {
   state.view = 'chat';
   history.pushState({}, '', '/');
   render();
 });
 els.buildGraphBtn.addEventListener('click', async () => {
-  await postJson('/api/knowledge-graph/build', { trigger: 'manual' });
+  await runAction(async () => {
+    await postJson('/api/knowledge-graph/build', { trigger: 'manual' });
+  });
 });
 els.rebuildGraphBtn.addEventListener('click', async () => {
-  await postJson('/api/knowledge-graph/build', { trigger: 'rebuild' });
+  await runAction(async () => {
+    await postJson('/api/knowledge-graph/build', { trigger: 'rebuild' });
+  });
 });
 els.continueGraphBtn.addEventListener('click', async () => {
-  await postJson('/api/knowledge-graph/continue', {});
+  await runAction(async () => {
+    await postJson('/api/knowledge-graph/continue', {});
+  });
 });
 els.pauseGraphBtn.addEventListener('click', async () => {
-  await postJson('/api/knowledge-graph/pause', { reason: '用户从知识图谱页面暂停。' });
-});
-els.saveGraphLlmBtn.addEventListener('click', async () => {
-  await saveKnowledgeGraphLlmConfig();
+  await runAction(async () => {
+    await postJson('/api/knowledge-graph/pause', { reason: '用户从知识图谱页面暂停。' });
+  });
 });
 els.graphTabTrace.addEventListener('click', () => {
   state.knowledgeGraphTab = 'trace';
@@ -714,7 +688,9 @@ els.backToChainFromImageBtn.addEventListener('click', () => {
 });
 els.buildChainSummaryBtn.addEventListener('click', async () => {
   resetChainRenderSignatures();
-  await postJson('/api/chain-summary/build', {});
+  await runAction(async () => {
+    await postJson('/api/chain-summary/build', {});
+  });
 });
 els.chainNavToggle.addEventListener('click', () => {
   state.chainNavCollapsed = !state.chainNavCollapsed;
@@ -731,38 +707,21 @@ window.addEventListener('popstate', () => {
     : path === '/settings'
     ? 'settings'
     : 'chat';
+  if (state.view === 'settings') state.settingsFormVersion += 1;
   state.selectedImagePath = path === '/image-viewer'
     ? new URLSearchParams(window.location.search).get('path') || ''
     : state.selectedImagePath;
   render();
 });
-els.graphExtractionDepthInput.addEventListener('change', async () => {
-  await saveGraphExtractionDepth();
-});
-async function saveGraphExtractionDepth() {
-  const value = Number.parseInt(els.graphExtractionDepthInput.value, 10);
-  if (!Number.isFinite(value)) return;
-  const result = await postJson('/api/runtime-settings', { knowledgeGraphExtractionDepth: value });
-  applyBootstrapSnapshot(result.bootstrap);
-}
-async function saveKnowledgeGraphLlmConfig() {
-  const result = await postJson('/api/knowledge-graph/llm-config', {
-    authMode: els.graphAuthMode.value,
-    protocol: els.graphProtocol.value || undefined,
-    model: els.graphModelInput.value.trim(),
-    apiKey: els.graphApiKeyInput.value.trim() || undefined,
-    baseUrl: els.graphBaseUrlInput.value.trim(),
-  });
-  applyBootstrapSnapshot(result.bootstrap);
-  els.graphApiKeyInput.value = '';
-}
 els.interruptBtn.addEventListener('click', async () => {
   const reason = els.messageInput.value.trim();
   await pauseCurrent(reason || 'User paused from web UI.');
 });
 els.forceStopBtn.addEventListener('click', async () => {
   if (!confirm('强制停止可能使正在执行的工具结果变为未知。仅在正常暂停长时间无响应时使用。是否继续？')) return;
-  await postJson('/api/execution/force-stop', { confirm: true });
+  await runAction(async () => {
+    await postJson('/api/execution/force-stop', { confirm: true });
+  });
 });
 els.resetChatBtn.addEventListener('click', async () => {
   if (!confirm('这将重置聊天记录和 agent 工作流记忆，但保留 data/raw、references 和已构建的知识图谱。是否继续？')) return;
@@ -884,18 +843,48 @@ async function uploadRawZipFile() {
   }
 }
 
+let activeEventSource: EventSource | null = null;
+let sseRetryStep = 0;
+let sseRetryTimer: number | null = null;
+
 function connectRealtimeEvents() {
+  activeEventSource?.close();
   const source = new EventSource('/api/events');
+  activeEventSource = source;
+  source.onopen = () => {
+    sseRetryStep = 0;
+    els.connectionBanner.hidden = true;
+  };
   source.onmessage = (event) => {
     try {
       const message = JSON.parse(event.data || '{}');
       applyRealtimeEvent(message.type, message.payload || {});
     } catch {
-      // EventSource reconnects automatically; malformed events are ignored.
+      // Malformed events are ignored; the stream itself stays connected.
     }
   };
-  window.addEventListener('beforeunload', () => source.close(), { once: true });
+  source.onerror = () => {
+    els.connectionBanner.hidden = false;
+    // While connecting, EventSource retries on its own. A closed source means
+    // the server refused the stream, so a manual reconnect is scheduled here.
+    if (source.readyState !== EventSource.CLOSED) return;
+    source.close();
+    scheduleRealtimeReconnect();
+  };
 }
+
+function scheduleRealtimeReconnect() {
+  if (sseRetryTimer !== null) return;
+  const delays = [5_000, 15_000, 60_000];
+  const delay = delays[Math.min(sseRetryStep, delays.length - 1)];
+  sseRetryStep += 1;
+  sseRetryTimer = window.setTimeout(() => {
+    sseRetryTimer = null;
+    connectRealtimeEvents();
+  }, delay);
+}
+
+window.addEventListener('beforeunload', () => activeEventSource?.close());
 
 function applyRealtimeEvent(eventType: string, payload: JsonMap) {
   if (eventType === 'bootstrap_snapshot' && payload.bootstrap) {
@@ -1057,16 +1046,15 @@ function render() {
   renderChat(data);
   renderStable('knowledge-graph', [data.knowledgeGraph, state.selectedGraphNodeId], () => renderKnowledgeGraph(data.knowledgeGraph));
   renderStable('knowledge-builder', [data.knowledgeGraphBuild, data.runtime, data.knowledgeGraphLlmConfig], () => renderKnowledgeGraphBuilder(data));
-  renderStable('knowledge-workbench', [data.knowledgeBaseSummary, state.selectedKnowledgeBaseKind, state.knowledgeBaseCards, state.knowledgeBaseCardsBusy, state.knowledgeQuestion, state.knowledgeAnswer, state.knowledgeQueryBusy], () => renderKnowledgeWorkbench(data));
+  renderStable('knowledge-workbench', [data.knowledgeBaseSummary, state.selectedKnowledgeBaseKind, state.knowledgeBaseCards, state.knowledgeBaseCardsBusy], () => renderKnowledgeWorkbench(data));
   renderStable('builder-trace', data.knowledgeGraphParts || [], () => renderBuilderTrace(data.knowledgeGraphParts || []));
   renderKnowledgeGraphTabState();
   renderChainSummary(data);
   renderImageViewer();
-  renderStable('settings', [state.view, data.llmConfig, data.knowledgeGraphLlmConfig, data.runtimeSettings], () => renderSettings(data));
+  renderSettings(data);
   renderViewState();
   renderStable('timeline', data.timeline, () => renderTimeline(data.timeline));
   renderStable('file-tree', data.fileTree, () => renderFileTree(data.fileTree));
-  renderStable('runtime-settings', data.runtimeSettings || ws.runtimeSettings, () => renderRuntimeSettings(data.runtimeSettings || ws.runtimeSettings));
   renderKgCta(data);
   renderChainCta(data);
   renderDebugActions(Boolean(data.debugEnabled));
@@ -1076,20 +1064,10 @@ function render() {
 }
 
 function renderStable(key: string, value: any, renderFn: () => void) {
-  const signature = stableSignature(value);
+  const signature = JSON.stringify(value ?? null);
   if (state.renderSignatures.get(key) === signature) return;
   state.renderSignatures.set(key, signature);
   renderFn();
-}
-
-function stableSignature(value: any) {
-  const json = JSON.stringify(value ?? null);
-  let hash = 2166136261;
-  for (let index = 0; index < json.length; index += 1) {
-    hash ^= json.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `${json.length}:${hash >>> 0}`;
 }
 
 function setHtmlIfChanged(element: HTMLElement, html: string) {
@@ -1210,8 +1188,12 @@ function renderNodeDetail(specs: JsonMap[], nodes: JsonMap[]) {
 
   for (const item of els.nodeDetail.querySelectorAll<HTMLElement>('.session-item')) {
     item.addEventListener('click', async () => {
-      const log = await fetchJson(`/api/nodes/${item.dataset.session}/log`);
-      showDetail(`节点日志 ${item.dataset.session}`, displaySafeSessionParts(log));
+      try {
+        const log = await fetchJson(`/api/nodes/${item.dataset.session}/log`);
+        showDetail(`节点日志 ${item.dataset.session}`, displaySafeSessionParts(log));
+      } catch (error) {
+        showDetail('获取节点日志失败', { message: error instanceof Error ? error.message : String(error) });
+      }
     });
   }
   for (const item of els.nodeDetail.querySelectorAll<HTMLElement>('.artifact-item')) {
@@ -1253,11 +1235,12 @@ function renderChat(data: Bootstrap) {
   let changed = false;
   renderedParts.forEach((part, index) => {
     const key = messageKey(part, index);
-    const fingerprint = stableSignature(part);
+    const fingerprint = JSON.stringify(part ?? null);
     desiredKeys.add(key);
     let element = existing.get(key);
-    if (!element || element.dataset.messageFingerprint !== fingerprint) {
-      const replacement = createMessageElement(part, key, fingerprint);
+    if (!element || state.messageFingerprints.get(key) !== fingerprint) {
+      state.messageFingerprints.set(key, fingerprint);
+      const replacement = createMessageElement(part, key);
       if (element) element.remove();
       element = replacement;
       changed = true;
@@ -1268,6 +1251,7 @@ function renderChat(data: Bootstrap) {
   for (const [key, element] of existing) {
     if (!desiredKeys.has(key)) {
       element.remove();
+      state.messageFingerprints.delete(key);
       changed = true;
     }
   }
@@ -1293,21 +1277,15 @@ function messageKey(part: JsonMap, index: number) {
   return String(part.id || part.sortKey || `${part.role || 'system'}:${part.type || 'text'}:${part.timestamp || index}`);
 }
 
-function createMessageElement(part: JsonMap, key: string, fingerprint: string) {
+function createMessageElement(part: JsonMap, key: string) {
   const template = document.createElement('template');
   template.innerHTML = messageHtml(part).trim();
   const element = template.content.firstElementChild as HTMLElement | null;
   if (!element) throw new Error(`Unable to render message ${key}`);
   element.dataset.messageKey = key;
-  element.dataset.messageFingerprint = fingerprint;
   bindToolCards(element);
   hydrateIcons(element);
   return element;
-}
-
-function renderRuntimeSettings(settings: JsonMap | null | undefined) {
-  const graphDepth = settings?.knowledgeGraphExtractionDepth ?? 2;
-  if (els.graphExtractionDepthInput.value !== String(graphDepth)) els.graphExtractionDepthInput.value = String(graphDepth);
 }
 
 function renderKgCta(data: Bootstrap) {
@@ -1383,13 +1361,15 @@ function syncSettingsFromBootstrap(data: Bootstrap) {
   state.settings.mainProtocol = main.protocol || '';
   state.settings.mainModel = main.model || '';
   state.settings.mainBaseUrl = main.baseUrl || '';
-  // apiKey is masked (e.g. "****1234"); never seed the editor with a real value
+  // apiKey is masked (e.g. "****1234"); the editor starts empty on each seed
+  state.settings.mainApiKey = '';
 
   const graph = data.knowledgeGraphLlmConfig?.config || {};
   state.settings.graphAuthMode = graph.authMode || 'manual';
   state.settings.graphProtocol = graph.protocol || '';
   state.settings.graphModel = graph.model || '';
   state.settings.graphBaseUrl = graph.baseUrl || '';
+  state.settings.graphApiKey = '';
 
   // The reference feature extractor is built by the main session; no
   // independent LLM config is needed. The validated tool status is
@@ -1399,9 +1379,18 @@ function syncSettingsFromBootstrap(data: Bootstrap) {
 function renderSettings(data: Bootstrap) {
   if (state.view !== 'settings') return;
   if (!data) return;
-  syncSettingsFromBootstrap(data);
-  const ws = data.state || {};
+  // The readout section has no inputs and can re-render on state updates.
+  // The form section renders only when the view mounts or after an explicit
+  // re-render, so in-progress edits survive every background update.
+  renderStable('settings-workspace', [data.variant, data.state, data.dryRun, data.debugEnabled, data.runtime?.workspaceUv], () => renderSettingsWorkspace(data));
+  renderStable('settings-form', [state.settingsFormVersion], () => {
+    syncSettingsFromBootstrap(data);
+    renderSettingsForm();
+  });
+}
 
+function renderSettingsWorkspace(data: Bootstrap) {
+  const ws = data.state || {};
   const workspaceRows = [
     { label: '流程版本', value: variantPill(data.variant) },
     { label: '当前节点', value: ws.activeNode
@@ -1418,10 +1407,7 @@ function renderSettings(data: Bootstrap) {
     { label: '工作区路径', value: `<span class="settings-readout-mono">${escapeHtml(data.runtime?.workspaceUv?.workspace || '')}</span>`, copyable: data.runtime?.workspaceUv?.workspace || '' },
   ];
 
-  const kOptions = [1, 2, 3, 4, 5, 6, 7, 8];
-  const depthOptions = [1, 2, 3, 4];
-
-  els.settingsContent.innerHTML = `
+  els.settingsWorkspaceSection.innerHTML = `
     <div class="settings-section">
       <div class="settings-section-header">工作区</div>
       <div class="settings-card">
@@ -1441,7 +1427,15 @@ function renderSettings(data: Bootstrap) {
       </div>
       <p class="settings-section-foot">这些项目由服务启动参数决定，例如 <code>TS_HARNESS_VARIANT</code>、<code>TS_HARNESS_CONTROL_MODE</code>、<code>TS_HARNESS_DRY_RUN</code> 和 <code>TS_HARNESS_DEBUG</code>。如需修改，请重启服务。</p>
     </div>
+  `;
+  hydrateIcons(els.settingsWorkspaceSection);
+}
 
+function renderSettingsForm() {
+  const kOptions = [1, 2, 3, 4, 5, 6, 7, 8];
+  const depthOptions = [1, 2, 3, 4];
+
+  els.settingsFormSection.innerHTML = `
     <div class="settings-section">
       <div class="settings-section-header">运行参数</div>
       <div class="settings-card">
@@ -1451,7 +1445,7 @@ function renderSettings(data: Bootstrap) {
             <div class="settings-row-help">迭代求解节点每一轮会并行提出多少个方法候选。</div>
           </div>
           <div class="settings-row-control">
-            ${segmentedHtml('iterativeK', kOptions.map(String), String(state.settings.iterativeK), (v) => v)}
+            ${segmentedHtml('iterativeK', kOptions.map(String), String(state.settings.iterativeK))}
           </div>
         </div>
         <div class="settings-row">
@@ -1460,7 +1454,7 @@ function renderSettings(data: Bootstrap) {
             <div class="settings-row-help">参考知识构建器从每个来源向外追踪的层数。</div>
           </div>
           <div class="settings-row-control">
-            ${segmentedHtml('graphDepth', depthOptions.map(String), String(state.settings.graphDepth), (v) => v)}
+            ${segmentedHtml('graphDepth', depthOptions.map(String), String(state.settings.graphDepth))}
           </div>
         </div>
       </div>
@@ -1471,7 +1465,7 @@ function renderSettings(data: Bootstrap) {
   `;
 
   bindSettingsHandlers();
-  hydrateIcons(els.settingsContent);
+  hydrateIcons(els.settingsFormSection);
 }
 
 function renderLlmSection(prefix: 'graph' | 'main', title: string, description: string, isMain = false): string {
@@ -1503,11 +1497,11 @@ function renderLlmSection(prefix: 'graph' | 'main', title: string, description: 
       <div class="settings-card">
         <div class="settings-row">
           <div class="settings-row-label">认证方式</div>
-          <div class="settings-row-control">${segmentedHtml(`${prefix}AuthMode`, authOptions.map((o) => o.value), authValue, (v) => v, authOptions.map((o) => o.label))}</div>
+          <div class="settings-row-control">${segmentedHtml(`${prefix}AuthMode`, authOptions.map((o) => o.value), authValue, authOptions.map((o) => o.label))}</div>
         </div>
         <div class="settings-row">
           <div class="settings-row-label">接口协议</div>
-          <div class="settings-row-control">${segmentedHtml(`${prefix}Protocol`, protocolOptions.map((o) => o.value), protocolValue, (v) => v, protocolOptions.map((o) => o.label))}</div>
+          <div class="settings-row-control">${segmentedHtml(`${prefix}Protocol`, protocolOptions.map((o) => o.value), protocolValue, protocolOptions.map((o) => o.label))}</div>
         </div>
         <div class="settings-row">
           <div class="settings-row-label">模型</div>
@@ -1532,11 +1526,11 @@ function renderLlmSection(prefix: 'graph' | 'main', title: string, description: 
   `;
 }
 
-function segmentedHtml(group: string, values: string[], current: string, format: (v: string) => string = (v) => v, labels: string[] | null = null): string {
+function segmentedHtml(group: string, values: string[], current: string, labels: string[] | null = null): string {
   return `
     <div class="settings-segmented" data-segmented-group="${escapeHtml(group)}" role="group">
       ${values.map((v, i) => {
-        const label = labels ? labels[i] : format(v);
+        const label = labels ? labels[i] : v;
         const selected = (current || '') === v ? 'selected' : '';
         return `<button type="button" class="settings-segmented-item ${selected}" data-value="${escapeHtml(v)}">${escapeHtml(label)}</button>`;
       }).join('')}
@@ -1548,17 +1542,17 @@ function bindSettingsHandlers() {
   for (const group of els.settingsContent.querySelectorAll<HTMLElement>('[data-segmented-group]')) {
     const name = group.dataset.segmentedGroup || '';
     for (const item of group.querySelectorAll<HTMLButtonElement>('.settings-segmented-item')) {
-      item.addEventListener('click', () => {
+      item.addEventListener('click', async () => {
         const value = item.dataset.value || '';
         for (const sibling of group.querySelectorAll<HTMLButtonElement>('.settings-segmented-item')) {
           sibling.classList.toggle('selected', sibling === item);
         }
         if (name === 'iterativeK') {
           state.settings.iterativeK = Number(value) || 3;
-          saveRuntimeSettings();
+          await saveRuntimeSettings();
         } else if (name === 'graphDepth') {
           state.settings.graphDepth = Number(value) || 2;
-          saveRuntimeSettings();
+          await saveRuntimeSettings();
         } else if (name === 'graphAuthMode') state.settings.graphAuthMode = value;
         else if (name === 'graphProtocol') state.settings.graphProtocol = value;
         else if (name === 'mainAuthMode') state.settings.mainAuthMode = value;
@@ -1614,11 +1608,13 @@ function bindSettingsHandlers() {
 }
 
 async function saveRuntimeSettings() {
-  const result = await postJson('/api/runtime-settings', {
-    iterativeCandidateCount: state.settings.iterativeK,
-    knowledgeGraphExtractionDepth: state.settings.graphDepth,
+  await runAction(async () => {
+    const result = await postJson('/api/runtime-settings', {
+      iterativeCandidateCount: state.settings.iterativeK,
+      knowledgeGraphExtractionDepth: state.settings.graphDepth,
+    });
+    applyBootstrapSnapshot(result.bootstrap);
   });
-  applyBootstrapSnapshot(result.bootstrap);
 }
 
 async function saveLlmConfig(isMain: boolean) {
@@ -1640,8 +1636,7 @@ async function saveLlmConfig(isMain: boolean) {
         baseUrl: s.graphBaseUrl,
       };
   try {
-    const url = isMain ? '/api/llm-config' : '/api/knowledge-graph/llm-config';
-    const result = await postJson(url, body);
+    const result = await postJson(isMain ? '/api/llm-config' : '/api/knowledge-graph/llm-config', body);
     applyBootstrapSnapshot(result.bootstrap);
     // Clear the password field after a successful save.
     if (isMain) {
@@ -1677,6 +1672,7 @@ async function resetMainLlmConfig() {
       baseUrl: '',
     });
     syncSettingsFromBootstrap(result.bootstrap);
+    state.settingsFormVersion += 1;
     applyBootstrapSnapshot(result.bootstrap);
   } catch (error) {
     showDetail('恢复主模型失败', { message: error instanceof Error ? error.message : String(error) });
@@ -1742,16 +1738,14 @@ function renderChainSummary(data: Bootstrap) {
     ? summary.iterations.reduce((count: number, iteration: JsonMap) => count + (Array.isArray(iteration.sampleInspirations) ? iteration.sampleInspirations.length : 0), 0)
     : 0;
   els.buildChainSummaryBtn.disabled = running;
-  const statusSignature = stableStringify({
+  renderStable('chain-status', {
     status: build.status || 'idle',
     running,
     message: build.message || '',
     iterations,
     metrics,
     samples,
-  });
-  if (statusSignature !== state.chainStatusSignature) {
-    state.chainStatusSignature = statusSignature;
+  }, () => {
     els.chainBuildStatus.innerHTML = `
     <div class="chain-status-main">
       <span class="mini-pill ${build.status === 'failed' ? 'failed' : running ? 'active' : build.status === 'completed' ? 'ready' : 'pending'}">
@@ -1766,13 +1760,9 @@ function renderChainSummary(data: Bootstrap) {
       <span><strong>${escapeHtml(samples)}</strong><small>样本</small></span>
     </div>
   `;
-  }
-  const chartSignature = stableStringify(summary.metricSeries || []);
-  if (chartSignature !== state.chainChartSignature) {
-    state.chainChartSignature = chartSignature;
-    renderChainMetricChart(summary.metricSeries || []);
-  }
-  const contentSignature = stableStringify({
+  });
+  renderStable('chain-chart', summary.metricSeries || [], () => renderChainMetricChart(summary.metricSeries || []));
+  renderStable('chain-content', {
     status: build.status || '',
     message: build.status === 'failed' ? build.message || '' : '',
     title: summary.title || '',
@@ -1780,11 +1770,7 @@ function renderChainSummary(data: Bootstrap) {
     overview: summary.overview || '',
     uncertainty: summary.uncertainty || [],
     iterations: summary.iterations || [],
-  });
-  if (contentSignature !== state.chainContentSignature) {
-    state.chainContentSignature = contentSignature;
-    renderChainContent(summary, build);
-  }
+  }, () => renderChainContent(summary, build));
   renderChainNav(summary, build);
   renderChainNavState();
 }
@@ -1996,7 +1982,7 @@ function chainIterationHtml(iteration: JsonMap, index: number, total: number) {
       <div class="detail-section-title"><span class="chain-section-index">2</span><span>样本启发</span></div>
       ${samples.length ? `<div class="chain-samples">${samples.map(chainSampleHtml).join('')}</div>` : emptyState('没有记录样本级启发。', 'Info')}
       </section>
-      ${nextDecisionHtml(iteration.nextDecision || { decision: iteration.nextStep || '' })}
+      ${nextDecisionHtml(iteration.nextDecision || {})}
     </article>
     ${index < total - 1 ? `
       <div class="chain-transition-arrow" aria-label="该决策指导下一轮提出方法">
@@ -2034,7 +2020,7 @@ function nextDecisionHtml(decision: JsonMap) {
             </article>
           `).join('')}
         </div>
-      ` : `<div class="chain-decision-missing">${decision.legacy ? '这是旧版报告，未记录领域知识与决策的映射。请重新生成思维链总结。' : '未记录领域知识与决策的映射。'}</div>`}
+      ` : `<div class="chain-decision-missing">未记录领域知识与决策的映射。</div>`}
       <div class="chain-decision-subtitle">下一轮执行与验证</div>
       ${actions.length ? `
         <div class="chain-action-list">
@@ -2142,7 +2128,6 @@ function renderImageViewer() {
 
 function renderKnowledgeGraphBuilder(data: Bootstrap) {
   const build = data.knowledgeGraphBuild || {};
-  const config = data.knowledgeGraphLlmConfig?.config || {};
   const running = Boolean(data.runtime?.knowledgeGraphRunning || build.running);
   const knowledgeEnabled = data.variant?.capabilities?.knowledgeGraph !== false;
   const canContinue = !running && ['paused', 'failed'].includes(String(build.status || ''));
@@ -2154,10 +2139,6 @@ function renderKnowledgeGraphBuilder(data: Bootstrap) {
     </span>
     <span class="meta">${escapeHtml(graphBuildMessage(build.message || ''))}</span>
   `;
-  if (els.graphAuthMode.value !== (config.authMode || 'manual')) els.graphAuthMode.value = config.authMode || 'manual';
-  if (els.graphProtocol.value !== (config.protocol || '')) els.graphProtocol.value = config.protocol || '';
-  if (els.graphModelInput.value !== (config.model || '')) els.graphModelInput.value = config.model || '';
-  if (els.graphBaseUrlInput.value !== (config.baseUrl || '')) els.graphBaseUrlInput.value = config.baseUrl || '';
   els.buildGraphBtn.querySelector('span:last-child')!.textContent = hasGraph ? '更新' : '构建';
   els.graphLeftActions.classList.toggle('has-graph', hasGraph);
   els.buildGraphBtn.disabled = running || !knowledgeEnabled;
@@ -2165,8 +2146,6 @@ function renderKnowledgeGraphBuilder(data: Bootstrap) {
   els.rebuildGraphBtn.disabled = running || !knowledgeEnabled;
   els.continueGraphBtn.disabled = !canContinue || !knowledgeEnabled;
   els.pauseGraphBtn.disabled = !running || !knowledgeEnabled;
-  els.graphExtractionDepthInput.disabled = running || !knowledgeEnabled;
-  els.saveGraphLlmBtn.disabled = !knowledgeEnabled;
 }
 
 function hasKnowledgeGraph(graph: JsonMap | null | undefined) {
@@ -2292,7 +2271,8 @@ function knowledgeBaseCardHtml(card: JsonMap) {
   `;
 }
 
-function renderBuilderTrace(parts: JsonMap[], target: HTMLElement = els.builderTrace) {
+function renderBuilderTrace(parts: JsonMap[]) {
+  const target = els.builderTrace;
   const wasNearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 120;
   const savedScroll = target.scrollTop;
   const visible = normalizeChatParts((parts || []).map((part) => ({ ...part, sourceLabel: 'builder' }))).slice(-80);
@@ -2414,8 +2394,6 @@ function graphEmptyNotes(graph: JsonMap | null | undefined) {
   }
   return raw;
 }
-
-const graphNodeTypes = ['task', 'concept', 'observable', 'method', 'metric', 'risk', 'assumption', 'data_field', 'case_pattern', 'reference'];
 
 function graphNetworkLayout(nodes: JsonMap[], edges: JsonMap[], selectedId: string) {
   const width = 1280;
@@ -2614,7 +2592,7 @@ function shortGraphLabel(value: string, maxLength = 18) {
 function messageHtml(part: JsonMap) {
   const role = part.role || 'system';
   const roleClass = ['user', 'assistant', 'system', 'tool'].includes(role) ? role : 'system';
-  const text = part.displayText || part.text || summarizeRaw(part.raw) || '';
+  const text = part.displayText || part.text || '';
   const source = part.sourceLabel ? `${sourceLabel(part.sourceLabel)} · ` : '';
   if (part.type === 'loading') {
     return `
@@ -2624,7 +2602,7 @@ function messageHtml(part: JsonMap) {
       </article>
     `;
   }
-  if (part.type === 'tool_call' || part.type === 'tool_use' || part.type === 'tool_result') {
+  if (part.type === 'tool_call' || part.type === 'tool_result') {
     const summary = toolSummary(part);
     const detail = toolDetail(part);
     const toolName = toolNameForPart(part);
@@ -2635,7 +2613,7 @@ function messageHtml(part: JsonMap) {
     return `
       <article class="message ${escapeHtml(roleClass)} tool-collapsed${expanded ? ' expanded' : ''}" data-part-id="${escapeHtml(partId)}">
         <button class="tool-card${expanded ? ' expanded' : ''}" type="button" data-tool-toggle>
-          <span class="tool-status ${failed ? 'failed' : done ? 'done' : 'running'}"><span data-icon="${failed ? 'CircleX' : done ? 'Check' : 'TerminalSquare'}"></span></span>
+          <span class="tool-status ${failed ? 'failed' : done ? 'done' : 'running'}"><span data-icon="${failed ? 'XCircle' : done ? 'Check' : 'TerminalSquare'}"></span></span>
           <span class="tool-copy">
             <span class="tool-title">${escapeHtml(summary)}</span>
             <span class="tool-meta">${escapeHtml(source)}${escapeHtml(toolName)} · ${escapeHtml(partTypeLabel(part.type || 'tool'))} · ${formatTime(part.timestamp)}</span>
@@ -2659,15 +2637,7 @@ function toolSummary(part: JsonMap) {
     const intend = typeof part.intend === 'string' && part.intend.trim() ? part.intend.trim() : '';
     return intend || `调用工具：${toolNameForPart(part)}`;
   }
-  if (part.type === 'tool_use') {
-    const name = part.name || part.raw?.message?.content?.find?.((block: JsonMap) => block.type === 'tool_use')?.name || 'tool';
-    const input = part.input || part.raw?.message?.content?.find?.((block: JsonMap) => block.type === 'tool_use')?.input;
-    const intend = input?.intend;
-    if (typeof intend === 'string' && intend.trim()) return intend.trim();
-    const hint = input && typeof input === 'object' ? Object.keys(input).slice(0, 3).join(', ') : '';
-    return hint ? `调用工具：${name} (${hint})` : `调用工具：${name}`;
-  }
-  const text = part.displayText || part.text || '';
+  const text = part.resultText || part.displayText || part.text || '';
   const firstLine = text.split('\n').find((line: string) => line.trim()) || '工具结果';
   return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
 }
@@ -2684,20 +2654,18 @@ function toolDetail(part: JsonMap) {
       '调用参数:',
       JSON.stringify(part.input ?? {}, null, 2),
     ];
-    if (part.status === 'completed' || part.resultText || part.resultRaw) {
-      chunks.push('', '调用结果:', part.resultText || toolResultTextFromRaw(part.resultRaw) || summarizeRaw(part.resultRaw) || '');
+    if (part.status === 'completed' || part.resultText) {
+      chunks.push('', '调用结果:', part.resultText || '');
     } else {
       chunks.push('', '调用结果:', '等待工具返回结果。');
     }
     return chunks.join('\n');
   }
-  return part.displayText || part.text || summarizeRaw(part.raw) || '';
+  return part.resultText || part.displayText || part.text || '';
 }
 
 function toolNameForPart(part: JsonMap) {
-  if (part.name) return part.name;
-  const toolBlock = part.raw?.message?.content?.find?.((block: JsonMap) => block.type === 'tool_use');
-  return toolBlock?.name || part.raw?.tool_name || 'tool';
+  return part.name || 'tool';
 }
 
 function collectTranscriptParts(data: Bootstrap): JsonMap[] {
@@ -2769,7 +2737,7 @@ function normalizeChatParts(parts: JsonMap[]): JsonMap[] {
           displayText: failureText,
         };
       }
-      if (!isDisplayableSessionPart(part) || isReasoningOnlyPart(part)) return null;
+      if (!isDisplayableSessionPart(part)) return null;
       const displayText = displayTextForPart(part);
       return displayText.trim() ? { ...part, displayText } : null;
     })
@@ -2779,67 +2747,24 @@ function normalizeChatParts(parts: JsonMap[]): JsonMap[] {
 function isDisplayableSessionPart(part: JsonMap): boolean {
   if (part.type === 'loading') return true;
   // Semantic tool cards carry a concise intend, parameters, status, and
-  // result. Raw JSON-RPC events remain implementation/audit data and are
-  // hidden below.
+  // result.
   if (part.type === 'tool_call' || part.type === 'tool_result') return true;
-  if (part.type === 'tool_use') return false;
-  if (part.role === 'system' && part.type === 'raw') return false;
-  // A successful SDK result is a transport marker rather than user-facing
+  // A successful turn result is a transport marker rather than user-facing
   // content.  Failures are converted to a readable system message above.
-  if (part.role === 'system' && part.type === 'result') return part.raw?.is_error === true;
+  if (part.role === 'system' && part.type === 'result') return part.status === 'failed';
   return true;
 }
 
 function protocolFailureText(part: JsonMap): string {
-  const dshError = dshToolResultFailureText(part.raw);
-  if (dshError) return `工具执行失败：${dshError}`;
-  const toolPart = part.type === 'tool_use' || part.type === 'tool_result';
-  const failed = part.status === 'failed' || part.raw?.is_error === true || part.raw?.isError === true;
-  if (!toolPart || !failed) return '';
-  const detail = String(part.resultText || toolResultTextFromRaw(part.raw) || part.text || '').trim();
+  const toolPart = part.type === 'tool_call' || part.type === 'tool_result';
+  if (!toolPart || part.status !== 'failed') return '';
+  const detail = String(part.resultText || part.text || '').trim();
   return detail ? `工具执行失败：${detail}` : '工具执行失败。';
-}
-
-function dshToolResultFailureText(raw: any): string {
-  if (raw?.type !== 'tool/result') return '';
-  const content = raw?.data?.message?.content;
-  if (!Array.isArray(content)) return '';
-  const failure = content.find((item: JsonMap) => item?.type === 'tool-result' && item.isError === true);
-  if (!failure) return '';
-  return dshContentText(failure.content) || '未提供错误详情。';
-}
-
-function dshContentText(content: any): string {
-  if (typeof content === 'string') return content.trim();
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((item: any) => typeof item === 'string' ? item : typeof item?.text === 'string' ? item.text : '')
-    .filter(Boolean)
-    .join('\n')
-    .trim();
 }
 
 function displaySafeSessionParts(parts: unknown): JsonMap[] {
   if (!Array.isArray(parts)) return [];
-  return normalizeChatParts(parts as JsonMap[]).map(({ raw, resultRaw, ...part }) => part);
-}
-
-function isReasoningOnlyPart(part: JsonMap): boolean {
-  if (part.role !== 'assistant' || part.type !== 'text') return false;
-  if (typeof part.text === 'string' && part.text.trim()) return false;
-  const content = Array.isArray(part.raw?.message?.content)
-    ? part.raw.message.content
-    : Array.isArray(part.raw?.content)
-      ? part.raw.content
-      : [];
-  if (!content.length) return false;
-  return content.every((item: JsonMap | string) => {
-    if (typeof item === 'string') return !item.trim();
-    if (!item || typeof item !== 'object') return false;
-    if (typeof item.text === 'string' && item.text.trim()) return false;
-    if (item.type === 'tool_use' || item.type === 'tool_result' || item.name || item.input || item.tool_use_id) return false;
-    return Boolean(item.thinking || item.signature || item.redacted_thinking);
-  });
+  return normalizeChatParts(parts as JsonMap[]);
 }
 
 function displayTextForPart(part: JsonMap) {
@@ -2847,29 +2772,14 @@ function displayTextForPart(part: JsonMap) {
   if (part.type === 'tool_call') {
     return part.intend || `调用工具：${toolNameForPart(part)}`;
   }
-  if (part.type === 'tool_use') {
-    const name = part.name || part.raw?.message?.content?.find?.((block: JsonMap) => block.type === 'tool_use')?.name || 'tool';
-    const input = part.input || part.raw?.message?.content?.find?.((block: JsonMap) => block.type === 'tool_use')?.input;
-    return input ? `调用工具：${name}\n${JSON.stringify(input, null, 2)}` : `调用工具：${name}`;
-  }
   if (part.type === 'tool_result') {
-    const result = part.raw?.tool_use_result;
-    if (result?.filenames) {
-      const files = result.filenames.slice(0, 20).join('\n');
-      const more = result.truncated ? `\n... (${result.numFiles} files total)` : '';
-      return result.filenames.length ? `工具结果：\n${files}${more}` : '工具结果：未找到文件';
-    }
-    const rawText = toolResultTextFromRaw(part.raw);
-    if (rawText) return rawText;
-    return part.text === 'Tool result' ? '' : part.text || '';
-  }
-  if (part.role === 'system' && part.type === 'raw') {
-    const subtype = part.raw?.subtype || part.text || '';
-    if (subtype === 'api_retry') return `API retry: attempt ${part.raw?.attempt ?? '?'}/${part.raw?.max_retries ?? '?'}`;
-    return subtype;
+    const result = part.resultText || part.text || '';
+    // An empty result is transported as the placeholder "Tool result"; the
+    // card then carries no user-facing text.
+    return result === 'Tool result' ? '' : result;
   }
   if (part.role === 'system' && part.type === 'result') {
-    if (part.raw?.is_error) return part.raw?.result || part.text || '错误';
+    if (part.status === 'failed') return part.resultText || part.text || '错误';
     return '';
   }
   return part.text || '';
@@ -2965,25 +2875,21 @@ async function showWorkspaceFile(path: string) {
 
 function updateControls(data: Bootstrap) {
   const ws = data.state || {};
-  const activeSession = getActiveNodeSession(data);
-  const activePaused = Boolean(ws.activeNode && activeSession?.status === 'paused');
-  const activeRunning = Boolean(ws.activeNode && activeSession?.status === 'running');
-  const executionPhase = String(data.execution?.phase || 'ready');
-  const pauseWaiting = executionPhase === 'pausing';
+  const canContinue = Boolean(data.execution?.canContinue);
   const pendingControl = Boolean(ws.pendingControl);
-  els.sendBtn.disabled = state.busy || (Boolean(ws.activeNode) && !activePaused);
-  els.messageInput.disabled = state.busy || (Boolean(ws.activeNode) && !activePaused);
-  els.messageInput.placeholder = activePaused
+  els.sendBtn.disabled = state.busy || (Boolean(ws.activeNode) && !canContinue);
+  els.messageInput.disabled = state.busy || (Boolean(ws.activeNode) && !canContinue);
+  els.messageInput.placeholder = canContinue
     ? '补充说明后点击 Resume，当前 node 会继续执行'
     : '向任务编排器发送消息';
-  els.interruptBtn.disabled = pauseWaiting || (!state.busy && !activeRunning);
-  els.interruptBtn.hidden = !state.busy && !activeRunning;
-  els.forceStopBtn.hidden = executionPhase !== 'pausing';
+  els.interruptBtn.disabled = !data.execution?.canPause;
+  els.interruptBtn.hidden = !data.execution?.canPause;
+  els.forceStopBtn.hidden = !data.execution?.canForceStop;
   els.uploadBtn.disabled = state.busy;
   els.rawZipUploadBtn.disabled = state.busy;
   els.approveControlBtn.disabled = state.busy || !pendingControl;
   els.rejectControlBtn.disabled = state.busy || !pendingControl;
-  updateSendButton(activePaused);
+  updateSendButton(canContinue);
 }
 
 function getActiveNodeSession(data: Bootstrap) {
@@ -3292,10 +3198,6 @@ function isPausedResumeSettling(message: string): boolean {
   return message.includes('still settling') || message.includes('already active');
 }
 
-async function waitForBackendIdle(timeoutMs: number) {
-  await waitForRealtimeState((data) => !data.runtime?.running, timeoutMs);
-}
-
 function waitForRealtimeState(predicate: (data: Bootstrap) => boolean, timeoutMs?: number) {
   if (state.bootstrap && predicate(state.bootstrap)) return Promise.resolve(state.bootstrap);
   return new Promise<Bootstrap>((resolve, reject) => {
@@ -3319,12 +3221,6 @@ function resolveRealtimeWaiters(data: Bootstrap) {
     state.realtimeWaiters = state.realtimeWaiters.filter((candidate) => candidate !== waiter);
     waiter.resolve(data);
   }
-}
-
-function isActiveNodePaused(data: Bootstrap | null): boolean {
-  if (!data?.state?.activeNodeSessionId) return false;
-  const node = (data.nodes || []).find((item) => item.id === data.state.activeNodeSessionId);
-  return node?.status === 'paused';
 }
 
 function sleep(ms: number) {
@@ -3354,38 +3250,6 @@ function updateReferenceDeleteButton(path: string) {
 
 function isReferenceFilePath(path: string) {
   return path.startsWith('references/') && !path.endsWith('/');
-}
-
-function summarizeRaw(raw: any) {
-  if (!raw) return '';
-  if (raw.subtype) return raw.subtype;
-  if (raw.type) return raw.type;
-  return JSON.stringify(raw);
-}
-
-function toolResultTextFromRaw(raw: any): string {
-  const content = raw?.message?.content ?? raw?.content;
-  return extractToolResultText(content);
-}
-
-function extractToolResultText(value: any): string {
-  if (typeof value === 'string') return value.trim();
-  if (!Array.isArray(value)) return '';
-  const parts: string[] = [];
-  for (const item of value) {
-    if (typeof item === 'string') {
-      if (item.trim()) parts.push(item.trim());
-      continue;
-    }
-    if (!item || typeof item !== 'object') continue;
-    if (typeof item.text === 'string' && item.text.trim()) {
-      parts.push(item.text.trim());
-      continue;
-    }
-    const nested = extractToolResultText(item.content);
-    if (nested) parts.push(nested);
-  }
-  return parts.join('\n');
 }
 
 function formatMetricValue(value: number) {
@@ -3418,13 +3282,9 @@ function unique(values: any[]) {
 }
 
 function resetChainRenderSignatures() {
-  state.chainStatusSignature = '';
-  state.chainChartSignature = '';
-  state.chainContentSignature = '';
-}
-
-function stableStringify(value: any) {
-  return JSON.stringify(value ?? null);
+  state.renderSignatures.delete('chain-status');
+  state.renderSignatures.delete('chain-chart');
+  state.renderSignatures.delete('chain-content');
 }
 
 function sortByKey(a: JsonMap, b: JsonMap) {

@@ -3514,6 +3514,17 @@ dialog pre {
   line-height: 1.45;
 }
 
+.connection-banner {
+  margin: 10px 18px 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(196, 49, 45, 0.3);
+  border-radius: 10px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
