@@ -57,7 +57,7 @@
 
 ## 第四节：重复实现
 
-experiments："拟合、预测、组装 segment"写了六遍；修正器预测、DM 检验、认证、`_aspect_lcb`、m0 岭回归各有两份；posthoc 把 `evaluate.py` 加载成两个模块对象。例外：`calibrations._BootstrapRefitM0.fit` 的 meta 校验块镜像 `m0.M0Adapter.fit`，按 2026-10-18 的裁决保留——消除它需要改动实验协议冻结面 `experiments/templates/m0.py`，先调 `super().fit()` 再覆盖权重会多付一次完整 ridge，且这几行只是参数检查，没有正确性风险。headroom：`_internal_split` 与 `_fit_ridge` 的切分重复；步长 16 写死两处。后端：LLM 配置清理三份（默认 `authMode` 各不相同）、`_bounded_int` 三份、关闭运行器的函数三份、三个重置函数各自维护删除列表。前端：图谱 LLM 配置两套表单且 payload 不一致；暂停按钮可用性由前端自行计算。测试：`_orchestrator` 辅助函数复制四份。
+experiments："拟合、预测、组装 segment"写了六遍；修正器预测、DM 检验、认证、`_aspect_lcb`、m0 岭回归各有两份；posthoc 把 `evaluate.py` 加载成两个模块对象。`calibrations._BootstrapRefitM0.fit` 的 meta 校验块镜像 `m0.M0Adapter.fit`：2026-10-18 先裁决保留（当时的理由是消除它要改 `experiments/templates/m0.py`），复核指出删除方案只需改 `calibrations.py`、模板不动，该前提不成立，改判删除。headroom：`_internal_split` 与 `_fit_ridge` 的切分重复；步长 16 写死两处。后端：LLM 配置清理三份（默认 `authMode` 各不相同）、`_bounded_int` 三份、关闭运行器的函数三份、三个重置函数各自维护删除列表。前端：图谱 LLM 配置两套表单且 payload 不一致；暂停按钮可用性由前端自行计算。测试：`_orchestrator` 辅助函数复制四份。
 
 ## 第五节：修改痕迹（违反 2.2）
 
