@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
-import json
 import secrets
 from pathlib import Path
 from typing import Any, Callable
@@ -96,13 +94,12 @@ class HarnessOrchestrator:
         self._active_node_task: asyncio.Task[None] | None = None
         self._realtime_event_sink: Callable[[str, dict[str, Any]], None] | None = None
         self._runtime_snapshot_provider: Callable[[], dict[str, Any]] | None = None
-        # The same semantic tool card is emitted once when it starts and
-        # again after its result has been merged into that card.  Cache the
-        # public payload, not only its id, so the latter update reaches SSE.
-        self._realtime_parts_cache: dict[str, str] = {}
+        # A part is re-emitted on SSE only when its public payload differs
+        # from the last emission for the same part id, e.g. when a merged
+        # tool result updates an existing tool card.
+        self._last_emitted_parts: dict[str, Part] = {}
         self._mcp_control_url: str | None = None
         self._mcp_capabilities: dict[str, dict[str, Any]] = {}
-        self._mcp_calls: dict[str, dict[str, str]] = {}
 
     def initialize(self, reporter: Callable[[str], None] | None = None) -> WorkspaceState:
         self.state = self.store.initialize(self.mode, reporter=reporter)
@@ -135,8 +132,8 @@ class HarnessOrchestrator:
         node = self.store.read_node_session(node_id) if node_id else None
         if self.store.read_execution() is None and node and node.get("status") == "running":
             raise RuntimeError(
-                "Legacy runtime workspace has a running node but no state/execution.json; "
-                "start a new runtime workspace instead of guessing its pause boundary."
+                "Workspace has a running node but no state/execution.json; its pause "
+                "boundary cannot be reconstructed. Reset the workflow before starting again."
             )
         if changed and node and node.get("status") == "running":
             node.update({"status": "paused", "pausedAt": now_iso(), "summary": "Paused after server restart; DSH will repair and resume the same session."})
@@ -187,6 +184,14 @@ class HarnessOrchestrator:
         """
         self._mcp_control_url = control_url.rstrip("/")
 
+    def _require_mcp_control_url(self) -> None:
+        if not self._mcp_control_url:
+            raise RuntimeError(
+                "Cannot start a DSH runner without an MCP control URL: its MCP tool calls "
+                "would have no route back to the orchestrator. Run the harness through "
+                "ts-harness-server, or use --dry-run for state-only operation."
+            )
+
     def _issue_mcp_capability(
         self,
         *,
@@ -194,8 +199,7 @@ class HarnessOrchestrator:
         allowed_tools: list[str],
         node_session_id: str | None = None,
     ) -> dict[str, str]:
-        if not self._mcp_control_url:
-            return {}
+        self._require_mcp_control_url()
         token = secrets.token_urlsafe(32)
         self._mcp_capabilities[token] = {
             "workspace": str(self.workspace_path.resolve()),
@@ -257,34 +261,6 @@ class HarnessOrchestrator:
         if not self._mcp_call_is_current(capability, node_session_id):
             raise RuntimeError("This MCP call was cancelled because its runner lease is no longer active.")
 
-    def _require_current_node_mcp_call(self, node_session_id: str, capability: str) -> None:
-        if not self._mcp_call_is_current(capability, node_session_id):
-            raise RuntimeError(
-                "This node MCP call was cancelled because its runner is no longer active."
-            )
-
-    @staticmethod
-    def _mcp_call_key(node_session_id: str | None) -> str:
-        return f"node:{node_session_id}" if node_session_id else "main"
-
-    def _active_mcp_tools(self, node_session_id: str | None) -> list[str]:
-        calls = self._mcp_calls.get(self._mcp_call_key(node_session_id), {})
-        return sorted(set(calls.values()))
-
-    def _begin_mcp_call(self, node_session_id: str | None, tool: str) -> str:
-        call_id = secrets.token_urlsafe(12)
-        self._mcp_calls.setdefault(self._mcp_call_key(node_session_id), {})[call_id] = tool
-        return call_id
-
-    def _end_mcp_call(self, node_session_id: str | None, call_id: str) -> None:
-        key = self._mcp_call_key(node_session_id)
-        calls = self._mcp_calls.get(key)
-        if not calls:
-            return
-        calls.pop(call_id, None)
-        if not calls:
-            self._mcp_calls.pop(key, None)
-
     async def dispatch_dsh_mcp_call(
         self,
         *,
@@ -301,57 +277,41 @@ class HarnessOrchestrator:
         loopback only and validates the per-runner capability before dispatch.
         """
         record = self._mcp_capabilities.get(capability)
-        if not record or not hmac.compare_digest(str(record["workspace"]), str(Path(workspace).resolve())):
+        if not record or str(record["workspace"]) != str(Path(workspace).resolve()):
             raise PermissionError("Invalid DeepSeek Harness MCP capability.")
         if record["role"] != role or record["nodeSessionId"] != (node_session_id or ""):
             raise PermissionError("DeepSeek Harness MCP capability is bound to a different session.")
-        execution = self.execution.snapshot()
-        if (
-            execution.get("phase") != "running"
-            or record.get("epoch") != execution.get("epoch")
-            or record.get("leaseId") != execution.get("leaseId")
-        ):
+        if not self._mcp_call_is_current(capability, node_session_id):
             raise PermissionError("DeepSeek Harness MCP capability lease is no longer active.")
         qualified_tool = f"mcp__ts_harness__{tool}"
         if qualified_tool not in record["allowedTools"]:
             raise PermissionError(f"DeepSeek Harness MCP tool is not allowed: {tool}")
-        if node_session_id:
-            self._require_current_node_mcp_call(node_session_id, capability)
-
-        call_id = self._begin_mcp_call(node_session_id, tool)
-        try:
-            if tool == "enter_node":
-                return await self.request_enter_node(args)
-            if tool == "query_knowledge":
-                return await self.request_query_knowledge(
-                    args,
-                    node_session_id=node_session_id,
-                    capability=capability,
-                )
-            if tool == "extract_reference_features":
-                return self.request_extract_reference_features(args)
-            if tool == "inspect_reference_feature_extractor":
-                return self.request_inspect_reference_feature_extractor(args)
-            if tool == "validate_reference_feature_extractor":
-                return await self.request_validate_reference_feature_extractor(args)
-            if tool == "finish_node":
-                if not node_session_id:
-                    raise PermissionError("finish_node requires a node-bound MCP capability.")
-                return await self.request_finish_node_for_node(args, node_session_id)
-            if tool in {"record_artifact", "record_run"}:
-                if not node_session_id:
-                    raise PermissionError(f"{tool} requires a node-bound MCP capability.")
-                node = self.store.read_node_session(node_session_id)
-                if not node:
-                    raise RuntimeError("Unknown active node session.")
-                if tool == "record_artifact":
-                    return self.record_artifact_for_node(args, node_session_id, node["nodeType"])
-                return self.record_run_for_node(args, node_session_id, node["nodeType"])
-            if tool == "get_runtime_settings":
-                return self.get_runtime_settings()
-            raise RuntimeError(f"Unknown DeepSeek Harness MCP tool: {tool}")
-        finally:
-            self._end_mcp_call(node_session_id, call_id)
+        if tool == "enter_node":
+            return await self.request_enter_node(args)
+        if tool == "query_knowledge":
+            return await self.request_query_knowledge(
+                args,
+                node_session_id=node_session_id,
+                capability=capability,
+            )
+        if tool == "extract_reference_features":
+            return self.request_extract_reference_features(args)
+        if tool == "inspect_reference_feature_extractor":
+            return self.request_inspect_reference_feature_extractor(args)
+        if tool == "validate_reference_feature_extractor":
+            return await self.request_validate_reference_feature_extractor(args)
+        if tool == "finish_node":
+            return await self.request_finish_node(args)
+        if tool in {"record_artifact", "record_run"}:
+            node = self.store.read_node_session(node_session_id)
+            if not node:
+                raise RuntimeError("Unknown active node session.")
+            if tool == "record_artifact":
+                return self.record_artifact_for_node(args, node_session_id, node["nodeType"])
+            return self.record_run_for_node(args, node_session_id, node["nodeType"])
+        if tool == "get_runtime_settings":
+            return self.get_runtime_settings()
+        raise RuntimeError(f"Unknown DeepSeek Harness MCP tool: {tool}")
 
     def _emit_realtime(self, event_type: str, payload: dict[str, Any]) -> None:
         if self._realtime_event_sink:
@@ -373,8 +333,9 @@ class HarnessOrchestrator:
     def _emit_node_parts(self, node_id: str, _part: Part) -> None:
         part = public_display_part(_part)
         cache_key = f"node_parts:{node_id}:{part.get('id')}"
-        if not self._part_changed(cache_key, part):
+        if self._last_emitted_parts.get(cache_key) == part:
             return
+        self._last_emitted_parts[cache_key] = part
         self._emit_realtime("node_parts", {
             "nodePartById": {node_id: part},
             "nodes": self.get_node_sessions(),
@@ -385,23 +346,12 @@ class HarnessOrchestrator:
     def _emit_chain_summary_parts(self, _part: Part) -> None:
         self._emit_part_if_changed("chain_summary_parts", "chainSummaryPart", public_display_part(_part))
 
-    def _emit_reference_feature_parts(self, _part: Part) -> None:
-        # No-op: the reference feature extractor is now built by the main
-        # session, so the dedicated realtime stream is no longer used.
-        return
-
     def _emit_part_if_changed(self, event_type: str, payload_key: str, part: Part) -> None:
         cache_key = f"{event_type}:{part.get('id')}"
-        if not self._part_changed(cache_key, part):
+        if self._last_emitted_parts.get(cache_key) == part:
             return
+        self._last_emitted_parts[cache_key] = part
         self._emit_realtime(event_type, {payload_key: part})
-
-    def _part_changed(self, cache_key: str, part: Part) -> bool:
-        fingerprint = json.dumps(part, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        if self._realtime_parts_cache.get(cache_key) == fingerprint:
-            return False
-        self._realtime_parts_cache[cache_key] = fingerprint
-        return True
 
     async def send_main_user_message(self, text: str) -> list[Part]:
         self._ensure_initialized()
@@ -449,6 +399,8 @@ class HarnessOrchestrator:
     ) -> list[Part]:
         session_id = getattr(runner, "session_id", None) or f"ts-harness-{uuid4().hex}"
         setattr(runner, "session_id", session_id)
+        if getattr(runner, "config", None) is not None:
+            self._require_mcp_control_url()
         await self.execution.begin(actor_id, session_id)
         if getattr(runner, "config", None) is not None:
             self._rotate_runner_mcp_capability(runner)
@@ -487,7 +439,7 @@ class HarnessOrchestrator:
                     "nodeType": active["nodeType"],
                     "nodeStatus": active.get("status"),
                 }
-        node = await self.enter_node(args, background=True)
+        node = await self._start_node(args, background=True)
         return {"status": "started", "nodeSessionId": node["id"], "nodeType": node["nodeType"]}
 
     async def request_finish_node(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -503,43 +455,22 @@ class HarnessOrchestrator:
             return result
         return await self.finish_node(args)
 
-    async def request_finish_node_for_node(self, args: dict[str, Any], node_id: str) -> dict[str, Any]:
-        self._ensure_initialized()
-        assert self.state
-        active_id = self.state.get("activeNodeSessionId")
-        if active_id != node_id:
-            raise RuntimeError(
-                f"finish_node rejected: MCP session is bound to node {node_id}, "
-                f"but active node is {active_id or 'none'}."
-            )
-        node = self.store.read_node_session(node_id)
-        if not node or node.get("status") != "running":
-            raise RuntimeError(
-                f"finish_node rejected: node {node_id} is not running."
-            )
-        return await self.request_finish_node(args)
-
     async def enter_node(self, args: dict[str, Any], *, background: bool = False) -> NodeSession:
         self._ensure_initialized()
         assert self.state
-        node_type = args["nodeType"]
         if not self.variant.node_chain:
             raise RuntimeError(f"{self.variant.id} disables node entry.")
+        self._validate_failed_node_retry_request(args)
+        return await self._start_node(args, background=background)
+
+    async def _start_node(self, args: dict[str, Any], *, background: bool = False) -> NodeSession:
+        assert self.state
+        node_type = args["nodeType"]
         if node_type == "knowledge-to-tools" and not self.variant.knowledge_to_tools:
             raise RuntimeError(
                 f"{self.variant.id} disables the knowledge-to-tools node; the reference feature "
                 f"extractor is not built. Continue with iterative-solving directly."
             )
-        if node_type == "iterative-solving" and self.variant.max_iterations is not None:
-            prior_iterations = sum(
-                1
-                for session in self.store.list_node_sessions()
-                if session.get("nodeType") == "iterative-solving"
-            )
-            if prior_iterations >= self.variant.max_iterations:
-                raise RuntimeError(
-                    f"{self.variant.id} permits at most {self.variant.max_iterations} iterative-solving round(s)."
-                )
         if self.state["activeNode"]:
             raise RuntimeError(f"Cannot enter {node_type}; active node {self.state['activeNode']} is still running.")
         # Defensive: once the pipeline is fully complete (final-summary
@@ -555,7 +486,6 @@ class HarnessOrchestrator:
                 f"(completedNodes={self.state['completedNodes']}). "
                 f"Use the Reset Workspace action to clear state before re-running."
             )
-        self._validate_failed_node_retry_request(args)
         if node_type == "final-summary" and self._read_iteration_state_recommend_exit() is False:
             raise RuntimeError("Cannot enter final-summary while user/iteration-state.md has recommend_exit: false.")
         node = self.store.create_node_session(node_type, args.get("rationale"), args.get("inputSummary"))
@@ -631,7 +561,7 @@ class HarnessOrchestrator:
             # not close the captured runner a second time after its delayed
             # transport error has been reconciled.
             if runner is not None and self.active_node_runner is runner:
-                await self._close_node_runner_instance(runner, "node_turn_finished")
+                await self._close_active_node_runner("node_turn_finished")
             current = asyncio.current_task()
             if self._active_node_task is current:
                 self._active_node_task = None
@@ -639,24 +569,6 @@ class HarnessOrchestrator:
             latest = self.store.read_node_session(node["id"]) or node
             await self._maybe_auto_enter_next_node(latest)
         self._emit_runtime_snapshot()
-
-    async def _close_node_runner_instance(self, runner: SdkRunner, reason: str) -> None:
-        """Close a captured runner without disturbing a successor node."""
-        if self.active_node_runner is runner:
-            self.active_node_runner = None
-        try:
-            if runner.is_running:
-                await runner.interrupt()
-            await runner.close()
-        except Exception:
-            pass
-        self._revoke_runner_mcp_capability(runner)
-        self.store.append_timeline({
-            "type": "active_node_runner_closed",
-            "timestamp": now_iso(),
-            "message": f"Active node runner closed for {reason}.",
-            "payload": {"reason": reason},
-        })
 
     async def finish_node(self, args: dict[str, Any]) -> dict[str, Any]:
         self._ensure_initialized()
@@ -699,12 +611,6 @@ class HarnessOrchestrator:
         self.state["activeNodeSessionId"] = None
         if node["nodeType"] == "problem-contract" and node["success"]:
             self.state["contractReady"] = True
-        if node["nodeType"] == "problem-contract" and args.get("goalMet"):
-            # Legacy field: it records the objective milestone, whereas
-            # contractReady records that the contract deliverables exist.
-            self.state["contractConfirmed"] = True
-        if node["nodeType"] == "final-summary" and args.get("goalMet"):
-            self.state["finalSummaryConfirmed"] = True
         self.store.write_state(self.state)
         self.store.append_timeline({
             "type": "node_finished",
@@ -728,46 +634,18 @@ class HarnessOrchestrator:
         next_node = self._next_node_after_completion(node) if node["success"] else None
         return {"nodeSessionId": node["id"], "nextNode": next_node}
 
-    def record_artifact(self, args: dict[str, Any]) -> dict[str, bool]:
-        self._ensure_initialized()
-        self._reject_reference_feature_case_review_artifact(args.get("path"))
-        self.store.record_artifact(args["path"], self.active_node_session.get("id") if self.active_node_session else None, self.active_node_session.get("nodeType") if self.active_node_session else None, args.get("summary"))
-        return {"ok": True}
-
     def record_artifact_for_node(self, args: dict[str, Any], node_id: str, node_type: NodeType) -> dict[str, bool]:
         self._ensure_initialized()
-        self._reject_reference_feature_case_review_artifact(args.get("path"), node_type=node_type)
-        node = self.store.read_node_session(node_id)
-        if node and node.get("status") == "paused":
-            raise RuntimeError(f"record_artifact rejected: node {node_id} is paused.")
-        event_type = "late_after_finish" if node and node.get("status") in {"completed", "failed", "exited"} else None
-        summary = args.get("summary")
-        if event_type:
-            summary = f"[{event_type}] {summary or args['path']}"
-        self.store.record_artifact(args["path"], node_id, node_type, summary)
-        return {"ok": True}
-
-    def record_run(self, args: RunRecord) -> dict[str, bool]:
-        self._ensure_initialized()
-        self._reject_reference_feature_case_review_run(args, self.active_node_session.get("nodeType") if self.active_node_session else None)
-        record = dict(args)
-        if self.active_node_session:
-            record.setdefault("nodeSessionId", self.active_node_session["id"])
-            record.setdefault("nodeType", self.active_node_session["nodeType"])
-        self.store.record_run(record)
+        self.node_state.reject_reference_feature_paths(node_type, [args.get("path")])
+        self.store.record_artifact(args["path"], node_id, node_type, args.get("summary"))
         return {"ok": True}
 
     def record_run_for_node(self, args: RunRecord, node_id: str, node_type: NodeType) -> dict[str, bool]:
         self._ensure_initialized()
-        self._reject_reference_feature_case_review_run(args, node_type)
+        self.node_state.reject_reference_feature_paths(node_type, [args.get("runId"), *(args.get("artifactPaths") or [])])
         record = dict(args)
         record["nodeSessionId"] = node_id
         record["nodeType"] = node_type
-        node = self.store.read_node_session(node_id)
-        if node and node.get("status") == "paused":
-            raise RuntimeError(f"record_run rejected: node {node_id} is paused.")
-        if node and node.get("status") in {"completed", "failed", "exited"}:
-            record["status"] = f"late_after_finish:{record.get('status', 'unknown')}"
         self.store.record_run(record)
         return {"ok": True}
 
@@ -778,18 +656,8 @@ class HarnessOrchestrator:
         node_session_id: str | None = None,
         capability: str | None = None,
     ) -> dict[str, Any]:
-        if not self.variant.knowledge_query:
-            raise RuntimeError(f"Knowledge queries are disabled by ablation variant {self.variant.id}.")
-        if self.variant.knowledge_query_source == "graph" and not self.store.is_knowledge_graph_ready():
-            raise RuntimeError("Knowledge graph is not ready. Build it successfully before calling query_knowledge.")
-        if (
-            self.variant.knowledge_query_source == "extractor_source"
-            and not self.store.is_reference_feature_extractor_ready(allow_execution=False)
-        ):
-            raise RuntimeError("Reference feature extractor source is not ready. Build and statically validate it first.")
         result_guard: Callable[[], None] | None = None
         if capability:
-            self._require_current_mcp_call(capability, node_session_id)
             result_guard = lambda: self._require_current_mcp_call(capability, node_session_id)
         elif node_session_id:
             raise PermissionError("Node knowledge queries require an active MCP capability.")
@@ -816,8 +684,6 @@ class HarnessOrchestrator:
         return output
 
     def request_inspect_reference_feature_extractor(self, _args: dict[str, Any]) -> dict[str, Any]:
-        if not self.variant.reference_feature_extractor:
-            raise RuntimeError(f"Reference feature extraction is disabled by ablation variant {self.variant.id}.")
         return inspect_reference_feature_extractor(self.workspace_path)
 
     async def request_validate_reference_feature_extractor(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -825,11 +691,7 @@ class HarnessOrchestrator:
         `knowledge-to-tools` node to have the backend perform the
         deterministic validation pass and publish a ready extractor
         for downstream nodes.
-
-        Disabled by ablation variants that remove the new node.
         """
-        if not self.variant.knowledge_to_tools:
-            raise RuntimeError(f"Reference feature validation is disabled by ablation variant {self.variant.id}.")
         allow_execution = self.variant.reference_feature_execution
         run_tests = bool(args.get("runTests", True)) and allow_execution
         status = self.store.validate_and_store_reference_feature(
@@ -1215,6 +1077,31 @@ class HarnessOrchestrator:
         cfg = read_effective_llm_config(self.workspace_path)
         return {"config": mask_llm_config(cfg), "sdk": {}}
 
+    def _record_build_outcome(
+        self,
+        write_status: Callable[[dict[str, Any]], Any],
+        event_prefix: str,
+        trigger: str,
+        *,
+        status: str,
+        message: str,
+        timeline_message: str | None = None,
+    ) -> None:
+        """Persist a finished builder status and its timeline event."""
+        finished = now_iso()
+        write_status({
+            "running": False,
+            "status": status,
+            "finishedAt": finished,
+            "message": message,
+        })
+        self.store.append_timeline({
+            "type": f"{event_prefix}_{status}",
+            "timestamp": finished,
+            "message": timeline_message if timeline_message is not None else message,
+            "payload": {"trigger": trigger},
+        })
+
     async def build_knowledge_graph(self, trigger: str = "manual", uploaded_paths: list[str] | None = None) -> dict[str, Any]:
         self._ensure_initialized()
         if not self.variant.knowledge_graph:
@@ -1250,64 +1137,30 @@ class HarnessOrchestrator:
                 on_change=self._emit_knowledge_graph_snapshot,
             )
         except Exception as exc:
-            finished = now_iso()
             if getattr(self, "_knowledge_graph_pause_requested", False):
-                self.store.write_knowledge_graph_build_status({
-                    "running": False,
-                    "status": "paused",
-                    "finishedAt": finished,
-                    "message": "Knowledge graph builder paused.",
-                })
-                self.store.append_timeline({
-                    "type": "knowledge_graph_build_paused",
-                    "timestamp": finished,
-                    "message": "paused",
-                    "payload": {"trigger": trigger},
-                })
+                self._record_build_outcome(
+                    self.store.write_knowledge_graph_build_status, "knowledge_graph_build", trigger,
+                    status="paused", message="Knowledge graph builder paused.", timeline_message="paused",
+                )
                 self._emit_knowledge_graph_snapshot()
                 return {"ok": False, "paused": True, "knowledgeGraph": self.get_knowledge_graph(), "status": self.get_knowledge_graph_build_status()}
-            self.store.write_knowledge_graph_build_status({
-                "running": False,
-                "status": "failed",
-                "finishedAt": finished,
-                "message": str(exc),
-            })
-            self.store.append_timeline({
-                "type": "knowledge_graph_build_failed",
-                "timestamp": finished,
-                "message": str(exc),
-                "payload": {"trigger": trigger},
-            })
+            self._record_build_outcome(
+                self.store.write_knowledge_graph_build_status, "knowledge_graph_build", trigger,
+                status="failed", message=str(exc),
+            )
             self._emit_knowledge_graph_snapshot()
             raise
-        finished = now_iso()
         if getattr(self, "_knowledge_graph_pause_requested", False):
-            self.store.write_knowledge_graph_build_status({
-                "running": False,
-                "status": "paused",
-                "finishedAt": finished,
-                "message": "Knowledge graph builder paused.",
-            })
-            self.store.append_timeline({
-                "type": "knowledge_graph_build_paused",
-                "timestamp": finished,
-                "message": "paused",
-                "payload": {"trigger": trigger},
-            })
+            self._record_build_outcome(
+                self.store.write_knowledge_graph_build_status, "knowledge_graph_build", trigger,
+                status="paused", message="Knowledge graph builder paused.", timeline_message="paused",
+            )
             self._emit_knowledge_graph_snapshot()
             return {"ok": False, "paused": True, "knowledgeGraph": self.get_knowledge_graph(), "status": self.get_knowledge_graph_build_status()}
-        self.store.write_knowledge_graph_build_status({
-            "running": False,
-            "status": "completed",
-            "finishedAt": finished,
-            "message": "Knowledge graph updated.",
-        })
-        self.store.append_timeline({
-            "type": "knowledge_graph_build_completed",
-            "timestamp": finished,
-            "message": "knowledge_base",
-            "payload": {"trigger": trigger},
-        })
+        self._record_build_outcome(
+            self.store.write_knowledge_graph_build_status, "knowledge_graph_build", trigger,
+            status="completed", message="Knowledge graph updated.", timeline_message="knowledge_base",
+        )
         self._emit_knowledge_graph_snapshot()
         return {"ok": True, "knowledgeGraph": self.get_knowledge_graph(), "status": self.get_knowledge_graph_build_status()}
 
@@ -1342,36 +1195,6 @@ class HarnessOrchestrator:
         self._emit_knowledge_graph_snapshot()
         return {"paused": True, "status": status}
 
-    async def build_reference_features(self, trigger: str = "manual") -> dict[str, Any]:
-        """Backwards-compatibility shim. The reference feature extractor
-        is now built and validated by the main session during the
-        `knowledge-to-tools` node; there is no separate builder task
-        anymore. Calling this method just runs the deterministic
-        validator against the on-disk artifacts and updates the
-        persisted status, then returns the current status. The HTTP
-        routes that used to call this are no longer registered, so this
-        method is only invoked from tests or external callers."""
-        self._ensure_initialized()
-        if not self.variant.knowledge_to_tools:
-            raise RuntimeError(f"Reference feature extractor is disabled by ablation variant {self.variant.id}.")
-        try:
-            status = self.store.validate_and_store_reference_feature(
-                run_tests=self.variant.reference_feature_execution,
-                allow_execution=self.variant.reference_feature_execution,
-            )
-            await self._refresh_main_runner_for_dynamic_tools()
-            return {"ok": True, "status": status, "tool": self.get_reference_feature_tool()}
-        except (OSError, RuntimeError, ValueError) as exc:
-            return {"ok": False, "error": str(exc), "status": self.get_reference_feature_status()}
-
-    async def pause_reference_feature_build(self, reason: str | None = None) -> dict[str, Any]:
-        """No-op shim. The standalone builder is gone; pausing is a
-        no-op that records the pause request in the timeline for
-        backward compatibility with any external callers."""
-        message = reason or "Paused from reference feature UI."
-        self.store.append_timeline({"type": "reference_feature_build_paused", "timestamp": now_iso(), "message": message})
-        return {"paused": True, "status": self.get_reference_feature_status()}
-
     async def build_chain_summary(self, trigger: str = "manual") -> dict[str, Any]:
         self._ensure_initialized()
         setattr(self, "_chain_summary_pause_requested", False)
@@ -1398,61 +1221,27 @@ class HarnessOrchestrator:
                 on_runner=lambda runner: setattr(self, "_chain_summary_runner", runner),
             )
         except Exception as exc:
-            finished = now_iso()
             if getattr(self, "_chain_summary_pause_requested", False):
-                self.store.write_chain_summary_status({
-                    "running": False,
-                    "status": "paused",
-                    "finishedAt": finished,
-                    "message": "Chain builder paused.",
-                })
-                self.store.append_timeline({
-                    "type": "chain_summary_build_paused",
-                    "timestamp": finished,
-                    "message": "paused",
-                    "payload": {"trigger": trigger},
-                })
+                self._record_build_outcome(
+                    self.store.write_chain_summary_status, "chain_summary_build", trigger,
+                    status="paused", message="Chain builder paused.", timeline_message="paused",
+                )
                 return {"ok": False, "paused": True, "chainSummary": self.get_chain_summary(), "status": self.get_chain_summary_status()}
-            self.store.write_chain_summary_status({
-                "running": False,
-                "status": "failed",
-                "finishedAt": finished,
-                "message": str(exc),
-            })
-            self.store.append_timeline({
-                "type": "chain_summary_build_failed",
-                "timestamp": finished,
-                "message": str(exc),
-                "payload": {"trigger": trigger},
-            })
+            self._record_build_outcome(
+                self.store.write_chain_summary_status, "chain_summary_build", trigger,
+                status="failed", message=str(exc),
+            )
             raise
-        finished = now_iso()
         if getattr(self, "_chain_summary_pause_requested", False):
-            self.store.write_chain_summary_status({
-                "running": False,
-                "status": "paused",
-                "finishedAt": finished,
-                "message": "Chain builder paused.",
-            })
-            self.store.append_timeline({
-                "type": "chain_summary_build_paused",
-                "timestamp": finished,
-                "message": "paused",
-                "payload": {"trigger": trigger},
-            })
+            self._record_build_outcome(
+                self.store.write_chain_summary_status, "chain_summary_build", trigger,
+                status="paused", message="Chain builder paused.", timeline_message="paused",
+            )
             return {"ok": False, "paused": True, "chainSummary": self.get_chain_summary(), "status": self.get_chain_summary_status()}
-        self.store.write_chain_summary_status({
-            "running": False,
-            "status": "completed",
-            "finishedAt": finished,
-            "message": "Chain summary updated.",
-        })
-        self.store.append_timeline({
-            "type": "chain_summary_build_completed",
-            "timestamp": finished,
-            "message": "artifacts/chain-summary.json",
-            "payload": {"trigger": trigger},
-        })
+        self._record_build_outcome(
+            self.store.write_chain_summary_status, "chain_summary_build", trigger,
+            status="completed", message="Chain summary updated.", timeline_message="artifacts/chain-summary.json",
+        )
         return {"ok": True, "chainSummary": summary, "status": self.get_chain_summary_status()}
 
     async def pause_chain_summary_build(self, reason: str | None = None) -> dict[str, Any]:
@@ -1536,6 +1325,7 @@ class HarnessOrchestrator:
         if scope in {"all", "chat"}:
             await self._close_active_node_runner("workspace reset" if scope == "all" else "chat reset")
         self.store.clear_debug_logs(scope if scope in {"all", "chat"} else "main")
+        self._last_emitted_parts.clear()
         if scope in {"all", "chat"}:
             self.state = self.store.read_state()
             self._stamp_variant_state()
@@ -1555,6 +1345,7 @@ class HarnessOrchestrator:
         self._stamp_variant_state()
         self.active_node_session = None
         self._active_node_task = None
+        self._last_emitted_parts.clear()
         self._emit_runtime_snapshot()
         return self.state
 
@@ -1701,8 +1492,6 @@ class HarnessOrchestrator:
             # node), close the long-lived DSH runtime. This releases
             # the session-owned child processes and prevents a stale
             # main turn from acting on a completed pipeline.
-            # instead of being processed and re-entering an already-
-            # completed node.
             if self._is_pipeline_complete():
                 await self._close_main_runner()
             return
@@ -1856,6 +1645,36 @@ class HarnessOrchestrator:
             return
         await self._handle_node_runner_return(latest)
 
+    async def _close_runner(self, runner: SdkRunner, *, event_type: str, message: str, payload: dict[str, Any]) -> None:
+        """Interrupt and close a DSH runner, then record the outcome in the
+        timeline.  Interrupt and close failures are recorded as
+        runner_close_failed timeline events; a failed interrupt still
+        attempts close."""
+        failures: list[str] = []
+        if runner.is_running:
+            try:
+                await runner.interrupt()
+            except Exception as exc:
+                failures.append(f"interrupt: {type(exc).__name__}: {exc}")
+        try:
+            await runner.close()
+        except Exception as exc:
+            failures.append(f"close: {type(exc).__name__}: {exc}")
+        for failure in failures:
+            self.store.append_timeline({
+                "type": "runner_close_failed",
+                "timestamp": now_iso(),
+                "message": failure,
+                "payload": {**payload, "runnerEvent": event_type},
+            })
+        self._revoke_runner_mcp_capability(runner)
+        self.store.append_timeline({
+            "type": event_type,
+            "timestamp": now_iso(),
+            "message": message,
+            "payload": payload,
+        })
+
     async def _close_main_runner(
         self,
         reason: str = "pipeline_complete",
@@ -1873,44 +1692,24 @@ class HarnessOrchestrator:
         self.main_runner = None
         self._main_runner_knowledge_graph_ready = None
         self._main_runner_reference_feature_ready = None
-        if runner.is_running:
-            try:
-                await runner.interrupt()
-            except Exception:
-                pass
-        try:
-            await runner.close()
-        except Exception:
-            pass
-        self._revoke_runner_mcp_capability(runner)
-        self.store.append_timeline({
-            "type": "main_runner_closed",
-            "timestamp": now_iso(),
-            "message": message,
-            "payload": {"reason": reason},
-        })
+        await self._close_runner(
+            runner,
+            event_type="main_runner_closed",
+            message=message,
+            payload={"reason": reason},
+        )
 
     async def _close_active_node_runner(self, reason: str) -> None:
         runner = self.active_node_runner
         if runner is None:
             return
         self.active_node_runner = None
-        if runner.is_running:
-            try:
-                await runner.interrupt()
-            except Exception:
-                pass
-        try:
-            await runner.close()
-        except Exception:
-            pass
-        self._revoke_runner_mcp_capability(runner)
-        self.store.append_timeline({
-            "type": "active_node_runner_closed",
-            "timestamp": now_iso(),
-            "message": f"Active node runner closed for {reason}.",
-            "payload": {"reason": reason},
-        })
+        await self._close_runner(
+            runner,
+            event_type="active_node_runner_closed",
+            message=f"Active node runner closed for {reason}.",
+            payload={"reason": reason},
+        )
 
     async def _maybe_auto_enter_next_node(self, finished_node: NodeSession) -> None:
         self._ensure_initialized()
@@ -1938,11 +1737,7 @@ class HarnessOrchestrator:
         }, background=True)
 
     def _is_pipeline_complete(self) -> bool:
-        """Return true when the persisted node chain has fully completed.
-
-        This wrapper preserves the historical private orchestrator API while
-        keeping the actual rule in NodeStateMachine.
-        """
+        """Whether the persisted node chain has fully completed."""
         return self.node_state.is_pipeline_complete(self.store.read_state())
 
     def _next_node_after_completion(self, latest: NodeSession) -> NodeType | None:
@@ -2008,12 +1803,6 @@ class HarnessOrchestrator:
             next_node_specified,
         )
 
-    def _validate_iterative_output_paths(self, output_paths: list[str]) -> None:
-        self.node_state.validate_iterative_output_paths(output_paths)
-
-    def _iterative_route_decision(self, next_node: NodeType | None, loop_decision: str | None) -> str | None:
-        return self.node_state.iterative_route_decision(next_node, loop_decision)
-
     def _read_iteration_state_recommend_exit(self) -> bool | None:
         return self.node_state.read_iteration_state_recommend_exit()
 
@@ -2044,33 +1833,6 @@ class HarnessOrchestrator:
         if not self.variant.knowledge_graph:
             raise RuntimeError(f"Knowledge graph access is disabled by ablation variant {self.variant.id}.")
 
-    def _reject_reference_feature_case_review_artifact(
-        self,
-        path: Any,
-        *,
-        node_type: NodeType | None = None,
-    ) -> None:
-        effective_node_type = node_type or (self.active_node_session.get("nodeType") if self.active_node_session else None)
-        if (
-            not self.variant.case_review
-            or self.variant.case_review_reference_features
-            or effective_node_type != "iterative-solving"
-        ):
-            return
-        text = str(path or "").casefold()
-        if "reference-feature" in text or "reference_feature" in text:
-            raise RuntimeError(
-                f"{self.variant.id} keeps case review but forbids executing or recording reference feature extractor usage."
-            )
-
-    def _reject_reference_feature_case_review_run(self, args: RunRecord, node_type: NodeType | None) -> None:
-        if not self.variant.case_review or self.variant.case_review_reference_features or node_type != "iterative-solving":
-            return
-        paths = [str(path) for path in args.get("artifactPaths", [])]
-        run_id = str(args.get("runId", ""))
-        for value in [run_id, *paths]:
-            self._reject_reference_feature_case_review_artifact(value, node_type=node_type)
-
     def _knowledge_query_ready(self) -> bool:
         if not self.variant.knowledge_query:
             return False
@@ -2093,17 +1855,7 @@ class HarnessOrchestrator:
             apiKey=graph.get("apiKey") or main.apiKey,
             baseUrl=graph.get("baseUrl") or main.baseUrl,
             protocol=graph.get("protocol") or main.protocol,
-        )
-
-    def _llm_config_from_dict(self, raw: dict[str, Any]) -> LlmConfig:
-        protocol = raw.get("protocol") if raw.get("protocol") in {"deepseek", "openai-compat"} else None
-        auth = raw.get("authMode") if raw.get("authMode") in {"manual", "sdk-default"} else "manual"
-        return LlmConfig(
-            authMode=auth,
-            model=raw.get("model") if isinstance(raw.get("model"), str) else "",
-            apiKey=raw.get("apiKey") if isinstance(raw.get("apiKey"), str) else None,
-            baseUrl=raw.get("baseUrl") if isinstance(raw.get("baseUrl"), str) else None,
-            protocol=protocol,
+            maxTokens=graph.get("maxTokens") or main.maxTokens,
         )
 
     def _restore_active_node_session(self) -> NodeSession | None:
@@ -2207,11 +1959,8 @@ class HarnessOrchestrator:
             workspace_path=self.workspace_path,
             locale=self.locale,
             log_path=self.store.main_log_path,
-            enter_node=self.request_enter_node if self.variant.node_chain else None,
-            query_knowledge=self.request_query_knowledge if knowledge_query_ready else None,
-            extract_reference_features=self.request_extract_reference_features if reference_feature_ready else None,
-            inspect_reference_feature_extractor=self.request_inspect_reference_feature_extractor if reference_feature_ready else None,
-            validate_reference_feature_extractor=self.request_validate_reference_feature_extractor if self.variant.knowledge_to_tools else None,
+            knowledge_query_ready=knowledge_query_ready,
+            reference_feature_extractor_ready=reference_feature_ready,
             variant=self.variant,
             on_part=self._emit_main_parts,
             on_session_id=on_session_id,
@@ -2232,12 +1981,8 @@ class HarnessOrchestrator:
             message="Main runner closed because reference tool availability changed; the next turn will use a fresh tool set.",
         )
 
-    async def _refresh_main_runner_for_knowledge_graph(self) -> None:
-        await self._refresh_main_runner_for_dynamic_tools()
-
     def _spawn_node_runner(self, node: NodeSession) -> None:
         node_id = node["id"]
-        node_type = node["nodeType"]
         resume_session_id = node.get("sdkSessionId")
         run_epoch = int(node.get("runEpoch", 0) or 0) + 1
         node["runEpoch"] = run_epoch
@@ -2262,14 +2007,11 @@ class HarnessOrchestrator:
             locale=self.locale,
             node=node,
             log_path=self.store.node_log_path(node_id),
-            finish_node=lambda args: self.request_finish_node_for_node(args, node_id),
-            query_knowledge=self.request_query_knowledge if self._knowledge_query_ready() else None,
-            extract_reference_features=self.request_extract_reference_features if self.variant.reference_feature_extractor and self.store.is_reference_feature_extractor_ready() else None,
-            inspect_reference_feature_extractor=self.request_inspect_reference_feature_extractor if self.variant.reference_feature_extractor and self.store.is_reference_feature_extractor_ready() else None,
-            validate_reference_feature_extractor=self.request_validate_reference_feature_extractor if self.variant.knowledge_to_tools and node_type == "knowledge-to-tools" else None,
-            record_artifact=lambda args: self.record_artifact_for_node(args, node_id, node_type),
-            record_run=lambda args: self.record_run_for_node(args, node_id, node_type),
-            get_runtime_settings=self.get_runtime_settings,
+            knowledge_query_ready=self._knowledge_query_ready(),
+            reference_feature_extractor_ready=(
+                self.variant.reference_feature_extractor
+                and self.store.is_reference_feature_extractor_ready()
+            ),
             on_session_id=on_session_id,
             on_part=lambda part: self._emit_node_parts(node_id, part),
             variant=self.variant,

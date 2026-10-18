@@ -7,17 +7,8 @@ import uuid
 
 import pytest
 
-from harnessing_ts.orchestrator import HarnessOrchestrator
 from harnessing_ts.api.payloads import build_live_payload
 from harnessing_ts.state.workspace_store import WorkspaceStore
-
-
-def _make_orchestrator(tmp_path) -> HarnessOrchestrator:
-    store = WorkspaceStore(tmp_path)
-    store.ensure_layout()
-    orch = HarnessOrchestrator(tmp_path, dry_run=True, locale="zh", mode="auto")
-    orch.initialize()
-    return orch
 
 
 def _completed_state(store: WorkspaceStore, node_type: str) -> None:
@@ -38,8 +29,8 @@ def _completed_state(store: WorkspaceStore, node_type: str) -> None:
     store.write_state(state)
 
 
-def test_is_pipeline_complete_requires_final_summary(tmp_path) -> None:
-    orch = _make_orchestrator(tmp_path)
+def test_is_pipeline_complete_requires_final_summary(tmp_path, make_orchestrator) -> None:
+    orch = make_orchestrator(tmp_path)
     assert orch._is_pipeline_complete() is False
 
     _completed_state(orch.store, "problem-contract")
@@ -52,13 +43,11 @@ def test_is_pipeline_complete_requires_final_summary(tmp_path) -> None:
     assert orch._is_pipeline_complete() is True
 
 
-def test_enter_node_rejected_after_pipeline_completes(tmp_path) -> None:
-    """Regression for the multi-hour stale-tool_result bug: once
-    final-summary has finished, the harness must refuse any further
-    enter_node calls so a delayed MCP tool_result from the main
-    session's first enter_node call does not respawn a runner for an
-    already-completed node."""
-    orch = _make_orchestrator(tmp_path)
+def test_enter_node_rejected_after_pipeline_completes(tmp_path, make_orchestrator) -> None:
+    """Once final-summary has finished, the harness refuses any further
+    enter_node calls so a delayed MCP tool_result cannot respawn a
+    runner for an already-completed node."""
+    orch = make_orchestrator(tmp_path)
     _completed_state(orch.store, "problem-contract")
     _completed_state(orch.store, "iterative-solving")
     _completed_state(orch.store, "final-summary")
@@ -72,11 +61,11 @@ def test_enter_node_rejected_after_pipeline_completes(tmp_path) -> None:
             }))
 
 
-def test_enter_node_still_allowed_during_running_pipeline(tmp_path) -> None:
+def test_enter_node_still_allowed_during_running_pipeline(tmp_path, make_orchestrator) -> None:
     """The guard must not block the normal auto-next flow. While the
     pipeline is still running (no final-summary in completedNodes),
     enter_node must succeed (and not raise the pipeline-complete error)."""
-    orch = _make_orchestrator(tmp_path)
+    orch = make_orchestrator(tmp_path)
     _completed_state(orch.store, "problem-contract")
     # The guard must not block this auto-next step; final-summary is
     # not yet in completedNodes, so the pipeline is not "complete".
@@ -105,16 +94,16 @@ def test_enter_node_still_allowed_during_running_pipeline(tmp_path) -> None:
         )
 
 
-def test_close_main_runner_is_idempotent(tmp_path) -> None:
-    orch = _make_orchestrator(tmp_path)
+def test_close_main_runner_is_idempotent(tmp_path, make_orchestrator) -> None:
+    orch = make_orchestrator(tmp_path)
     # No-op when no runner exists
     asyncio.run(orch._close_main_runner())
     asyncio.run(orch._close_main_runner())
     assert orch.main_runner is None
 
 
-def test_close_main_runner_terminates_subprocess_and_records_timeline(tmp_path) -> None:
-    orch = _make_orchestrator(tmp_path)
+def test_close_main_runner_terminates_subprocess_and_records_timeline(tmp_path, make_orchestrator) -> None:
+    orch = make_orchestrator(tmp_path)
     _completed_state(orch.store, "final-summary")
 
     class _FakeRunner:
@@ -143,14 +132,14 @@ def test_close_main_runner_terminates_subprocess_and_records_timeline(tmp_path) 
     assert any(e["type"] == "main_runner_closed" for e in events)
 
 
-def test_runtime_payload_reports_idle_after_pipeline_complete_even_if_task_lingers(tmp_path) -> None:
+def test_runtime_payload_reports_idle_after_pipeline_complete_even_if_task_lingers(tmp_path, make_orchestrator) -> None:
     """Final-summary completion is the authoritative end of the node chain.
 
     A server-side main task can linger while the SDK unwinds or returns
     delayed tool results. The frontend must not keep showing the harness
     as running after the persisted node state says the pipeline is done.
     """
-    orch = _make_orchestrator(tmp_path)
+    orch = make_orchestrator(tmp_path)
     _completed_state(orch.store, "final-summary")
     setattr(orch, "_server_run_task", "lingering-task")
 
@@ -160,9 +149,9 @@ def test_runtime_payload_reports_idle_after_pipeline_complete_even_if_task_linge
     assert payload["runtime"]["running"] is False
 
 
-def test_pipeline_complete_message_suggests_reset(tmp_path) -> None:
+def test_pipeline_complete_message_suggests_reset(tmp_path, make_orchestrator) -> None:
     """The user-facing error must tell them how to recover."""
-    orch = _make_orchestrator(tmp_path)
+    orch = make_orchestrator(tmp_path)
     _completed_state(orch.store, "problem-contract")
     _completed_state(orch.store, "iterative-solving")
     _completed_state(orch.store, "final-summary")

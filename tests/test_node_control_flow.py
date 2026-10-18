@@ -15,12 +15,6 @@ ITERATIVE_OUTPUTS = [
 ]
 
 
-def _orchestrator(tmp_path, *, mode: str) -> HarnessOrchestrator:
-    orchestrator = HarnessOrchestrator(tmp_path, dry_run=True, mode=mode)
-    orchestrator.initialize()
-    return orchestrator
-
-
 def _activate_node(orchestrator: HarnessOrchestrator, node_type: str):
     state = orchestrator.get_state()
     node = orchestrator.store.create_node_session(node_type)
@@ -34,8 +28,8 @@ def _activate_node(orchestrator: HarnessOrchestrator, node_type: str):
     return node
 
 
-def test_manual_enter_node_parks_pending_control_without_mutating_active_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="manual")
+def test_manual_enter_node_parks_pending_control_without_mutating_active_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="manual")
 
     result = asyncio.run(orchestrator.request_enter_node({
         "nodeType": "problem-contract",
@@ -51,8 +45,8 @@ def test_manual_enter_node_parks_pending_control_without_mutating_active_node(tm
     assert state["pendingControl"]["nodeType"] == "problem-contract"
 
 
-def test_manual_approve_enter_node_starts_dry_run_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="manual")
+def test_manual_approve_enter_node_starts_dry_run_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="manual")
     asyncio.run(orchestrator.request_enter_node({
         "nodeType": "problem-contract",
         "rationale": "start workflow",
@@ -69,8 +63,8 @@ def test_manual_approve_enter_node_starts_dry_run_node(tmp_path) -> None:
     assert orchestrator.store.read_node_session(result["result"]["id"])["status"] == "running"
 
 
-def test_manual_finish_node_parks_request_and_marks_node_waiting_approval(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="manual")
+def test_manual_finish_node_parks_request_and_marks_node_waiting_approval(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="manual")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.request_finish_node({
@@ -90,8 +84,8 @@ def test_manual_finish_node_parks_request_and_marks_node_waiting_approval(tmp_pa
     assert persisted["status"] == "waiting_approval"
 
 
-def test_manual_approve_finish_node_parks_next_enter_request(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="manual")
+def test_manual_approve_finish_node_parks_next_enter_request(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="manual")
     node = _activate_node(orchestrator, "problem-contract")
     asyncio.run(orchestrator.request_finish_node({
         "success": True,
@@ -114,8 +108,8 @@ def test_manual_approve_finish_node_parks_next_enter_request(tmp_path) -> None:
     assert state["pendingControl"]["nodeType"] == "iterative-solving"
 
 
-def test_reject_finish_node_returns_waiting_node_to_paused(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="manual")
+def test_reject_finish_node_returns_waiting_node_to_paused(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="manual")
     node = _activate_node(orchestrator, "problem-contract")
     asyncio.run(orchestrator.request_finish_node({
         "success": True,
@@ -136,19 +130,33 @@ def test_reject_finish_node_returns_waiting_node_to_paused(tmp_path) -> None:
     assert "needs more evidence" in persisted["summary"]
 
 
-def test_node_bound_finish_rejects_stale_node_session(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
-    _activate_node(orchestrator, "problem-contract")
+def test_node_bound_finish_rejects_stale_node_session(tmp_path, make_orchestrator) -> None:
+    async def scenario() -> None:
+        orchestrator = make_orchestrator(tmp_path, mode="auto")
+        orchestrator.configure_mcp_control("http://127.0.0.1:4327")
+        _activate_node(orchestrator, "problem-contract")
+        await orchestrator.execution.begin("node:stale-node-id", "session-stale")
+        capability = orchestrator._issue_mcp_capability(
+            role="node",
+            node_session_id="stale-node-id",
+            allowed_tools=["mcp__ts_harness__finish_node"],
+        )["DSH_MCP_CAPABILITY"]
 
-    with pytest.raises(RuntimeError, match="finish_node rejected"):
-        asyncio.run(orchestrator.request_finish_node_for_node({
-            "success": True,
-            "summary": "stale finish",
-        }, "stale-node-id"))
+        with pytest.raises(PermissionError, match="lease is no longer active"):
+            await orchestrator.dispatch_dsh_mcp_call(
+                capability=capability,
+                workspace=str(tmp_path),
+                role="node",
+                node_session_id="stale-node-id",
+                tool="finish_node",
+                args={"success": True, "summary": "stale finish"},
+            )
+
+    asyncio.run(scenario())
 
 
-def test_auto_successful_problem_contract_finish_enters_next_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_auto_successful_problem_contract_finish_enters_next_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -171,8 +179,8 @@ def test_auto_successful_problem_contract_finish_enters_next_node(tmp_path) -> N
     assert any(event["type"] == "auto_next" for event in orchestrator.store.read_timeline())
 
 
-def test_auto_failed_finish_does_not_offer_or_enter_next_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_auto_failed_finish_does_not_offer_or_enter_next_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -194,8 +202,8 @@ def test_auto_failed_finish_does_not_offer_or_enter_next_node(tmp_path) -> None:
     assert not any(event["type"] == "auto_next" for event in orchestrator.store.read_timeline())
 
 
-def test_omitted_next_node_uses_node_spec_default(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_omitted_next_node_uses_node_spec_default(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -210,8 +218,8 @@ def test_omitted_next_node_uses_node_spec_default(tmp_path) -> None:
     assert result["nextNode"] == "knowledge-to-tools"
 
 
-def test_knowledge_to_tools_success_requires_quality_artifact_output_paths(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_knowledge_to_tools_success_requires_quality_artifact_output_paths(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     _activate_node(orchestrator, "knowledge-to-tools")
 
     with pytest.raises(RuntimeError, match="evidence-map.json"):
@@ -230,8 +238,8 @@ def test_knowledge_to_tools_success_requires_quality_artifact_output_paths(tmp_p
         }))
 
 
-def test_knowledge_to_tools_success_accepts_complete_output_paths(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_knowledge_to_tools_success_accepts_complete_output_paths(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "knowledge-to-tools")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -255,8 +263,8 @@ def test_knowledge_to_tools_success_accepts_complete_output_paths(tmp_path) -> N
     assert orchestrator.store.read_node_session(node["id"])["status"] == "completed"
 
 
-def test_null_next_node_uses_node_spec_default(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_null_next_node_uses_node_spec_default(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -272,8 +280,8 @@ def test_null_next_node_uses_node_spec_default(tmp_path) -> None:
     assert result["nextNode"] == "knowledge-to-tools"
 
 
-def test_explicit_none_next_node_stops_successful_ordinary_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_explicit_none_next_node_stops_successful_ordinary_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -290,8 +298,8 @@ def test_explicit_none_next_node_stops_successful_ordinary_node(tmp_path) -> Non
     assert result["nextNode"] is None
 
 
-def test_explicit_next_node_overrides_node_spec_default(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_explicit_next_node_overrides_node_spec_default(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     node = _activate_node(orchestrator, "problem-contract")
 
     result = asyncio.run(orchestrator.finish_node({
@@ -307,8 +315,8 @@ def test_explicit_next_node_overrides_node_spec_default(tmp_path) -> None:
     assert result["nextNode"] == "final-summary"
 
 
-def test_enter_node_rejects_when_another_node_is_active(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_enter_node_rejects_when_another_node_is_active(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     _activate_node(orchestrator, "problem-contract")
 
     with pytest.raises(RuntimeError, match="active node problem-contract"):
@@ -318,8 +326,8 @@ def test_enter_node_rejects_when_another_node_is_active(tmp_path) -> None:
         }))
 
 
-def test_enter_node_rejects_stale_entry_after_failed_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_enter_node_rejects_stale_entry_after_failed_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     failed = orchestrator.store.create_node_session("iterative-solving")
     failed["status"] = "failed"
     failed["success"] = False
@@ -333,8 +341,8 @@ def test_enter_node_rejects_stale_entry_after_failed_node(tmp_path) -> None:
         }))
 
 
-def test_enter_node_allows_explicit_retry_of_latest_failed_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="auto")
+def test_enter_node_allows_explicit_retry_of_latest_failed_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
     failed = orchestrator.store.create_node_session("iterative-solving")
     failed["status"] = "failed"
     failed["success"] = False
@@ -351,8 +359,8 @@ def test_enter_node_allows_explicit_retry_of_latest_failed_node(tmp_path) -> Non
     assert orchestrator.get_state()["activeNode"] == "iterative-solving"
 
 
-def test_manual_enter_node_rejects_pending_stale_entry_after_failed_node(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path, mode="manual")
+def test_manual_enter_node_rejects_pending_stale_entry_after_failed_node(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="manual")
     failed = orchestrator.store.create_node_session("knowledge-to-tools")
     failed["status"] = "failed"
     failed["success"] = False

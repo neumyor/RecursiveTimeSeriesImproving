@@ -46,7 +46,7 @@ def test_main_allowlist_only_contains_query_knowledge_when_query_is_ready() -> N
     assert "mcp__ts_harness__enter_node" in unavailable
 
 
-def test_main_runner_does_not_receive_query_callback_before_graph_build(tmp_path) -> None:
+def test_main_runner_tools_exclude_query_before_graph_build(tmp_path) -> None:
     orchestrator = HarnessOrchestrator(tmp_path, dry_run=False)
     orchestrator.initialize()
     fake_runner = MagicMock()
@@ -54,11 +54,11 @@ def test_main_runner_does_not_receive_query_callback_before_graph_build(tmp_path
     with patch("harnessing_ts.orchestrator.build_main_runner", return_value=fake_runner) as build:
         orchestrator._ensure_main_runner()
 
-    assert build.call_args.kwargs["query_knowledge"] is None
+    assert build.call_args.kwargs["knowledge_query_ready"] is False
     assert orchestrator._main_runner_knowledge_graph_ready is False
 
 
-def test_main_runner_receives_query_callback_after_successful_graph_build(tmp_path) -> None:
+def test_main_runner_tools_include_query_after_successful_graph_build(tmp_path) -> None:
     orchestrator = HarnessOrchestrator(tmp_path, dry_run=False)
     orchestrator.initialize()
     _mark_graph_ready(orchestrator.store)
@@ -67,11 +67,11 @@ def test_main_runner_receives_query_callback_after_successful_graph_build(tmp_pa
     with patch("harnessing_ts.orchestrator.build_main_runner", return_value=fake_runner) as build:
         orchestrator._ensure_main_runner()
 
-    assert build.call_args.kwargs["query_knowledge"] == orchestrator.request_query_knowledge
+    assert build.call_args.kwargs["knowledge_query_ready"] is True
     assert orchestrator._main_runner_knowledge_graph_ready is True
 
 
-def test_rqa_main_runner_receives_reference_query_callback_without_graph(tmp_path, monkeypatch) -> None:
+def test_rqa_main_runner_tools_include_query_without_graph(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TS_HARNESS_VARIANT", "NOD-RQA-KTL-CRV-SUB-ADA")
     orchestrator = HarnessOrchestrator(tmp_path, dry_run=False)
     orchestrator.initialize()
@@ -80,11 +80,11 @@ def test_rqa_main_runner_receives_reference_query_callback_without_graph(tmp_pat
     with patch("harnessing_ts.orchestrator.build_main_runner", return_value=fake_runner) as build:
         orchestrator._ensure_main_runner()
 
-    assert build.call_args.kwargs["query_knowledge"] == orchestrator.request_query_knowledge
+    assert build.call_args.kwargs["knowledge_query_ready"] is True
     assert orchestrator._main_runner_knowledge_graph_ready is True
 
 
-def test_fqa_node_runner_does_not_receive_query_callback_before_source_ready(tmp_path, monkeypatch) -> None:
+def test_fqa_node_runner_tools_exclude_query_before_source_ready(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TS_HARNESS_VARIANT", "NOD-FQA-KTL-CXR-SUB-ADA")
     orchestrator = HarnessOrchestrator(tmp_path, dry_run=False)
     orchestrator.initialize()
@@ -93,10 +93,10 @@ def test_fqa_node_runner_does_not_receive_query_callback_before_source_ready(tmp
     with patch("harnessing_ts.orchestrator.build_node_runner", return_value=MagicMock()) as build:
         orchestrator._spawn_node_runner(node)
 
-    assert build.call_args.kwargs["query_knowledge"] is None
+    assert build.call_args.kwargs["knowledge_query_ready"] is False
 
 
-def test_fqa_node_runner_receives_query_callback_after_source_ready(tmp_path, monkeypatch) -> None:
+def test_fqa_node_runner_tools_include_query_after_source_ready(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TS_HARNESS_VARIANT", "NOD-FQA-KTL-CXR-SUB-ADA")
     orchestrator = HarnessOrchestrator(tmp_path, dry_run=False)
     orchestrator.initialize()
@@ -107,7 +107,7 @@ def test_fqa_node_runner_receives_query_callback_after_source_ready(tmp_path, mo
         with patch("harnessing_ts.orchestrator.build_node_runner", return_value=MagicMock()) as build:
             orchestrator._spawn_node_runner(node)
 
-    assert build.call_args.kwargs["query_knowledge"] == orchestrator.request_query_knowledge
+    assert build.call_args.kwargs["knowledge_query_ready"] is True
 
 
 def test_node_runner_resumes_dsh_session_after_restart(tmp_path, monkeypatch) -> None:
@@ -143,9 +143,28 @@ def test_existing_main_runner_is_recreated_when_graph_availability_changes(tmp_p
     orchestrator._main_runner_knowledge_graph_ready = False
     _mark_graph_ready(orchestrator.store)
 
-    asyncio.run(orchestrator._refresh_main_runner_for_knowledge_graph())
+    asyncio.run(orchestrator._refresh_main_runner_for_dynamic_tools())
 
     assert orchestrator.main_runner is None
     assert orchestrator._main_runner_knowledge_graph_ready is None
     runner.close.assert_awaited_once()
     assert orchestrator.store.read_timeline()[-1]["type"] == "main_runner_closed"
+
+
+def test_knowledge_graph_llm_config_inherits_max_tokens_from_main(tmp_path) -> None:
+    orchestrator = HarnessOrchestrator(tmp_path, dry_run=True)
+    orchestrator.initialize()
+    orchestrator.store.write_main_llm_config({"model": "main-model", "maxTokens": 8000})
+
+    assert orchestrator._knowledge_graph_llm_config().maxTokens == 8000
+    assert orchestrator._knowledge_graph_llm_config().model == "main-model"
+
+    orchestrator.store.write_knowledge_graph_llm_config({"model": "graph-model", "maxTokens": 2000})
+    graph = orchestrator._knowledge_graph_llm_config()
+    assert graph.maxTokens == 2000
+    assert graph.model == "graph-model"
+
+    orchestrator.store.write_knowledge_graph_llm_config({"maxTokens": None})
+    reverted = orchestrator._knowledge_graph_llm_config()
+    assert reverted.maxTokens == 8000
+    assert reverted.model == "graph-model"

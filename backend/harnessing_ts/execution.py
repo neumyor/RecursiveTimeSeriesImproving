@@ -21,7 +21,6 @@ class PausableRuntime(Protocol):
 
 def new_execution(actor_id: str, session_id: str | None = None) -> dict[str, Any]:
     return {
-        "schemaVersion": 2,
         "actorId": actor_id,
         "sessionId": session_id,
         "phase": "ready",
@@ -59,8 +58,6 @@ class ExecutionController:
 
     def ensure_actor(self, actor_id: str, session_id: str | None) -> dict[str, Any]:
         state = self.store.read_execution()
-        if state and state.get("schemaVersion") != 2:
-            raise RuntimeError("Legacy runtime workspace is unsupported; start a new runtime workspace.")
         if not state or state.get("actorId") != actor_id:
             state = new_execution(actor_id, session_id)
             self.store.write_execution(state)
@@ -200,8 +197,6 @@ class ExecutionController:
         state = self.store.read_execution()
         if not state:
             return False
-        if state.get("schemaVersion") != 2:
-            raise RuntimeError("Legacy runtime workspace is unsupported; start a new runtime workspace.")
         if state.get("phase") not in {"running", "pausing", "recovering"}:
             return False
         state.update({

@@ -4,12 +4,6 @@ from harnessing_ts.orchestrator import HarnessOrchestrator
 from harnessing_ts.prompts.compose import PromptContext, build_main_attachment
 
 
-def _orchestrator(tmp_path) -> HarnessOrchestrator:
-    orchestrator = HarnessOrchestrator(tmp_path, dry_run=True, mode="auto")
-    orchestrator.initialize()
-    return orchestrator
-
-
 def _complete_node(
     orchestrator: HarnessOrchestrator,
     node_type: str,
@@ -37,8 +31,8 @@ def _complete_node(
     return node
 
 
-def test_initial_progress_recommends_problem_contract(tmp_path) -> None:
-    snapshot = _orchestrator(tmp_path)._main_progress_snapshot()
+def test_initial_progress_recommends_problem_contract(tmp_path, make_orchestrator) -> None:
+    snapshot = make_orchestrator(tmp_path)._main_progress_snapshot()
 
     assert snapshot["recommendedAction"] == "enter_node"
     assert snapshot["recommendedNode"] == "problem-contract"
@@ -46,8 +40,8 @@ def test_initial_progress_recommends_problem_contract(tmp_path) -> None:
     assert snapshot["knowledgeGraphReady"] is False
 
 
-def test_completed_problem_contract_recommends_knowledge_to_tools(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_completed_problem_contract_recommends_knowledge_to_tools(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     _complete_node(orchestrator, "problem-contract")
 
     snapshot = orchestrator._main_progress_snapshot()
@@ -57,8 +51,8 @@ def test_completed_problem_contract_recommends_knowledge_to_tools(tmp_path) -> N
     assert snapshot["latestNodeSession"]["nodeType"] == "problem-contract"
 
 
-def test_iterative_continue_recommends_another_iteration(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_iterative_continue_recommends_another_iteration(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     _complete_node(orchestrator, "problem-contract")
     _complete_node(
         orchestrator,
@@ -74,8 +68,8 @@ def test_iterative_continue_recommends_another_iteration(tmp_path) -> None:
     assert snapshot["recommendedNode"] == "iterative-solving"
 
 
-def test_iterative_exit_recommends_final_summary(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_iterative_exit_recommends_final_summary(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     _complete_node(orchestrator, "problem-contract")
     _complete_node(
         orchestrator,
@@ -91,8 +85,8 @@ def test_iterative_exit_recommends_final_summary(tmp_path) -> None:
     assert snapshot["recommendedNode"] == "final-summary"
 
 
-def test_explicit_none_stops_pipeline_instead_of_using_spec_default(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_explicit_none_stops_pipeline_instead_of_using_spec_default(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     _complete_node(
         orchestrator,
         "problem-contract",
@@ -106,8 +100,8 @@ def test_explicit_none_stops_pipeline_instead_of_using_spec_default(tmp_path) ->
     assert snapshot["recommendedNode"] is None
 
 
-def test_completed_final_summary_prevents_reentry(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_completed_final_summary_prevents_reentry(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     _complete_node(orchestrator, "final-summary")
 
     snapshot = orchestrator._main_progress_snapshot()
@@ -117,8 +111,8 @@ def test_completed_final_summary_prevents_reentry(tmp_path) -> None:
     assert snapshot["pipelineComplete"] is True
 
 
-def test_failed_node_requires_explicit_user_retry(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_failed_node_requires_explicit_user_retry(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     node = orchestrator.store.create_node_session("iterative-solving")
     node.update({"status": "failed", "success": False, "summary": "evaluation failed"})
     orchestrator.store.write_node_session(node)
@@ -129,8 +123,8 @@ def test_failed_node_requires_explicit_user_retry(tmp_path) -> None:
     assert snapshot["recommendedNode"] == "iterative-solving"
 
 
-def test_latest_failed_node_takes_priority_over_completed_nodes(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_latest_failed_node_takes_priority_over_completed_nodes(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     _complete_node(orchestrator, "problem-contract")
     _complete_node(orchestrator, "knowledge-to-tools")
     failed = orchestrator.store.create_node_session("iterative-solving")
@@ -148,8 +142,8 @@ def test_latest_failed_node_takes_priority_over_completed_nodes(tmp_path) -> Non
     assert snapshot["latestNodeSession"]["status"] == "failed"
 
 
-def test_pending_manual_control_prevents_duplicate_node_entry(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_pending_manual_control_prevents_duplicate_node_entry(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     state = orchestrator.get_state()
     state["pendingControl"] = {
         "id": "control-1",
@@ -169,8 +163,8 @@ def test_pending_manual_control_prevents_duplicate_node_entry(tmp_path) -> None:
     assert snapshot["pendingControl"]["id"] == "control-1"
 
 
-def test_main_attachment_contains_structured_progress_and_routing_rules(tmp_path) -> None:
-    orchestrator = _orchestrator(tmp_path)
+def test_main_attachment_contains_structured_progress_and_routing_rules(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path)
     snapshot = orchestrator._main_progress_snapshot()
     text = build_main_attachment(PromptContext(str(tmp_path), "zh"), snapshot)
 

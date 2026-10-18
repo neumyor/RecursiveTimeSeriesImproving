@@ -12,6 +12,11 @@ from harnessing_ts.variants import DEFAULT_VARIANT_ID, AblationVariant, get_vari
 NODE_SPECS_BY_TYPE = {spec.type: spec for spec in NODE_SPECS}
 
 
+def is_reference_feature_path(value: Any) -> bool:
+    text = str(value or "").casefold()
+    return "reference-feature" in text or "reference_feature" in text
+
+
 class NodeStateMachine:
     def __init__(self, workspace_path: Path, variant: AblationVariant | None = None) -> None:
         self.workspace_path = workspace_path
@@ -111,11 +116,6 @@ class NodeStateMachine:
         if loop_decision == "exit" and next_node not in {None, "final-summary"}:
             raise RuntimeError("iterative-solving loopDecision=exit requires nextNode=final-summary.")
         route_decision = self.iterative_route_decision(next_node, loop_decision)
-        if success and self.variant.max_iterations == 1 and route_decision != "exit":
-            raise RuntimeError(
-                f"{self.variant.id} permits exactly one iterative-solving round; "
-                "finish with loopDecision=exit and nextNode=final-summary."
-            )
         if success and route_decision == "continue" and goal_met is True:
             raise RuntimeError("iterative-solving cannot set goalMet=true while loopDecision=continue.")
         if success:
@@ -148,18 +148,7 @@ class NodeStateMachine:
                 f"{self.variant.id} disables case review; remove case-review outputPaths "
                 "and do not generate reports/iterations/<iteration-id>-case-review.md."
             )
-        if self.variant.case_review and not self.variant.case_review_reference_features:
-            forbidden = [
-                path
-                for path in normalized
-                if "reference-feature" in path.casefold() or "reference_feature" in path.casefold()
-            ]
-            if forbidden:
-                raise RuntimeError(
-                    f"{self.variant.id} forbids executing or recording reference feature extractor usage "
-                    "during case review; remove these outputPaths: "
-                    + ", ".join(forbidden)
-                )
+        self.reject_reference_feature_paths("iterative-solving", normalized)
         missing = [
             label
             for label, pattern in requirements.items()
@@ -170,6 +159,22 @@ class NodeStateMachine:
                 "iterative-solving finish_node is missing required outputPaths: "
                 + ", ".join(missing)
                 + ". Complete the full node artifacts before calling finish_node."
+            )
+
+    def reject_reference_feature_paths(self, node_type: NodeType, values: list[str]) -> None:
+        """Reject reference-feature paths recorded by a case-review node that
+        may not execute the reference feature extractor (CXR variants)."""
+        if (
+            not self.variant.case_review
+            or self.variant.case_review_reference_features
+            or node_type != "iterative-solving"
+        ):
+            return
+        forbidden = [value for value in values if is_reference_feature_path(value)]
+        if forbidden:
+            raise RuntimeError(
+                f"{self.variant.id} forbids executing or recording reference feature extractor usage "
+                "during case review; remove these paths: " + ", ".join(forbidden)
             )
 
     def validate_knowledge_to_tools_output_paths(self, output_paths: list[str]) -> None:

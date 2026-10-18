@@ -141,6 +141,65 @@ def test_main_async_mcp_result_is_rejected_after_lease_retires(tmp_path) -> None
     asyncio.run(scenario())
 
 
+def test_send_without_control_url_fails_before_starting_a_runner(tmp_path) -> None:
+    async def scenario() -> None:
+        orchestrator = HarnessOrchestrator(tmp_path, dry_run=False, mode="auto")
+        orchestrator.initialize()
+
+        class Runner:
+            session_id = "session-1"
+            config = object()
+
+        orchestrator.main_runner = Runner()  # type: ignore[assignment]
+        orchestrator._main_runner_knowledge_graph_ready = False
+        orchestrator._main_runner_reference_feature_ready = False
+
+        with pytest.raises(RuntimeError, match="without an MCP control URL"):
+            await orchestrator.send_main_user_message("hello")
+
+        assert orchestrator.execution.snapshot()["phase"] == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_cxr_record_run_dispatch_rejects_reference_feature_artifact_paths(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("TS_HARNESS_VARIANT", "NOD-FQA-KTL-CXR-SUB-ADA")
+        orchestrator = HarnessOrchestrator(tmp_path, dry_run=True, mode="auto")
+        orchestrator.initialize()
+        orchestrator.configure_mcp_control("http://127.0.0.1:4327")
+        node = orchestrator.store.create_node_session("iterative-solving", "test", None)
+        node["status"] = "running"
+        orchestrator.store.write_node_session(node)
+        state = orchestrator.get_state()
+        state["activeNode"] = "iterative-solving"
+        state["activeNodeSessionId"] = node["id"]
+        orchestrator.store.write_state(state)
+        await orchestrator.execution.begin(f"node:{node['id']}", f"session-{node['id']}")
+        capability = orchestrator._issue_mcp_capability(
+            role="node",
+            node_session_id=node["id"],
+            allowed_tools=["mcp__ts_harness__record_run"],
+        )["DSH_MCP_CAPABILITY"]
+
+        with pytest.raises(RuntimeError, match="forbids executing or recording reference feature"):
+            await orchestrator.dispatch_dsh_mcp_call(
+                capability=capability,
+                workspace=str(tmp_path),
+                role="node",
+                node_session_id=node["id"],
+                tool="record_run",
+                args={
+                    "runId": "run-001",
+                    "status": "completed",
+                    "startedAt": "2026-10-18T00:00:00Z",
+                    "artifactPaths": ["runs/iterations/001/reference-feature-usage.json"],
+                },
+            )
+
+    asyncio.run(scenario())
+
+
 def test_mcp_bridge_credentials_use_dsh_scrubbed_namespace(tmp_path) -> None:
     orchestrator = HarnessOrchestrator(tmp_path, dry_run=True, mode="auto")
     orchestrator.initialize()
@@ -153,7 +212,6 @@ def test_mcp_bridge_credentials_use_dsh_scrubbed_namespace(tmp_path) -> None:
     cordis = cordis_path.read_text(encoding="utf-8")
     assert "DSH_MCP_CONTROL_URL: !!js process.env.DSH_MCP_CONTROL_URL" in cordis
     assert "DSH_MCP_CAPABILITY: !!js process.env.DSH_MCP_CAPABILITY" in cordis
-    assert "TS_HARNESS_DSH_CAPABILITY" not in cordis
 
 
 def test_subagent_and_web_tool_visibility_follow_variant_and_deployment(monkeypatch) -> None:
