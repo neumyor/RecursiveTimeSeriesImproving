@@ -721,6 +721,8 @@ def system_error_part_for_server(message: str) -> dict[str, Any]:
 
     part = system_text_part(f"Harness error: {message}")
     part["type"] = "result"
+    part["status"] = "failed"
+    part["resultText"] = message
     part["raw"] = {"is_error": True, "result": message}
     return part
 
