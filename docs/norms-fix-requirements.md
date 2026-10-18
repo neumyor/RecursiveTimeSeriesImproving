@@ -54,7 +54,9 @@
 
 **阶段**
 
-1. 第一节的 13 条错误。3 个子智能体同时进行：A 负责 `headroom/`，B 负责 `experiments/loop.py` 和 `experiments/prompts/`，C 负责 `experiments/` 下其余文件。`rounds.jsonl` 和 heldout 目录的字段结构不变。完成标准：`uv run pytest -q` 全部通过。结束后向管理者会话汇报。
+1. 第一节的错误（报告见 docs/norms-review-findings.md 第一节，含 13 条主条目和 4 条补充条目）。3 个子智能体同时进行：A 负责 `headroom/`，B 负责 `experiments/loop.py` 和 `experiments/prompts/`，C 负责 `experiments/` 下其余文件。`rounds.jsonl` 和 heldout 目录的字段结构不变。完成标准：`uv run pytest -q` 全部通过。结束后向管理者会话汇报。条目编号（提交说明使用）：
+   - A1→报告条目 2（截距）；A2→条目 14（lag 窗口）；A3→条目 15（synthetic 默认配置）；A4→条目 16（表格转义）；A5/A6→条目 12（截断上限：探针输出、错误输出）；B1→条目 1（hgroup 切轴）；B2→条目 4（计时）；B3→条目 5（判定触发）；B4→条目 6（原地修复）；B5→条目 12（历史轮数）；B6→条目 11a（heldout 重建）；B7→条目 11b（写入顺序）；B8→条目 10（家族数量）；C1→条目 3（batch 取消）；C2→条目 7（比例）；C3→条目 8（--m0-template）；C4→条目 11c（未完成运行）；C5→条目 13（judgeAccounting）；C6→条目 9（stage0 继承）；C7→条目 17（fixture_gen 门控）；C8→规格版本化的必然结果（新建 main-v3.json）。
+   - 以下子智能体顺手完成的条目属于第三至五节，阶段 1 的提交和标签不包含它们，留到阶段 2 提交：A7-A10（docstring 位置、certify level 残留、实验组数量注释、synthetic 注释）、B9-B11（测试写入主目录、loop docstring 与修改痕迹、_evolution_digest 改名）、C9-C11（stage0 冒烟测试写入仓库、docstring 位置、修改痕迹）。
 2. `headroom/` 和 `experiments/` 中属于第三、四、五节的问题，包括把重复的拟合预测流程集中到 `evaluate.py`。
 3. 后端核心模块中属于第三、四、五节的问题。3 个子智能体同时进行：D 负责控制流模块，E 负责知识、状态和设置模块，F 负责服务入口、测试、脚本和文档。开始前由主智能体写好 `settings/llm.py` 中的 `sanitize_llm_config`。完成标准：`pytest` 通过，`uv run ts-harness variants` 正常输出。
 4. 第二节的问题，以及 `main.ts` 中属于第三至五节的问题。G 负责后端，H 负责前端。后端遇到 SDK 错误结果时在公开字段中设置 `status: "failed"` 和 `resultText`。完成标准：`pytest` 通过，`bun run build` 成功，浏览器预览检查对话和设置页面。
