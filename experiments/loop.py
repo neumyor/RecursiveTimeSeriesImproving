@@ -283,7 +283,7 @@ class HeadroomLoop:
             task = realdata.load_real_task(self.real_csv, self.cfg)
             self.values, self.cert_values, self.diag_start = task.train_diag, task.cert, task.diag_start
         else:
-            task = REGISTRY[self.task_name](seed=self.seed, sizes=self.sizes)
+            task = REGISTRY[self.task_name](seed=self.seed, sizes=self.sizes, cfg=self.cfg)
             self.values, self.cert_values = task.train_diag, task.cert
             self.diag_start = task.diag_start
         self.train = self.values[: self.diag_start]
