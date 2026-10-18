@@ -4,7 +4,7 @@ One run = one (task, arm, seed) cell produced by experiments/loop.py.  This
 script never talks to an LLM: it replays each run's incumbent chain offline
 (re-fit every accepted candidate on train, predict the held-out test
 segment), applies the uniform m+g postprocessing to every incumbent, and
-scores the pre-registered endpoints (experiments/specs/main-v2.json):
+scores the pre-registered endpoints (experiments/specs/main-v3.json):
 
 - E1  normalized test optimality gap of the FINAL incumbent after the m+g
       postprocessing, ngap = gap(final)/gap(m0); real tasks (no oracle)
@@ -414,11 +414,10 @@ def _analyze_run_inner(
     cfg = replay.cfg
     rounds = _read_jsonl(run_dir / "rounds.jsonl")
     arm = next((str(row["arm"]) for row in rounds if row.get("arm")), None)
-    # The incumbent chain: accepted rounds in order, m0 first.  Ids cannot
-    # repeat in a healthy ledger; the membership guard is cheap insurance.
+    # The incumbent chain: accepted rounds in order, m0 first.
     chain = ["m0"]
     for row in rounds:
-        if row.get("accepted") and row["candidateId"] not in chain:
+        if row.get("accepted"):
             chain.append(str(row["candidateId"]))
     accepted_rows = [row for row in rounds if row.get("accepted")]
     evaluated_rows = [row for row in rounds if row.get("status") == "evaluated"]
