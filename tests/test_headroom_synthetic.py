@@ -11,7 +11,6 @@ from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.synthetic import (
     _ARFIMA_ORDER,
     _ARFIMA_PREFIX,
-    _PREFIX,
     DEFAULT_SIZES,
     REGISTRY,
     NonlinearXChannelOracle,
@@ -33,6 +32,7 @@ CHANNELS = {
 CFG = HeadroomConfig()  # horizon 24, burn_in 591
 CFG_TINY = HeadroomConfig(input_length=8, horizon=6)
 CFG_H4 = HeadroomConfig(input_length=8, horizon=4)
+PREFIX = CFG.burn_in + CFG.input_length  # unscored rows in front of cert/test
 
 
 @functools.lru_cache(maxsize=None)
@@ -54,7 +54,7 @@ def test_registry_matches_contract_and_sizes_validate() -> None:
     assert set(REGISTRY) == set(CHANNELS)
     assert DEFAULT_SIZES == {"train": 20_000, "diag": 10_000, "cert": 12_000, "test": 20_000}
     task = REGISTRY["random_walk"](0, {"cert": 64})
-    assert task.cert.shape[0] == _PREFIX + 64
+    assert task.cert.shape[0] == PREFIX + 64
     with pytest.raises(ValueError, match="unknown size key"):
         REGISTRY["garch"](0, {"train": 10, "nope": 5})
     with pytest.raises(ValueError, match="positive int"):
@@ -79,11 +79,38 @@ def test_different_seeds_produce_different_draws() -> None:
     assert not np.array_equal(a, b)
 
 
+def test_lengths_and_mse_horizons_follow_the_building_cfg() -> None:
+    """Segment prefixes and the theoretical-MSE horizon come from the config
+    the task is built with, not from the module defaults."""
+    sizes = {"train": 10, "diag": 10, "cert": 40, "test": 30}
+    cfg = HeadroomConfig(input_length=8, horizon=6)
+    prefix = cfg.burn_in + cfg.input_length
+    assert prefix != PREFIX  # a non-default config must move the prefix
+    walk = REGISTRY["random_walk"](0, sizes, cfg=cfg)
+    assert walk.cert.shape[0] == prefix + sizes["cert"]
+    assert walk.test.shape[0] == prefix + sizes["test"]
+    np.testing.assert_allclose(
+        walk.oracle.mse_theoretical(), 0.1**2 * np.arange(1, cfg.horizon + 1)
+    )
+    xchan = REGISTRY["lgssm_xchannel"](0, sizes, cfg=cfg)
+    assert xchan.cert.shape[0] == prefix + sizes["cert"]
+    assert xchan.oracle.mse_theoretical().shape == (cfg.horizon,)
+    # arfima keeps at least its DL-order prefix and extends it when the cfg's
+    # burn-in needs more rows.
+    deep = HeadroomConfig(lag_segments=((0, 2_000),))
+    arf = REGISTRY["arfima"](0, sizes, cfg=deep)
+    deep_prefix = deep.burn_in + deep.input_length
+    assert deep_prefix > _ARFIMA_PREFIX
+    assert arf.cert.shape[0] == deep_prefix + sizes["cert"]
+    default_arf = REGISTRY["arfima"](0, sizes)
+    assert default_arf.cert.shape[0] == _ARFIMA_PREFIX + sizes["cert"]
+
+
 @pytest.mark.parametrize("name", sorted(CHANNELS))
 def test_shapes_channels_and_forecast_output(name: str) -> None:
     task = small_task(name)
     c = CHANNELS[name]
-    prefix = _ARFIMA_PREFIX if name == "arfima" else _PREFIX
+    prefix = _ARFIMA_PREFIX if name == "arfima" else PREFIX
     if name == "arfima":
         # fresh segments must give the DL oracle its full lag set from the
         # first usable origin onwards (and the usual burn-in prefix besides)
@@ -167,7 +194,7 @@ def test_xchannel_oracle_matches_direct_var_recursion() -> None:
     for entry in task.structure["couplings"]:
         phi_lags[entry["lag"] - 1, entry["target"], entry["source"]] = entry["coef"]
     seg = task.cert
-    for origin in (_PREFIX + 8, _PREFIX + 90):
+    for origin in (PREFIX + 8, PREFIX + 90):
         means = {t: seg[t].copy() for t in range(origin + 1)}
         for h in range(1, CFG_TINY.horizon + 1):
             means[origin + h] = sum(phi_lags[k] @ means[origin + h - 1 - k] for k in range(len(phi_lags)))
@@ -337,7 +364,7 @@ def test_arfima_short_history_truncates_the_lag_set_gracefully() -> None:
 
 def test_negative_control_oracles() -> None:
     garch = small_task("garch")
-    origins = np.array([_PREFIX, _PREFIX + 10])
+    origins = np.array([PREFIX, PREFIX + 10])
     pred = garch.oracle.forecast(garch.cert, origins, CFG)
     assert pred.shape == (2, CFG.horizon, 1)
     assert (pred == 0.0).all()
@@ -361,7 +388,7 @@ def test_forecast_rejects_bad_arguments() -> None:
         task.oracle.forecast(task.cert, np.array([task.cert.shape[0] - 1]), CFG)
     multiperiod = small_task("lgssm_multiperiod")
     with pytest.raises(ValueError, match="channels"):
-        multiperiod.oracle.forecast(multiperiod.cert[:, :2], np.array([_PREFIX]), CFG)
+        multiperiod.oracle.forecast(multiperiod.cert[:, :2], np.array([PREFIX]), CFG)
 
 
 # --- nonlinear_xchannel (tanh-coupled cross-channel VAR) -------------------------
@@ -379,7 +406,7 @@ def nlx_mc_task(seed: int = 7) -> SyntheticTask:
 def test_nonlinear_xchannel_same_seed_reproducible_forecasts() -> None:
     first = small_task("nonlinear_xchannel")
     second = REGISTRY["nonlinear_xchannel"](0, SMALL)
-    origins = np.array([_PREFIX + 5, _PREFIX + 61, _PREFIX + 130])
+    origins = np.array([PREFIX + 5, PREFIX + 61, PREFIX + 130])
     left = first.oracle.forecast(first.cert, origins, CFG_H8)
     right = second.oracle.forecast(second.cert, origins, CFG_H8)
     np.testing.assert_array_equal(left, right)
@@ -395,7 +422,7 @@ def test_nonlinear_xchannel_one_step_oracle_is_exact() -> None:
     task = nlx_mc_task()
     oracle = task.oracle
     seg = task.cert
-    origins = np.array([_PREFIX + 10, _PREFIX + 200, _PREFIX + 900])
+    origins = np.array([PREFIX + 10, PREFIX + 200, PREFIX + 900])
     closed = oracle.one_step_mean(seg, origins + 1)
     mc = oracle.path_means(seg, origins, 1, 200_000, np.random.default_rng(11))
     # expected MS gap = sigma^2 / n_paths ~ 4e-6 (the MC noise floor); 1e-4
@@ -403,7 +430,7 @@ def test_nonlinear_xchannel_one_step_oracle_is_exact() -> None:
     # lag-indexing slip, which would err at O(0.1)
     assert float(((closed - mc[:, 0, :]) ** 2).mean()) < 1e-4
 
-    times = np.arange(_PREFIX, _PREFIX + 1_600)
+    times = np.arange(PREFIX, PREFIX + 1_600)
     resid = seg[times + 1] - oracle.one_step_mean(seg, times + 1)
     # exact 1-step residuals are the innovations themselves; corr se ~
     # 1/sqrt(1600) = 0.025, so 0.1 is ~4 sigma per pair (the max over the 32
@@ -417,7 +444,7 @@ def test_nonlinear_xchannel_one_step_oracle_is_exact() -> None:
 def test_nonlinear_xchannel_h_step_matches_independent_mc() -> None:
     task = nlx_mc_task()
     seg = task.cert
-    origins = np.array([_PREFIX + 33, _PREFIX + 133, _PREFIX + 533, _PREFIX + 1_033])
+    origins = np.array([PREFIX + 33, PREFIX + 133, PREFIX + 533, PREFIX + 1_033])
     got = task.oracle.forecast(seg, origins, CFG_H6)
     # brute force with a different seed and 200x the oracle's 1000 paths
     brute = task.oracle.path_means(seg, origins, 6, 200_000, np.random.default_rng(4_242))
@@ -434,7 +461,7 @@ def test_nonlinear_xchannel_default_seed_stays_bounded() -> None:
         assert np.isfinite(arr).all()
         assert float(np.abs(arr).max()) < 50
     # the sigma calibration's contract: channels roughly unit variance
-    np.testing.assert_allclose(task.cert[_PREFIX:].std(axis=0), 1.0, rtol=0.1)
+    np.testing.assert_allclose(task.cert[PREFIX:].std(axis=0), 1.0, rtol=0.1)
 
 
 def test_nonlinear_xchannel_tanh_carries_conditional_mean_variance() -> None:
@@ -468,7 +495,7 @@ def test_nonlinear_xchannel_tanh_carries_conditional_mean_variance() -> None:
     # explaining the linear part alone and linear+tanh
     linear_only = NonlinearXChannelOracle(lags, a, np.zeros_like(b), oracle.sigma)
     seg = task.cert
-    times = np.arange(_PREFIX, seg.shape[0] - 1)
+    times = np.arange(PREFIX, seg.shape[0] - 1)
     realized = seg[times + 1]
     mse_full = float(((realized - oracle.one_step_mean(seg, times + 1)) ** 2).mean())
     mse_linear = float(((realized - linear_only.one_step_mean(seg, times + 1)) ** 2).mean())

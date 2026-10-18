@@ -16,12 +16,15 @@ DEFAULT_SIZES: dict[str, int] = {"train": 20_000, "diag": 10_000, "cert": 12_000
 
 # Fresh cert/test simulations carry this many unscored rows in front so that every
 # feature the pipeline builds at its first usable origin is already realized history.
-_PREFIX = HeadroomConfig().burn_in + HeadroomConfig().input_length  # 687
 _ARFIMA_PREFIX = 2_100  # also >= the DL order, so most origins see the full lag set
 _ARFIMA_D = 0.35
 _ARFIMA_ORDER = 2_000  # Durbin-Levinson depth of the oracle (>= default burn-in)
 _ARFIMA_MA_TRUNC = 2_000_000  # fractional-differencing truncation, see arfima()
-_HORIZON = HeadroomConfig().horizon  # mse_theoretical() takes no cfg argument
+
+
+def _fresh_prefix(cfg: HeadroomConfig) -> int:
+    """Unscored burn-in rows in front of every fresh cert/test segment."""
+    return cfg.burn_in + cfg.input_length
 
 
 class Oracle(Protocol):
@@ -42,8 +45,9 @@ class SyntheticTask:
 
     ``train_diag`` is a single continuous simulation split at ``diag_start``
     (train before, diag after).  ``cert`` and ``test`` are fresh independent
-    simulations of the same process whose first ``_PREFIX`` rows (``_ARFIMA_PREFIX``
-    for the arfima task) are a burn-in prefix on top of the requested content.
+    simulations of the same process whose first rows — ``burn_in +
+    input_length`` of the building config, at least ``_ARFIMA_PREFIX`` for the
+    arfima task — are a burn-in prefix on top of the requested content.
     """
 
     name: str
@@ -77,6 +81,11 @@ def _spawn(seed: int) -> tuple[np.random.Generator, np.random.Generator, np.rand
         raise ValueError(f"seed must be a non-negative int, got {seed!r}")
     main, cert, test = np.random.SeedSequence(int(seed)).spawn(3)
     return np.random.default_rng(main), np.random.default_rng(cert), np.random.default_rng(test)
+
+
+def _resolve_cfg(cfg: HeadroomConfig | None) -> HeadroomConfig:
+    """The run's config; builders called without one get the defaults."""
+    return HeadroomConfig() if cfg is None else cfg
 
 
 def _check_forecast_args(
@@ -193,14 +202,16 @@ class KalmanOracle:
     """
 
     def __init__(self, A: np.ndarray, Q: np.ndarray, H: np.ndarray, R: np.ndarray,
-                 P0: np.ndarray) -> None:
+                 P0: np.ndarray, horizon: int) -> None:
         self.A = np.array(A, dtype=np.float64)
         self.Q = np.array(Q, dtype=np.float64)
         self.H = np.array(H, dtype=np.float64)
         self.R = np.array(R, dtype=np.float64)
         self.P0 = np.array(P0, dtype=np.float64)
         p_inf = _steady_filter_cov(self.A, self.Q, self.H, self.R, self.P0)
-        self._mse = _kalman_forecast_mse(self.A, self.Q, self.H, self.R, p_inf, _HORIZON)
+        # The horizon is bound at construction: mse_theoretical() reports the
+        # theoretical MSE at the horizon of the config the task was built with.
+        self._mse = _kalman_forecast_mse(self.A, self.Q, self.H, self.R, p_inf, horizon)
 
     def forecast(self, seg: np.ndarray, origins: np.ndarray, cfg: HeadroomConfig) -> np.ndarray:
         seg, origins = _check_forecast_args(seg, origins, cfg)
@@ -444,8 +455,9 @@ class ZeroOracle:
 class LastValueOracle:
     """Random walk: E[x[o+h] | I_o] = x[o] for every h."""
 
-    def __init__(self, sigma: float) -> None:
+    def __init__(self, sigma: float, horizon: int) -> None:
         self.sigma = float(sigma)
+        self.horizon = int(horizon)
 
     def forecast(self, seg: np.ndarray, origins: np.ndarray, cfg: HeadroomConfig) -> np.ndarray:
         seg, origins = _check_forecast_args(seg, origins, cfg)
@@ -454,10 +466,12 @@ class LastValueOracle:
         return out
 
     def mse_theoretical(self) -> np.ndarray:
-        return self.sigma**2 * np.arange(1, _HORIZON + 1, dtype=np.float64)
+        return self.sigma**2 * np.arange(1, self.horizon + 1, dtype=np.float64)
 
 
-def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def lgssm_multiperiod(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=4 LGSSM: a slow level, damped 24- and 168-period oscillators, colored noise.
 
     Latent state (5): an AR(1) level with phi = 0.995, plus a lightly damped
@@ -475,6 +489,8 @@ def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> Synthet
     unit variance through the known theoretical per-channel variance.
     """
     sizes = _merge_sizes(sizes)
+    cfg = _resolve_cfg(cfg)
+    prefix = _fresh_prefix(cfg)
     rng_main, rng_cert, rng_test = _spawn(seed)
 
     phi_level = 0.995
@@ -541,9 +557,9 @@ def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> Synthet
         name="lgssm_multiperiod",
         train_diag=simulate(rng_main, sizes["train"] + sizes["diag"]),
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _PREFIX + sizes["test"]),
-        oracle=KalmanOracle(A, Q, H, R, P0),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
+        oracle=KalmanOracle(A, Q, H, R, P0, cfg.horizon),
         structure={
             "periods": list(periods),
             "n_channels": 4,
@@ -554,7 +570,9 @@ def lgssm_multiperiod(seed: int, sizes: dict[str, int] | None = None) -> Synthet
     )
 
 
-def lgssm_xchannel(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def lgssm_xchannel(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=4 VAR with cross-channel couplings at mixed lags 3/5/7, no observation noise.
 
     y_t = sum_j A_ij y_{j, t-lag_ij} + eps_t with a sparse, cyclic coupling pattern
@@ -567,6 +585,8 @@ def lgssm_xchannel(seed: int, sizes: dict[str, int] | None = None) -> SyntheticT
     couplings and the innovations).
     """
     sizes = _merge_sizes(sizes)
+    cfg = _resolve_cfg(cfg)
+    prefix = _fresh_prefix(cfg)
     rng_main, rng_cert, rng_test = _spawn(seed)
 
     n_channels = 4
@@ -627,9 +647,9 @@ def lgssm_xchannel(seed: int, sizes: dict[str, int] | None = None) -> SyntheticT
         name="lgssm_xchannel",
         train_diag=simulate(rng_main, sizes["train"] + sizes["diag"]),
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _PREFIX + sizes["test"]),
-        oracle=KalmanOracle(F, Q, H, R, P0),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
+        oracle=KalmanOracle(F, Q, H, R, P0, cfg.horizon),
         structure={
             "n_channels": n_channels,
             "max_lag": max_lag,
@@ -642,7 +662,9 @@ def lgssm_xchannel(seed: int, sizes: dict[str, int] | None = None) -> SyntheticT
     )
 
 
-def hmm_ar_switch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def hmm_ar_switch(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=1 Markov-switching AR(1): two sticky regimes, no observation noise.
 
     Regime s has mean mu_s in {0, 2} and AR coefficient phi_s in {0.3, 0.95};
@@ -654,6 +676,7 @@ def hmm_ar_switch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTa
     the stationary sd is ~1.2, already roughly unit.
     """
     sizes = _merge_sizes(sizes)
+    prefix = _fresh_prefix(_resolve_cfg(cfg))
     rng_main, rng_cert, rng_test = _spawn(seed)
 
     trans = np.array([[0.99, 0.01], [0.02, 0.98]])
@@ -688,8 +711,8 @@ def hmm_ar_switch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTa
         name="hmm_ar_switch",
         train_diag=simulate(rng_main, sizes["train"] + sizes["diag"]),
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _PREFIX + sizes["test"]),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
         oracle=HmmOracle(trans, mu, phi, sigma, pi),
         structure={
             "n_regimes": 2,
@@ -702,7 +725,9 @@ def hmm_ar_switch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTa
     )
 
 
-def arfima(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def arfima(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=1 ARFIMA(0, d=0.35, 0) with unit innovation variance.
 
     Simulation is truncated fractional differencing with M = 2e6 MA terms
@@ -719,11 +744,13 @@ def arfima(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
     optimum ~1.0001, i.e. the simulation/oracle mismatch is negligible.  Origins
     with fewer than 2000 realized rows use the optimal AR of their available lag
     depth (within 0.02% of the full-depth MSE at the default burn-in, measured).
-    Fresh segments carry a 2100-row prefix (>= the DL order), so the scored
+    Fresh segments carry at least a 2100-row prefix (>= the DL order), extended
+    to the config's burn_in + input_length when that is larger, so the scored
     content rows always see the full lag set; only origins inside the burn-in
     window between 591 and 2000 use the truncated path.
     """
     sizes = _merge_sizes(sizes)
+    prefix = max(_ARFIMA_PREFIX, _fresh_prefix(_resolve_cfg(cfg)))
     rng_main, rng_cert, rng_test = _spawn(seed)
 
     def simulate(rng: np.random.Generator, T: int) -> np.ndarray:
@@ -734,8 +761,8 @@ def arfima(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
         name="arfima",
         train_diag=simulate(rng_main, sizes["train"] + sizes["diag"]),
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _ARFIMA_PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _ARFIMA_PREFIX + sizes["test"]),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
         oracle=oracle,
         structure={
             "d": _ARFIMA_D,
@@ -747,7 +774,9 @@ def arfima(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
     )
 
 
-def garch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def garch(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=1 GARCH(1,1) with alpha=0.05, beta=0.9 and unit unconditional variance.
 
     A zero-mean martingale difference: the conditional mean is exactly zero at
@@ -757,6 +786,7 @@ def garch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
     simulation exactly stationary from the first row.
     """
     sizes = _merge_sizes(sizes)
+    prefix = _fresh_prefix(_resolve_cfg(cfg))
     rng_main, rng_cert, rng_test = _spawn(seed)
 
     alpha, beta = 0.05, 0.9
@@ -777,20 +807,24 @@ def garch(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
         name="garch",
         train_diag=simulate(rng_main, sizes["train"] + sizes["diag"]),
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _PREFIX + sizes["test"]),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
         oracle=ZeroOracle(),
         structure={"alpha": alpha, "beta": beta, "omega": omega},
     )
 
 
-def random_walk(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def random_walk(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=1 random walk with increment sd 0.1; the oracle is the last observed value.
 
     Not variance-scaled: a random walk is non-stationary by design and the 0.1
     increment scale is already the stability-relevant quantity.
     """
     sizes = _merge_sizes(sizes)
+    cfg = _resolve_cfg(cfg)
+    prefix = _fresh_prefix(cfg)
     rng_main, rng_cert, rng_test = _spawn(seed)
     sigma = 0.1
 
@@ -801,9 +835,9 @@ def random_walk(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask
         name="random_walk",
         train_diag=simulate(rng_main, sizes["train"] + sizes["diag"]),
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _PREFIX + sizes["test"]),
-        oracle=LastValueOracle(sigma),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
+        oracle=LastValueOracle(sigma, cfg.horizon),
         structure={"sigma": sigma},
     )
 
@@ -1092,7 +1126,9 @@ class NonlinearXChannelOracle:
         return None
 
 
-def nonlinear_xchannel(seed: int, sizes: dict[str, int] | None = None) -> SyntheticTask:
+def nonlinear_xchannel(
+    seed: int, sizes: dict[str, int] | None = None, cfg: HeadroomConfig | None = None
+) -> SyntheticTask:
     """C=4 nonlinear cross-channel VAR: tanh couplings at per-pair lags 3/5/7 (contract §8).
 
     Dynamics: y_{i,t} = sum_j a_ij y_{j,t-lag_ij} + sum_j b_ij tanh(y_{j,t-lag_ij})
@@ -1124,9 +1160,10 @@ def nonlinear_xchannel(seed: int, sizes: dict[str, int] | None = None) -> Synthe
     mse_theoretical() is None — no closed form exists.  Every stream is
     simulated with a _NLX_BURN_IN burn-in prefix discarded in front, then the
     usual train_diag / cert / test layout (cert/test fresh spawns with the
-    standard _PREFIX), bitwise reproducible under the same seed.
+    standard burn-in prefix), bitwise reproducible under the same seed.
     """
     sizes = _merge_sizes(sizes)
+    prefix = _fresh_prefix(_resolve_cfg(cfg))
     rng_main, rng_cert, rng_test = _spawn(seed)
     # Children 0-2 are the same simulation streams _spawn hands out; 3-5 are
     # this task's own design / calibration / MC streams.
@@ -1195,8 +1232,8 @@ def nonlinear_xchannel(seed: int, sizes: dict[str, int] | None = None) -> Synthe
         name="nonlinear_xchannel",
         train_diag=train_diag,
         diag_start=sizes["train"],
-        cert=simulate(rng_cert, _PREFIX + sizes["cert"]),
-        test=simulate(rng_test, _PREFIX + sizes["test"]),
+        cert=simulate(rng_cert, prefix + sizes["cert"]),
+        test=simulate(rng_test, prefix + sizes["test"]),
         oracle=oracle,
         structure={
             "n_channels": _NLX_CHANNELS,
