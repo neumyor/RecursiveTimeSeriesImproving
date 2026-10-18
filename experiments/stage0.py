@@ -64,6 +64,10 @@ from harnessing_ts.headroom.timeidx import segment_origins
 def _report_dir(smoke: bool) -> Path:
     return _REPO_ROOT / "experiments" / "runs" / ("stage0-smoke" if smoke else "stage0")
 
+
+def _deep_report_dir(smoke: bool) -> Path:
+    return _REPO_ROOT / "experiments" / "runs" / ("stage0-v2-smoke" if smoke else "stage0-v2")
+
 # Pre-registered (task, model) -> expected top-card aspects (final plan §5).
 # Period-168 structure exceeds the lookback, so beyond-l is a legitimate top
 # coordinate for multiperiod; xchannel coupling lives at lags 3-7, visible to
@@ -701,9 +705,7 @@ def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
     if smoke:
         seeds = 1
     seed_list = list(range(seeds))
-    report_dir = _REPO_ROOT / "experiments" / "runs" / (
-        "stage0-v2-smoke" if smoke else "stage0-v2"
-    )
+    report_dir = _deep_report_dir(smoke)
     pairs = list(DEEP_EXPECTED_ASPECTS)
     report: dict[str, Any] = {
         "mode": "deep-recalibration",
