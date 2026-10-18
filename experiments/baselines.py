@@ -18,7 +18,6 @@ evaluate.py's Adapter contract and segment assembly; nothing here reimplements
 segment construction.
 """
 
-
 from pathlib import Path
 import sys
 from dataclasses import replace

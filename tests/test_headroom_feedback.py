@@ -340,6 +340,8 @@ def test_probe_table_escapes_pipes_and_newlines() -> None:
     )
     assert "| p\\|1 | kept | validated with pipe\\|detail |" in out
     assert "| p\\|2 | rejected | signalKey missing |" in out
+
+
     assert "| p\\|1 | mean\\|sd of e |" in out
     assert '"note": "a\\|b"' in out
     # the raw characters never break a table row
@@ -385,3 +387,25 @@ def test_augmented_renders_card_and_probe_outputs_together() -> None:
     assert "## Probe validation results" in out
     assert "| p-nonlin | kept | validated |" in out
     assert '"r2": 0.2' in out
+
+
+def test_probe_error_text_escapes_pipes_and_newlines() -> None:
+    """A probe that failed carries a traceback; the error text must stay one
+    markdown line with escaped pipes."""
+    out = render_feedback(
+        "self-built",
+        _make_incumbent(),
+        [],
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[
+            {
+                "probeId": "p-err",
+                "measures": "mean of e",
+                "error": "Traceback (most recent call last):\n  File \"p.py\", line 3 | boom",
+            }
+        ],
+    )
+    row = [line for line in out.splitlines() if line.startswith("| p-err |")]
+    assert len(row) == 1
+    assert "line 3 \\| boom" in row[0]

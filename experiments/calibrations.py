@@ -36,7 +36,6 @@ Usage:
     uv run --extra research python experiments/calibrations.py --only cal2
 """
 
-
 import argparse
 from pathlib import Path
 import sys

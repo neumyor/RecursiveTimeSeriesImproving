@@ -164,7 +164,7 @@ def _probe_table(
         # spec freezes "8 newest rows".
         for row in probe_rows[-_PROBE_MAX_ROWS:]:
             if "error" in row and row["error"]:
-                output = f"ERROR: {row['error']}"
+                output = _cell(f"ERROR: {row['error']}")
             else:
                 output = _cell(json.dumps(_probe_safe(row.get("output")), ensure_ascii=False))
                 if len(output) > _PROBE_OUTPUT_CHARS:
