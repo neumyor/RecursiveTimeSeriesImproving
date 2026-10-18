@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.signal import firwin, lfilter, periodogram
 
-from harnessing_ts.headroom.config import HeadroomConfig
+from harnessing_ts.headroom.config import BEYOND_L_STRIDE, HeadroomConfig
 from harnessing_ts.headroom.inference import auto_bandwidth, mean_ci
 from harnessing_ts.headroom.residuals import SegmentData
 
@@ -15,6 +15,11 @@ from harnessing_ts.headroom.residuals import SegmentData
 # to the first lag segment so the e history and value differences stay
 # comparable in depth.
 _CHANNEL_LAGS = 24
+
+# From this lag depth on neighbouring lags are nearly collinear in any series
+# slow enough to matter at that depth, so _lag_block samples them every second
+# step: it costs little and keeps the feature count bounded.
+_DEEP_LAG_START = 96
 
 # Every coordinate names the defect it can repair with the same neutral
 # aspect vocabulary the feedback arms share.
@@ -124,7 +129,6 @@ def enumerate_coordinates(
     cfg: HeadroomConfig,
     period_peaks: list[int],
     n_channels: int,
-    horizon: int,
 ) -> list[Coordinate]:
     """The repairable coordinates; hgroups are added by all_gains, not here."""
     coordinates = [
@@ -145,17 +149,14 @@ def enumerate_coordinates(
             for i in range(min(n_channels, cfg.channel_max))
         ]
     # The horizon coordinate needs no spec: its per-h blocks are implied by
-    # r_full's shape; `horizon` stays in the signature per the contract.
+    # r_full's shape.
     coordinates.append(Coordinate("horizon", "horizon", _COORDINATE_ASPECTS["horizon"], {}))
     return coordinates
 
 
 def _lag_block(e_full: np.ndarray, origins: np.ndarray, k1: int, k2: int) -> np.ndarray:
     """e_full[o-k] for k in [k1, k2]; deep lags are sampled every second step."""
-    # From k1 >= 96 (the default third segment) neighbouring lags are nearly
-    # collinear in any series slow enough to matter at that depth, so
-    # stepping by 2 costs little and keeps the feature count bounded.
-    step = 2 if k1 >= 96 else 1
+    step = 2 if k1 >= _DEEP_LAG_START else 1
     ks = np.arange(k1, k2 + 1, step)
     idx = origins[:, None] - ks[None, :]
     return e_full[idx].reshape(origins.size, ks.size * e_full.shape[1])
@@ -191,7 +192,7 @@ def _beyond_block(values: np.ndarray, origins: np.ndarray, cfg: HeadroomConfig) 
     measure structure the model's window could never see (A-M11), and
     differencing against values[o] keeps the feature level-free.
     """
-    ks = cfg.input_length + 16 * np.arange(cfg.beyond_l_lags)
+    ks = cfg.input_length + BEYOND_L_STRIDE * np.arange(cfg.beyond_l_lags)
     past = values[origins[:, None] - ks[None, :]]
     current = values[origins][:, None, :]
     return (past - current).reshape(origins.size, ks.size * values.shape[1])
@@ -275,6 +276,17 @@ def build_features(
     return x, y
 
 
+def _internal_split(n: int, embargo: int) -> tuple[int, int]:
+    """The 80/20 fit/eval row split with an `embargo` gap between them."""
+    n_fit = int(n * 0.8)
+    eval_start = n_fit + embargo
+    if n_fit < 2 or eval_start >= n:
+        raise ValueError(
+            f"need more than {eval_start} rows for the 80/20 split with embargo {embargo}, got {n}"
+        )
+    return n_fit, eval_start
+
+
 def _fit_ridge(
     x: np.ndarray,
     y: np.ndarray,
@@ -288,14 +300,7 @@ def _fit_ridge(
     refit on every row: it has been validated, so hiding rows from the final
     corrector would only discard information.
     """
-    n = x.shape[0]
-    n_fit = int(n * 0.8)
-    eval_start = n_fit + embargo
-    if n_fit < 2 or eval_start >= n:
-        raise ValueError(
-            f"need more than {eval_start} rows for the 80/20 alpha split with "
-            f"embargo {embargo}, got {n}"
-        )
+    n_fit, eval_start = _internal_split(x.shape[0], embargo)
     x_fit, y_fit = x[:n_fit], y[:n_fit]
     x_val, y_val = x[eval_start:], y[eval_start:]
     mean_x, mean_y = x_fit.mean(axis=0), y_fit.mean(axis=0)
@@ -348,12 +353,7 @@ def coordinate_gain(
         if coord.kind == "channel"
         else list(range(r.shape[2]))
     )
-    steps = (
-        slice(int(coord.spec["h1"]) - 1, int(coord.spec["h2"]))
-        if coord.kind == "hgroup"
-        else slice(None)
-    )
-    d = gains[:, steps, channels].mean(axis=(1, 2))
+    d = gains[:, :, channels].mean(axis=(1, 2))
     mean, lcb, ucb = mean_ci(d, bandwidth=auto_bandwidth(d, _min_bandwidth(cfg)), level=level)
     return GainReport(
         coordinate=coord,
@@ -385,7 +385,6 @@ class FittedCorrector:
     stds: np.ndarray  # [F] feature stds from the fit rows
     coef: np.ndarray  # [F, H*C] in standardized space
     intercept: np.ndarray  # [H*C]
-    label: str = "total"
 
 
 def _pool_coordinates(
@@ -395,7 +394,7 @@ def _pool_coordinates(
 ) -> list[Coordinate]:
     """Coordinates eligible for greedy aggregation (horizon fits per-h)."""
     return [
-        c for c in enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon)
+        c for c in enumerate_coordinates(cfg, period_peaks, n_channels)
         if c.kind != "horizon"
     ]
 
@@ -410,22 +409,10 @@ def _min_bandwidth(cfg: HeadroomConfig) -> int:
     return cfg.max_lag + cfg.horizon
 
 
-def _internal_split(n: int, embargo: int) -> tuple[int, int]:
-    n_fit = int(n * 0.8)
-    eval_start = n_fit + embargo
-    if n_fit < 2 or eval_start >= n:
-        raise ValueError(
-            f"need more than {eval_start} rows for the 80/20 split with embargo {embargo}, got {n}"
-        )
-    return n_fit, eval_start
-
-
 def fit_greedy(
     seg_a: SegmentData,
     cfg: HeadroomConfig,
     period_peaks: list[int],
-    *,
-    max_steps: int = 4,
 ) -> FittedCorrector:
     """Greedy forward selection of coordinates on the A segment alone."""
     pool = _pool_coordinates(cfg, period_peaks, seg_a.values.shape[1])
@@ -436,11 +423,16 @@ def fit_greedy(
     # A-internal fit and validation rows; pair-wise gram blocks make every
     # greedy step a cheap assembly + solve instead of a fresh matrix product.
     blocks: dict[str, np.ndarray] = {}
+    means: dict[str, np.ndarray] = {}
+    stds: dict[str, np.ndarray] = {}
     for coord in pool:
         x_all, _ = build_features(seg_a, coord, cfg)
-        stds = x_all[:n_fit].std(axis=0)
-        stds[stds == 0.0] = 1.0
-        blocks[coord.label] = (x_all - x_all[:n_fit].mean(axis=0)) / stds
+        mean = x_all[:n_fit].mean(axis=0)
+        std = x_all[:n_fit].std(axis=0)
+        std[std == 0.0] = 1.0
+        blocks[coord.label] = (x_all - mean) / std
+        means[coord.label] = mean
+        stds[coord.label] = std
     y_fit, y_val = y[:n_fit], y[eval_start:]
 
     def _val_mse(labels: tuple[str, ...]) -> float:
@@ -464,7 +456,7 @@ def fit_greedy(
     baseline_mse = _val_mse(())
     selected: list[str] = []
     remaining = [coord.label for coord in pool]
-    while remaining and len(selected) < max_steps:
+    while remaining and len(selected) < 4:
         best_label: str | None = None
         best_mse = baseline_mse
         for label in remaining:
@@ -486,22 +478,22 @@ def fit_greedy(
         else np.zeros((y.shape[0], 0))
     )
     coef, intercept = _fit_ridge(x_all, y, cfg.ridge_alphas, cfg.horizon)
-    means = np.zeros(x_all.shape[1])
-    stds = np.ones(x_all.shape[1])
-    if selected:
-        raw = np.concatenate(
-            [build_features(seg_a, label_to_coord[label], cfg)[0] for label in selected], axis=1
-        )
-        means = raw[:n_fit].mean(axis=0)
-        stds = raw[:n_fit].std(axis=0)
-        stds[stds == 0.0] = 1.0
+    feature_means = (
+        np.concatenate([means[label] for label in selected])
+        if selected
+        else np.zeros(x_all.shape[1])
+    )
+    feature_stds = (
+        np.concatenate([stds[label] for label in selected])
+        if selected
+        else np.ones(x_all.shape[1])
+    )
     return FittedCorrector(
         coordinates=coords,
-        means=means,
-        stds=stds,
+        means=feature_means,
+        stds=feature_stds,
         coef=coef,
         intercept=intercept,
-        label="total",
     )
 
 
@@ -532,7 +524,7 @@ def corrector_gain(
     return GainReport(
         coordinate=Coordinate(
             "hgroup" if h_scope else "total",
-            label or fitted.label,
+            label or "total",
             _COORDINATE_ASPECTS.get("total" if not h_scope else "hgroup", "other"),
             {"h1": h_scope[0], "h2": h_scope[1]} if h_scope else {},
         ),
@@ -546,48 +538,13 @@ def corrector_gain(
     )
 
 
-def certification_family(
-    cfg: HeadroomConfig,
-    period_peaks: list[int],
-    n_channels: int,
-) -> list[Coordinate]:
-    """The certification statistic family K: total + coordinates + hgroups.
-
-    The total and hgroup coordinates need the A-selected periods to build
-    their band blocks, so they carry them in spec["periods"] — build_features
-    has no other way to receive them (contract signature).
-    """
-    periods = tuple(period_peaks)
-    horizon = cfg.horizon
-    coordinates = [
-        Coordinate("total", "total", _COORDINATE_ASPECTS["total"], {"periods": periods})
-    ]
-    coordinates += enumerate_coordinates(cfg, period_peaks, n_channels, horizon)
-    half = horizon // 2
-    coordinates += [
-        Coordinate(
-            "hgroup",
-            f"hgroup[1,{half}]",
-            _COORDINATE_ASPECTS["hgroup"],
-            {"h1": 1, "h2": half, "periods": periods},
-        ),
-        Coordinate(
-            "hgroup",
-            f"hgroup[{half + 1},{horizon}]",
-            _COORDINATE_ASPECTS["hgroup"],
-            {"h1": half + 1, "h2": horizon, "periods": periods},
-        ),
-    ]
-    return coordinates
-
-
 def card_level(
     cfg: HeadroomConfig,
     period_peaks: list[int],
     n_channels: int,
 ) -> float:
     """Bonferroni-adjusted level for the card's coordinate rows (A-M4)."""
-    card_size = len(enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon))
+    card_size = len(enumerate_coordinates(cfg, period_peaks, n_channels))
     return 1.0 - cfg.acceptance_alpha / max(card_size, 1)
 
 
@@ -607,7 +564,7 @@ def all_gains(
     n_channels = seg_a.values.shape[1]
     fitted = fit_greedy(seg_a, cfg, period_peaks)
     total = corrector_gain(fitted, seg_b, cfg, level)
-    coordinates = enumerate_coordinates(cfg, period_peaks, n_channels, cfg.horizon)
+    coordinates = enumerate_coordinates(cfg, period_peaks, n_channels)
     half = cfg.horizon // 2
     hgroups = [
         corrector_gain(

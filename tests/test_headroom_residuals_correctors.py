@@ -109,7 +109,7 @@ def test_segment_data_rejects_misaligned_pred() -> None:
 
 def test_enumerate_coordinates_labels_aspects_and_channel_max() -> None:
     cfg = small_cfg()
-    coords = enumerate_coordinates(cfg, [24], 5, cfg.horizon)
+    coords = enumerate_coordinates(cfg, [24], 5)
     assert [c.label for c in coords] == [
         "lag[0,23]",
         "band(P=24)",
@@ -129,7 +129,7 @@ def test_enumerate_coordinates_labels_aspects_and_channel_max() -> None:
     assert aspects["horizon"] == "horizon-range"
     assert [c.spec for c in coords[:2]] == [{"k1": 0, "k2": 23}, {"period": 24}]
     # channel_max caps how many channels get their own coordinate
-    capped = enumerate_coordinates(replace(cfg, channel_max=2), [24], 5, cfg.horizon)
+    capped = enumerate_coordinates(replace(cfg, channel_max=2), [24], 5)
     assert [c.label for c in capped if c.kind == "channel"] == ["channel->0", "channel->1"]
 
 
@@ -214,7 +214,7 @@ def test_band_coordinate_detects_planted_period() -> None:
     seg_a, seg_b = split_ab(seg, cfg)
     peaks = select_period_peaks(seg.e_full, seg_a.origins, cfg)
     assert peaks and peaks[0] == period
-    coords = enumerate_coordinates(cfg, peaks, N_CHANNELS, cfg.horizon)
+    coords = enumerate_coordinates(cfg, peaks, N_CHANNELS)
     band = next(c for c in coords if c.kind == "band" and c.spec["period"] == period)
     report = coordinate_gain(band, seg_a, seg_b, cfg)
     # The sinusoid is an exact linear combination of the two filtered phase
@@ -379,9 +379,9 @@ def test_greedy_total_recovers_planted_ar1_and_not_noise() -> None:
 
 def test_channel_coordinate_excluded_for_univariate_series() -> None:
     cfg = wide_cfg()
-    coords = enumerate_coordinates(cfg, [12], 1, cfg.horizon)
+    coords = enumerate_coordinates(cfg, [12], 1)
     assert all(c.kind != "channel" for c in coords)
-    assert all(c.kind != "channel" for c in enumerate_coordinates(cfg, [], 1, cfg.horizon))
+    assert all(c.kind != "channel" for c in enumerate_coordinates(cfg, [], 1))
 
 
 def test_card_level_is_stricter_than_95pct() -> None:

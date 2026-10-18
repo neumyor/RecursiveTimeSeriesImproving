@@ -16,6 +16,9 @@ from typing import Any
 # "augmented" = the fixed card PLUS the agent's own validated probes.
 ARM_VALUES = ("scalar", "fixed", "self-built", "augmented", "placebo")
 
+# Spacing of the beyond-window lookback depths: L, L+16, L+32, ... (contract §5).
+BEYOND_L_STRIDE = 16
+
 _FIELD_ALIASES: dict[str, str] = {
     "input_length": "inputLength",
     "horizon": "horizon",
@@ -89,7 +92,7 @@ class HeadroomConfig:
         errors: list[str] = []
         depths = {
             "inputLength": self.input_length,
-            "beyond-l feature depth": self.input_length + 16 * (self.beyond_l_lags - 1),
+            "beyond-l feature depth": self.input_length + BEYOND_L_STRIDE * (self.beyond_l_lags - 1),
             "horizon feature depth": self.horizon + self.horizon_realized_lags - 1,
         }
         for name, depth in depths.items():
