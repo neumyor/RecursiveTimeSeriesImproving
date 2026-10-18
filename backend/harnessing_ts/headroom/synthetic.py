@@ -1044,7 +1044,11 @@ class NonlinearXChannelOracle:
             raise ValueError(f"time {times.min()} lacks the max_lag={self.max_lag} realized rows")
         if times.max() > seg.shape[0] - 1:
             raise ValueError(f"time {times.max()} lies beyond the end of seg")
-        values = [seg[times - lag] for lag, _, _ in self._coeff]
+        return self._one_step_mean_unchecked(seg, times)
+
+    def _one_step_mean_unchecked(self, seg: np.ndarray, idx: np.ndarray) -> np.ndarray:
+        """Exact E[y_idx | realized rows] via the linear+tanh cross mean; [len(idx), C]."""
+        values = [seg[idx - lag] for lag, _, _ in self._coeff]
         return _nlx_cross_mean(values, self._coeff)
 
     def path_means(
@@ -1126,8 +1130,7 @@ class NonlinearXChannelOracle:
                 f"origin {origins.min()} lacks the max_lag={self.max_lag} realized rows")
         # h = 1 exactly; the MC below also produces a step-1 mean, but the
         # closed form carries no sampling noise, so it wins.
-        values = [seg[origins + 1 - lag] for lag, _, _ in self._coeff]
-        out[:, 0, :] = _nlx_cross_mean(values, self._coeff)
+        out[:, 0, :] = self._one_step_mean_unchecked(seg, origins + 1)
         if cfg.horizon > 1:
             means = self._path_means_unchecked(
                 seg, origins, cfg.horizon, self.n_paths, np.random.default_rng(self.mc_seq))
