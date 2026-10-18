@@ -94,13 +94,13 @@ def _read_llm_config_file(workspace_path: Path) -> LlmConfig:
         project_root() / "config.llm.json",
     ):
         if path.exists():
-            return _sanitize_config(json.loads(path.read_text(encoding="utf-8")))
+            return sanitize_llm_config(json.loads(path.read_text(encoding="utf-8")))
     return LlmConfig()
 
 
 def _read_llm_env_config() -> LlmConfig:
     env_max_tokens = os.getenv("TS_HARNESS_LLM_MAX_TOKENS")
-    return _sanitize_config({
+    return sanitize_llm_config({
         "authMode": os.getenv("TS_HARNESS_LLM_AUTH_MODE"),
         "protocol": os.getenv("TS_HARNESS_LLM_PROTOCOL"),
         "model": os.getenv("TS_HARNESS_LLM_MODEL"),
@@ -110,8 +110,9 @@ def _read_llm_env_config() -> LlmConfig:
     })
 
 
-def _sanitize_config(raw: dict[str, Any]) -> LlmConfig:
-    auth = raw.get("authMode") if raw.get("authMode") in {"manual", "sdk-default"} else "sdk-default"
+def sanitize_llm_config(raw: dict[str, Any], *, default_auth_mode: str = "sdk-default") -> LlmConfig:
+    """One sanitizer for every LLM config source: file reads, env reads and API writes."""
+    auth = raw.get("authMode") if raw.get("authMode") in {"manual", "sdk-default"} else default_auth_mode
     protocol = raw.get("protocol") if raw.get("protocol") in {"deepseek", "openai-compat"} else None
     max_tokens = raw.get("maxTokens")
     if max_tokens is not None and (isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1):
