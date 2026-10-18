@@ -63,6 +63,10 @@ experiments："拟合、预测、组装 segment"写了六遍；修正器预测�
 
 后端：`orchestrator.py:389,703,1943`、`workspace_store.py:337`、`mcp/server.py:7`、`translate.py:84`、`knowledge_prompts.py:28`（"第一版用 CSV 表"）。headroom：`candidate_worker.py:11`、`certify.py:12`、`synthetic.py:813`。experiments：`loop.py:26-36`（"Design notes from the M2 review"）、`loop.py:1291`、`posthoc.py:234`（"in-run sha check"）、`probes.py`/`stage0.py` 多处。测试：以 "Regression for…" 开头的说明和 `legacy_*` 命名。过时的文档字符串：`feedback.py` 写"四个实验组"实际五个；`posthoc.py` 写"三组对比"实际五组。模块说明写在 `from __future__` 之后导致 `__doc__` 为空的文件：`loop.py`、`posthoc.py`、`batch.py`、`evaluate.py`、`calibrations.py`、`baselines.py`、`realdata.py`、`stage0.py`、headroom 下八个模块。
 
+## 已知限制与已评估未实施的方案
+
+已知限制：候选与探针源码的 AST 白名单拦截常见的文件访问与动态属性写法，防止智能体在优化压力下无意越界；它是防护性约束，非安全边界——确定性的绕过写法仍然存在（主进程内的确定性检查与 posthoc 重放同样在编排进程中执行智能体编写的源码）。操作系统级隔离（macOS sandbox-exec 的 default-allow 加拒读留出根目录、Linux bubblewrap，以及把主进程内执行迁入受沙箱子进程）已于 2026-10-18 评估为可行（约半天工作量，行为等价可测），按用户裁决以复杂度为由不实施。
+
 ## 第六节：项目范围（Bitter Lesson）
 
 论文实验只用到 `headroom/`、`experiments/`、`SdkRunner`、`settings/llm.py` 和 `MessageLog`，约 1.14 万行。交互系统（orchestrator、知识图谱、变体消融、MCP 桥接、前端）约 1.45 万行，论文实验完全不经过这部分代码。
