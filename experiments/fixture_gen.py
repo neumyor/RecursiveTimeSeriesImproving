@@ -570,7 +570,12 @@ def gate_witness(
         _, repeat_outputs, error = _probe_values(
             probes, source_path, [pair0], probe_id, signal_key
         )
-        assert repeat_outputs is not None
+        if error is not None:
+            return {
+                "passed": False,
+                "evidence": evidence,
+                "report": f"gate 1 WITNESS FAIL: determinism rerun errored: {error}",
+            }
         evidence["deterministic"] = probes._canonical(first_outputs[0]) == probes._canonical(
             repeat_outputs[0]
         )

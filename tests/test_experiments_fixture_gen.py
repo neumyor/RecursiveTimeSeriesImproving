@@ -56,15 +56,6 @@ def family_entry(family_id: str) -> dict[str, Any]:
     return entry
 
 
-# Digests of the fixtures the PRE-registry implementation produced (residual:
-# seeds 0-2; activation: seed 0), captured before the rewiring and
-# independently re-verified against git-HEAD probes.py.  The residual lists
-# carry 10 entries in registry order: the first SIX are the historical seed
-# families (the migration must reproduce them bitwise — provenance, not new
-# numbers); the last four are the two pipeline-admitted families at their
-# appended seed slots.
-
-
 # ---------------------------------------------------------------------------
 # the frozen registry satisfies the DSL
 # ---------------------------------------------------------------------------
@@ -230,6 +221,34 @@ def test_witness_gate_rejects_a_nondeterministic_witness() -> None:
     assert "deterministic" in result["report"]
     # the jitter is tiny: the family itself still completes — the failure is
     # the determinism rerun, not the pair rule
+    assert result["evidence"]["perSeed"][0]["complete"] is True
+
+
+def test_witness_gate_reports_an_erroring_determinism_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rerun that dies instead of answering is a clean gate-1 FAIL, not an
+    assertion error: the error surfaces in the gate report with numbers."""
+    entry = copy.deepcopy(family_entry("horizon-range"))
+    entry["familyId"] = "horizon-range-rerun-error"
+    real_run = P._run_probe_subprocess
+    last = {"artifact_id": None}
+
+    def error_on_immediate_repeat(source_path: Any, artifacts: Any, timeout: Any) -> Any:
+        # the determinism rerun passes the SAME pair-0 planted fixture object
+        # on two consecutive calls; fail the second one
+        key = id(artifacts)
+        if key == last["artifact_id"]:
+            raise P.ProbeError("injected rerun failure")
+        last["artifact_id"] = key
+        return real_run(source_path, artifacts, timeout)
+
+    monkeypatch.setattr(P, "_run_probe_subprocess", error_on_immediate_repeat)
+    result = G.gate_witness(P, entry, seeds=(0,))
+    assert not result["passed"]
+    assert "determinism rerun errored" in result["report"]
+    assert "injected rerun failure" in result["report"]
+    # the family itself completed at the seed: the failure is the rerun alone
     assert result["evidence"]["perSeed"][0]["complete"] is True
 
 
