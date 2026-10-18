@@ -87,15 +87,20 @@ _BACKEND_DIR = Path(__file__).resolve().parents[2]
 WORKER_CONTRACT_EXIT = 3
 
 _ALLOWED_IMPORT_ROOTS = frozenset({"numpy", "math", "scipy", "torch"})
-# Builtins that reach outside the computation or re-enter the interpreter.
+# File-reading and FFI backdoors reachable from otherwise-allowed roots.
+_DENIED_SUBMODULES = frozenset({"scipy.io", "numpy.ctypeslib"})
+# Builtins that reach outside the computation or re-enter the interpreter,
+# plus the dynamic-attribute builtins that would bypass the name checks.
 _FORBIDDEN_NAMES = frozenset(
-    {"open", "eval", "exec", "compile", "__import__", "globals", "locals", "vars", "breakpoint", "exit", "quit"}
+    {"open", "eval", "exec", "compile", "__import__", "globals", "locals", "vars", "breakpoint", "exit", "quit",
+     "getattr", "setattr", "delattr", "__builtins__"}
 )
 # Method-style calls for file, process, and network access.  Any owner may be
 # harmful (np.load, os.system, urllib.request), so the attribute name alone is
 # enough reason to reject; a candidate defining its own .save() just renames it.
 _FORBIDDEN_ATTR_CALLS = frozenset(
-    {"load", "save", "savez", "loadtxt", "savetxt", "genfromtxt", "fromfile", "tofile", "memmap", "system", "popen", "urlopen", "request"}
+    {"load", "save", "savez", "loadtxt", "savetxt", "genfromtxt", "fromfile", "tofile", "memmap", "system", "popen", "urlopen", "request",
+     "loadmat", "mmread", "netcdf_file", "fromregex", "loadarff", "DataSource"}
 )
 
 _SMOKE_TRAIN_CAP = 4000
@@ -156,7 +161,12 @@ def check_source(source: str) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] not in _ALLOWED_IMPORT_ROOTS:
+                if alias.name in _DENIED_SUBMODULES:
+                    violations.append(
+                        f"line {node.lineno}: import of {alias.name!r} is not allowed "
+                        f"(file-reading and FFI backdoors are closed)"
+                    )
+                elif alias.name.split(".")[0] not in _ALLOWED_IMPORT_ROOTS:
                     violations.append(
                         f"line {node.lineno}: import of {alias.name!r} is not allowed; "
                         f"candidates may import only numpy, math, scipy.* and torch.*"
@@ -168,6 +178,11 @@ def check_source(source: str) -> None:
                 # Annotation directives inherited from the incumbent template;
                 # a no-op at runtime and required by every derived candidate.
                 continue
+            elif node.module in _DENIED_SUBMODULES:
+                violations.append(
+                    f"line {node.lineno}: import from {node.module!r} is not allowed "
+                    f"(file-reading and FFI backdoors are closed)"
+                )
             elif node.module is None or node.module.split(".")[0] not in _ALLOWED_IMPORT_ROOTS:
                 violations.append(
                     f"line {node.lineno}: import from {node.module!r} is not allowed; "
@@ -177,6 +192,18 @@ def check_source(source: str) -> None:
             violations.append(
                 f"line {node.lineno}: use of {node.id!r} is not allowed in candidates "
                 f"(no file/process/interpreter access)"
+            )
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr.startswith("__")
+            and node.attr.endswith("__")
+            and node.attr != "__init__"
+        ):
+            # Dunder attribute access reaches interpreter internals (and the
+            # import machinery); initializer calls are ordinary subclassing.
+            violations.append(
+                f"line {node.lineno}: access to .{node.attr} is not allowed in candidates "
+                f"(no interpreter internals)"
             )
         elif (
             isinstance(node, ast.Call)
@@ -195,27 +222,29 @@ def check_source(source: str) -> None:
         raise SourceRejected("candidate source rejected:\n" + "\n".join(violations))
 
 
-def build_env() -> dict[str, str]:
+def build_env(home: Path) -> dict[str, str]:
     """Whitelisted environment for the worker subprocess; nothing else passes.
 
     The parent environment is deliberately not copied: API keys, harness
-    state and workspace paths must not reach candidate code.  Only PATH,
-    HOME and TMPDIR pass through (the child needs them for caches and temp
-    files), PYTHONPATH is pinned to the repo backend so the worker module
-    resolves, thread pins keep numpy/scipy/torch from spawning a thread storm
-    on the same machine the loop runs on, and CUDA is hidden — candidates
-    evaluate on CPU (macOS MPS has no hide flag; the same env is used for the
-    posthoc re-runs, so reproducibility survives that gap).
+    state and workspace paths must not reach candidate code.  Only PATH and
+    TMPDIR pass through; HOME is the run's own temp directory, so caches land
+    there and no user-home location is reachable by name.  PYTHONPATH is
+    pinned to the repo backend so the worker module resolves, thread pins
+    keep numpy/scipy/torch from spawning a thread storm on the same machine
+    the loop runs on, and CUDA is hidden — candidates evaluate on CPU (macOS
+    MPS has no hide flag; the same env is used for the posthoc re-runs, so
+    reproducibility survives that gap).
     """
     env = {
         "PYTHONPATH": str(_BACKEND_DIR),
+        "HOME": str(home),
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "VECLIB_MAXIMUM_THREADS": "1",
         "CUDA_VISIBLE_DEVICES": "",
     }
-    for key in ("PATH", "HOME", "TMPDIR"):
+    for key in ("PATH", "TMPDIR"):
         if key in os.environ:
             env[key] = os.environ[key]
     return env
@@ -320,7 +349,7 @@ def run_isolated(
     process = subprocess.Popen(
         command,
         cwd=run_dir,
-        env=build_env(),
+        env=build_env(run_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

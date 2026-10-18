@@ -437,12 +437,12 @@ def test_contract_violation_inside_worker(tmp_path: Path) -> None:
 def test_build_env_is_a_whitelist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HEADROOM_TEST_SENTINEL", "must-not-leak")
     monkeypatch.setenv("HEADROOM_TEST_API_KEY", "sk-nope")
-    env = build_env()
+    home = Path("/tmp/headroom-run-xyz")
+    env = build_env(home)
     assert "HEADROOM_TEST_SENTINEL" not in env
     assert "HEADROOM_TEST_API_KEY" not in env
     assert env["PATH"] == os.environ["PATH"]
-    if "HOME" in os.environ:
-        assert env["HOME"] == os.environ["HOME"]
+    assert env["HOME"] == str(home)
     assert env["PYTHONPATH"] == str(Path(__file__).resolve().parents[1] / "backend")
     for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         assert env[key] == "1"
@@ -473,3 +473,43 @@ def test_stderr_tail_marks_a_cut_head() -> None:
     assert tail.endswith("x" * 100)
     short = "Traceback (most recent call last): boom"
     assert _tail(short) == short
+
+def test_whitelist_rejects_the_attribute_and_import_bypasses() -> None:
+    """Each closed bypass, rejected by name: dynamic attribute builtins,
+    dunder attribute access, the FFI backdoor and the file-reading
+    submodules reachable from otherwise-allowed roots."""
+    bypasses = [
+        'import numpy as np\n\ndef create_adapter():\n    return None\n\nx = getattr(np, "lo" + "ad")\n',
+        'import numpy as np\n\ndef create_adapter():\n    return None\n\nx = setattr(np.ndarray, "x", 1)\n',
+        'import numpy as np\n\ndef create_adapter():\n    return None\n\nx = ().__class__.__base__\n',
+        'import numpy as np\n\ndef create_adapter():\n    return None\n\nx = __builtins__["open"]\n',
+        'import scipy.io\n\ndef create_adapter():\n    return None\n\nx = scipy.io.loadmat("/tmp/x")\n',
+        'from scipy.io import loadmat\n\ndef create_adapter():\n    return None\n\nx = loadmat("/tmp/x")\n',
+        'import numpy.ctypeslib\n\ndef create_adapter():\n    return None\n\nx = numpy.ctypeslib.ctypes.CDLL(None)\n',
+        'import numpy as np\n\ndef create_adapter():\n    return None\n\nx = np.DataSource()\n',
+        'import scipy.signal\n\ndef create_adapter():\n    return None\n\nx = scipy.io.netcdf_file("/tmp/x")\n',
+    ]
+    for source in bypasses:
+        with pytest.raises(SourceRejected):
+            check_source(source)
+
+
+def test_whitelist_still_accepts_the_templates_and_init_calls() -> None:
+    """The hardening rejects no legitimate code: both incumbent templates
+    pass, and initializer calls through super()/parent classes survive."""
+    templates = Path(__file__).resolve().parents[1] / "experiments" / "templates"
+    for name in ("m0.py", "m0_deep.py"):
+        check_source((templates / name).read_text(encoding="utf-8"))
+    check_source(
+        "class A:\n"
+        "    def __init__(self):\n"
+        "        pass\n"
+        "\n"
+        "class B(A):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "\n"
+        "\n"
+        "def create_adapter():\n"
+        "    return B()\n"
+    )
