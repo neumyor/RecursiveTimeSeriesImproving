@@ -31,8 +31,8 @@ def test_stage0_smoke_report_structure_and_core_gates() -> None:
     for name, gate in report["gates"].items():
         assert isinstance(gate["pass"], bool), name
     # The analytic control holds at any size.  G0-1's saturation verdict is
-    # sample-size dependent (the certified UCB widens with the Bonferroni
-    # level), so smoke only checks structure; the full-size run is the gate.
+    # sample-size dependent (the certified UCB widens at the small cert
+    # sizes), so smoke only checks structure; the full-size run is the gate.
     assert report["gates"]["G0-7"]["pass"] is True
     assert report["gates"]["G0-1"]["stats"]["cells"] == 6
     assert report["gates"]["G0-5"]["pass"] is True
@@ -42,6 +42,7 @@ def test_stage0_smoke_report_structure_and_core_gates() -> None:
     assert localization["localization_cells"] == len(stage0.EXPECTED_ASPECTS)
     assert 0.0 <= localization["localization_rate"] <= 1.0
     assert "all_pass" in report
+
 
 
 def test_stage0_deep_smoke_report_structure() -> None:
@@ -64,7 +65,11 @@ def test_stage0_deep_smoke_report_structure() -> None:
     assert screening["incumbent_model"] == "m0-patchtst"
     assert set(screening["remaining_gap_ratio_by_task"]) == set(stage0.SCREENING_TASKS)
     assert report["carry_over"].keys() == {"G0-1", "G0-2", "G0-5", "G0-7"}
-    assert all(entry["v1_pass"] for entry in report["carry_over"].values())
+    for name, entry in report["carry_over"].items():
+        # the model-agnostic verdicts are carried from the frozen
+        # fixed-level artifact, not re-run here
+        assert entry["artifact"] == "experiments/specs/g0-final-report-v3.json"
+        assert entry["pass"] is True, name
     assert set(report["p2_v2_screening"]["by_task"]) == set(stage0.P2_V2_TASKS)
     assert all(entry["seeds"] == 1 for entry in report["p2_v2_screening"]["by_task"].values())
     assert "all_pass" in report

@@ -65,6 +65,10 @@ from harnessing_ts.headroom.timeidx import segment_origins
 def _report_dir(smoke: bool) -> Path:
     return _REPO_ROOT / "experiments" / "runs" / ("stage0-smoke" if smoke else "stage0")
 
+
+def _deep_report_dir(smoke: bool) -> Path:
+    return _REPO_ROOT / "experiments" / "runs" / ("stage0-v2-smoke" if smoke else "stage0-v2")
+
 # Pre-registered (task, model) -> expected top-card aspects (final plan §5).
 # Period-168 structure exceeds the lookback, so beyond-l is a legitimate top
 # coordinate for multiperiod; xchannel coupling lives at lags 3-7, visible to
@@ -97,7 +101,8 @@ ALL_TASKS = ("lgssm_multiperiod", "lgssm_xchannel", "hmm_ar_switch", "arfima", "
 # variants; the default incumbent is now m0-patchtst, so those three gates
 # are re-derived over the same tasks with the deep base plus three planted
 # defect variants.  G0-1/2/5/7 are model-agnostic and carry over from the
-# frozen v1 artifact experiments/specs/g0-final-report.json (CARRY_OVER_NOTES).
+# frozen fixed-level artifact experiments/specs/g0-final-report-v3.json
+# (CARRY_OVER_NOTES).
 #
 # Expected top-card aspects per (task, variant), derived from the task's
 # generating structure plus the variant's defect (each pair's reasoning is
@@ -154,9 +159,9 @@ DEEP_EXPECTED_ASPECTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("nonlinear_xchannel", "m0-patchtst-coarsepatch"): ("cross-channel", "horizon-range"),
     ("nonlinear_xchannel", "m0-patchtst-channelmix"): ("cross-channel", "horizon-range"),
 }
-# Why each carried-over gate does not depend on the incumbent (restated in the
-# frozen v2 artifact's carry_over section; verdicts are read from the v1
-# artifact at run time).
+# Why each carried-over gate does not depend on the incumbent (restated in
+# the frozen deep artifact's carry_over section; verdicts are read from the
+# fixed-level artifact at run time).
 CARRY_OVER_NOTES = {
     "G0-1": (
         "oracle negative control: run with m = oracle, so no incumbent is "
@@ -165,14 +170,14 @@ CARRY_OVER_NOTES = {
     "G0-2": (
         "CI calibration: the HAC/HLN interval and the greedy total-gain "
         "estimator are properties of the corrector machinery, not of the "
-        "model whose residuals feed it; the v1 coverage was measured with "
-        "m0-linear cells, the coverage claim is estimator-level"
+        "model whose residuals feed it; the coverage is measured with "
+        "m0-linear cells, and the coverage claim is estimator-level"
     ),
     "G0-5": (
-        "false-stop: the Bonferroni level wiring, the two-sided-to-one-sided "
-        "conservatism and the eps*MSE threshold never reference the "
+        "false-stop: the fixed certification level, the two-sided-to-one-"
+        "sided conservatism and the eps*MSE threshold never reference the "
         "incumbent; planted-defect gaps just need to sit far above the stop "
-        "threshold, which the v1 linear defects did"
+        "threshold, which the linear defects do"
     ),
     "G0-7": (
         "observation-0: a pure AR(1)/white-noise analytic control with "
@@ -533,8 +538,8 @@ def gate_g05_false_stop(cells: list[Cell], cfg: HeadroomConfig) -> dict[str, Any
                 "gap": round(cell.test_gap, 4),
             }
         )
-    # 18 cells at alpha=0.05 (and a far smaller effective level after the
-    # Bonferroni wiring): allow 2 binomial false stops, 0 truth violations.
+    # 18 cells at the fixed certification level: allow 2 binomial false
+    # stops, 0 truth violations.
     return {
         "stats": {
             "cells": len(details),
@@ -638,17 +643,19 @@ def run(smoke: bool = False, seeds: int = 3, reps: int = 12) -> dict[str, Any]:
 
 
 def _carry_over() -> dict[str, Any]:
-    """Per-gate carry-over record: the v1 verdict plus why the gate is model-agnostic."""
-    v1_path = _REPO_ROOT / "experiments" / "specs" / "g0-final-report.json"
+    """Per-gate carry-over record: the frozen fixed-level verdict plus why the
+    gate is model-agnostic."""
+    artifact_rel = "experiments/specs/g0-final-report-v3.json"
+    artifact_path = _REPO_ROOT / artifact_rel
     try:
-        v1 = json.loads(v1_path.read_text(encoding="utf-8"))
-        verdicts = {name: bool(v1["gates"][name]["pass"]) for name in CARRY_OVER_NOTES}
+        frozen = json.loads(artifact_path.read_text(encoding="utf-8"))
+        verdicts = {name: bool(frozen["gates"][name]["pass"]) for name in CARRY_OVER_NOTES}
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot read the frozen v1 artifact at {v1_path}: {exc}") from exc
+        raise RuntimeError(f"cannot read the frozen fixed-level artifact at {artifact_path}: {exc}") from exc
     return {
         name: {
-            "v1_artifact": "experiments/specs/g0-final-report.json",
-            "v1_pass": verdicts[name],
+            "artifact": artifact_rel,
+            "pass": verdicts[name],
             "reason": CARRY_OVER_NOTES[name],
         }
         for name in CARRY_OVER_NOTES
@@ -689,19 +696,17 @@ def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
     """Deep-incumbent recalibration of G0-3/G0-4/G0-6 (plan §12).
 
     Runs ONLY the three incumbent-dependent gates, with the deep incumbent
-    plus its three planted defect variants, over the same tasks the v1 gates
-    used for them, at the same full (or smoke) sizes; writes
+    plus its three planted defect variants, over the same tasks the linear
+    gates used for them, at the same full (or smoke) sizes; writes
     experiments/runs/stage0-v2 (stage0-v2-smoke under --smoke) incrementally
-    and never touches the v1 report directory.  G0-1/2/5/7 carry over from
-    the frozen v1 artifact and are recorded here, not re-run.
+    and never touches the linear report directory.  G0-1/2/5/7 carry over
+    from the frozen fixed-level artifact and are recorded here, not re-run.
     """
     cfg, sizes = _gate_setup(smoke)
     if smoke:
         seeds = 1
     seed_list = list(range(seeds))
-    report_dir = _REPO_ROOT / "experiments" / "runs" / (
-        "stage0-v2-smoke" if smoke else "stage0-v2"
-    )
+    report_dir = _deep_report_dir(smoke)
     pairs = list(DEEP_EXPECTED_ASPECTS)
     report: dict[str, Any] = {
         "mode": "deep-recalibration",
