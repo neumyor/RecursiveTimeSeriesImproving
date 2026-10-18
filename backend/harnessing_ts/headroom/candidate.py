@@ -280,7 +280,7 @@ def smoke_test(
                 source_path, candidate_id, npz_in, npz_out, cfg,
                 timeout_seconds=min(_SMOKE_TIMEOUT_CAP, cfg.candidate_timeout_seconds),
             )
-        except (CandidateCrash, ContractViolation, CheatDetected) as exc:
+        except (CandidateCrash, ContractViolation) as exc:
             result["error"] = str(exc)
             return result
         except CandidateTimeout as exc:
@@ -390,7 +390,7 @@ def evaluate_candidate(
         raise CandidateCrash(
             f"candidate {candidate_id!r} crashed in the worker (exit code {code}):\n{tail}"
         )
-    _validate_result(npz_out, npz_in, cfg, candidate_id)
+    _validate_result(npz_out, candidate_id)
 
 
 def _check_candidate_id(candidate_id: str) -> None:
@@ -407,13 +407,13 @@ def _tail(output: str) -> str:
     return "… (earlier output truncated)\n" + output[-_STDERR_TAIL_CHARS:]
 
 
-def _validate_result(npz_out: Path, npz_in: Path, cfg: HeadroomConfig, candidate_id: str) -> None:
-    """Check the worker's npz against the input shapes before the loop trusts it.
+def _validate_result(npz_out: Path, candidate_id: str) -> None:
+    """Check the worker's result file before the loop trusts it.
 
-    The worker already enforced the [B, H, C] contract per predict_batch
-    call; this second pass costs one npz read and catches a mis-wired worker
-    (wrong key, wrong dtype, truncated output) before it can silently poison
-    the residual pipeline.
+    The worker enforces the [B, H, C] shape and float64 contract per
+    predict_batch call; this pass checks the one thing the worker cannot
+    itself guarantee — that the file it handed back is readable, complete
+    (every result key present) and carries an honest batch-invariance flag.
     """
     try:
         result = np.load(npz_out, allow_pickle=False)
@@ -423,21 +423,9 @@ def _validate_result(npz_out: Path, npz_in: Path, cfg: HeadroomConfig, candidate
             f"{npz_out.name}: {type(exc).__name__}: {exc}"
         ) from exc
     try:
-        with np.load(npz_in, allow_pickle=False) as source:
-            channels = int(source["train"].shape[1])
-            expected = {
-                "pred_diag": (int(source["x_diag"].shape[0]), cfg.horizon, channels),
-            }
-        missing = sorted((set(_RESULT_KEYS) | set(expected)) - set(result.files))
+        missing = [key for key in _RESULT_KEYS if key not in result.files]
         if missing:
             raise CandidateCrash(f"candidate {candidate_id!r}: result npz is missing keys {missing}")
-        for key, shape in expected.items():
-            pred = result[key]
-            if tuple(pred.shape) != shape or pred.dtype != np.float64:
-                raise CandidateCrash(
-                    f"candidate {candidate_id!r}: {key} has shape {tuple(pred.shape)} and dtype "
-                    f"{pred.dtype}, expected shape {shape} and dtype float64"
-                )
         if not bool(result["batch_invariant"]):
             raise CheatDetected(
                 f"candidate {candidate_id!r} is not batch-invariant: re-predicting single rows "
@@ -445,8 +433,6 @@ def _validate_result(npz_out: Path, npz_in: Path, cfg: HeadroomConfig, candidate
                 f"batch statistics (e.g. normalises over the batch axis); a forecast must depend "
                 f"on its own window only"
             )
-        float(result["fit_seconds"])
-        float(result["predict_seconds"])
     except (CandidateCrash, CheatDetected):
         raise
     except Exception as exc:

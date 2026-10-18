@@ -1071,17 +1071,28 @@ class NonlinearXChannelOracle:
             raise ValueError(f"seg must be [T, {self.a.shape[0]}], got shape {seg.shape}")
         if origins.ndim != 1:
             raise ValueError(f"origins must be 1-D, got shape {origins.shape}")
-        out = np.empty((origins.size, int(horizon), seg.shape[1]))
         if origins.size == 0:
-            return out
+            return np.empty((0, int(horizon), seg.shape[1]))
         if origins.min() < self.max_lag - 1:
             raise ValueError(
                 f"origin {origins.min()} lacks the max_lag={self.max_lag} realized rows")
         if origins.max() + int(horizon) > seg.shape[0] - 1:
             raise ValueError(f"origin {origins.max()} has targets beyond the end of seg")
+        return self._path_means_unchecked(seg, origins, int(horizon), int(n_paths), rng)
+
+    def _path_means_unchecked(
+        self,
+        seg: np.ndarray,
+        origins: np.ndarray,
+        horizon: int,
+        n_paths: int,
+        rng: np.random.Generator,
+    ) -> np.ndarray:
+        """The path_means computation on already-validated arguments."""
+        out = np.empty((origins.size, horizon, seg.shape[1]))
         # Chunk so each block's path tensor stays ~250k cells; accuracy is
         # unaffected (every origin still gets its own independent draws).
-        chunk = max(1, _NLX_MC_PATH_CAP // int(n_paths))
+        chunk = max(1, _NLX_MC_PATH_CAP // n_paths)
         for start in range(0, origins.size, chunk):
             sel = origins[start : start + chunk]
             history = seg[sel[:, None] - np.arange(self.max_lag)]  # [B, max_lag, C], newest first
@@ -1093,7 +1104,7 @@ class NonlinearXChannelOracle:
                  for k in range(self.max_lag)],
                 maxlen=self.max_lag,
             )
-            for step in range(1, int(horizon) + 1):
+            for step in range(1, horizon + 1):
                 values = [paths[lag - 1] for lag, _, _ in self._coeff]
                 draws = _nlx_cross_mean(values, self._coeff) + rng.standard_normal(
                     (sel.size, n_paths, seg.shape[1])) * self.sigma
@@ -1115,9 +1126,10 @@ class NonlinearXChannelOracle:
                 f"origin {origins.min()} lacks the max_lag={self.max_lag} realized rows")
         # h = 1 exactly; the MC below also produces a step-1 mean, but the
         # closed form carries no sampling noise, so it wins.
-        out[:, 0, :] = self.one_step_mean(seg, origins + 1)
+        values = [seg[origins + 1 - lag] for lag, _, _ in self._coeff]
+        out[:, 0, :] = _nlx_cross_mean(values, self._coeff)
         if cfg.horizon > 1:
-            means = self.path_means(
+            means = self._path_means_unchecked(
                 seg, origins, cfg.horizon, self.n_paths, np.random.default_rng(self.mc_seq))
             out[:, 1:, :] = means[:, 1:, :]
         return out

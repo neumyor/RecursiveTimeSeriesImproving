@@ -31,25 +31,17 @@ def _zero_usage() -> dict[str, int]:
 
 
 def _usage_dict(obj: object) -> dict[str, Any] | None:
-    """First dict carrying token counts, data level before top level.
+    """The usage dict DSH writes on ``data.usage`` of assistant/message events.
 
-    DSH writes ``data.usage`` on assistant/message events; the fallbacks
-    tolerate producers that hoist the same dict elsewhere rather than
-    silently undercounting a whole session.  Presence of ``inputTokens``
-    or ``outputTokens`` is the marker — the fields are optional per line.
+    Presence of ``inputTokens`` or ``outputTokens`` is the marker — the
+    fields are optional per line.
     """
     if not isinstance(obj, dict):
         return None
     data = obj.get("data")
-    candidates: tuple[object, ...] = (
-        data.get("usage") if isinstance(data, dict) else None,
-        data,
-        obj.get("usage"),
-        obj,
-    )
-    for cand in candidates:
-        if isinstance(cand, dict) and ("inputTokens" in cand or "outputTokens" in cand):
-            return cand
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if isinstance(usage, dict) and ("inputTokens" in usage or "outputTokens" in usage):
+        return usage
     return None
 
 

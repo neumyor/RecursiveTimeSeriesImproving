@@ -43,16 +43,15 @@ def test_session_usage_sums_usage_lines_and_skips_malformed(tmp_path: Path) -> N
             {"type": "user/message", "data": {"content": "hi"}},  # no usage
             _assistant({"inputTokens": 50, "outputTokens": 5}),  # missing fields
             "{not valid json",  # torn line
-            {"usage": {"inputTokens": 7, "outputTokens": 3}},  # top-level tolerance
         ],
     )
     totals = session_usage(log)
     assert totals == {
-        "inputTokens": 157,
-        "outputTokens": 18,
+        "inputTokens": 150,
+        "outputTokens": 15,
         "cacheReadTokens": 5,
         "reasoningTokens": 2,
-        "steps": 3,
+        "steps": 2,
         "skippedLines": 1,
     }
 

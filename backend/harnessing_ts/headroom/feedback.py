@@ -56,7 +56,7 @@ def render_feedback(
     """Render one round of agent feedback as markdown (contract §9).
 
     The scaffold (title with round and remaining budget, incumbent diagnostic
-    MSE, per-horizon-group MSE, candidate history) is byte-identical across
+    MSE, per-horizon-group MSE) is byte-identical across
     arms; only the middle block differs.  ``scalar`` gets no middle block,
     ``fixed``/``placebo`` get the defect card (the card wording is "remaining
     improvement (lower bound)", never "headroom"), ``self-built`` gets its own

@@ -122,7 +122,7 @@ def _run(data: dict[str, np.ndarray], npz_out: Path) -> None:
     )
 
 
-def _load_adapter(source_path: Path, expected_id: str | None = None) -> Any:
+def _load_adapter(source_path: Path, expected_id: str | None) -> Any:
     """Import the vetted candidate module and instantiate its adapter."""
     spec = importlib.util.spec_from_file_location("_headroom_candidate_worker", source_path)
     if spec is None or spec.loader is None:
