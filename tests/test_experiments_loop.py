@@ -119,6 +119,25 @@ def _rounds(run_dir: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in (run_dir / "rounds.jsonl").read_text().splitlines()]
 
 
+def test_hgroup_mse_splits_the_horizon_axis(tmp_path: Path) -> None:
+    """The two hgroup MSEs split the horizon axis of r [B, H, C]: residuals
+    confined to the late horizons land entirely in the second group."""
+    loop_module = _load_loop()
+    half = 4
+    r = np.zeros((6, 8, 2))
+    r[:, half:, :] = 1.5
+    seg = loop_module.SegmentData(
+        values=np.zeros((40, 2)),
+        origins=np.arange(6),
+        r=r,
+        e_full=np.zeros((40, 2)),
+        r_full=np.zeros((40, 8, 2)),
+    )
+    groups = loop_module._hgroup_mse(seg)
+    assert groups["hgroup[1,4]"] == 0.0
+    assert groups["hgroup[5,8]"] == pytest.approx(1.5**2)
+
+
 def test_loop_runs_three_rounds_and_writes_ledger(tmp_path: Path) -> None:
     loop_module = _load_loop()
     factory = _make_factory([_better_candidate, _better_candidate, _better_candidate])

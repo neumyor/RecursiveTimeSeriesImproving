@@ -159,7 +159,7 @@ def _hgroup_mse(seg: SegmentData) -> dict[str, float]:
     half = seg.r.shape[1] // 2
     return {
         f"hgroup[1,{half}]": float(np.mean(np.square(seg.r[:, :half, :]))),
-        f"hgroup[{half + 1},{seg.r.shape[1]}]": float(np.mean(np.square(seg.r[half:, :, :]))),
+        f"hgroup[{half + 1},{seg.r.shape[1]}]": float(np.mean(np.square(seg.r[:, half:, :]))),
     }
 
 
