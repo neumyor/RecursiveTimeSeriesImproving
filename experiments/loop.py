@@ -555,7 +555,7 @@ class HeadroomLoop:
             row: dict[str, Any] = {"probeId": entry["probeId"], "measures": entry["measures"]}
             try:
                 if not frozen.is_file():
-                    raise FileNotFoundError(str(frozen))
+                    raise FileNotFoundError("frozen probe source is missing")
                 row["output"] = infra.run_probe(frozen, artifacts)
             except Exception as exc:  # a broken probe loses its row, not the round
                 row["error"] = f"{type(exc).__name__}: {exc}"

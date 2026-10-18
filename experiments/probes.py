@@ -149,8 +149,8 @@ than raised, because a rejected probe is a budgeted outcome for the loop.
 Execution (``run_probe``)
 -------------------------
 Same subprocess protocol as candidate.py — literally the same helper,
-``cand.run_isolated``: the source passes ``check_probe_source`` first, then
-runs under ``cand.build_env()`` in a fresh temp cwd, stdout merged into
+``cand.run_isolated``: the (already-validated) source runs under
+``cand.build_env()`` in a fresh temp cwd, stdout merged into
 stderr, ``start_new_session`` + SIGKILL of the whole process group on
 timeout, results via a JSON file (the only channel out).  The worker is this module itself, spawned through ``python -c`` with
 the module path as argv so the child's sys.path never sees experiments/
@@ -516,8 +516,16 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
     """
     source_path = Path(source_path)
     if not source_path.is_file():
-        raise ValueError(f"probe source {source_path} does not exist")
+        raise ValueError(f"probe source for {source_path.parent.name!r} does not exist")
     display_id = source_path.parent.name
+
+    def _scrub(text: str) -> str:
+        """Neutralize the frozen source's location: the probe runs from the
+        heldout side, and no message from there may carry that path."""
+        for form in (str(source_path), str(source_path.resolve())):
+            text = text.replace(form, f"<probe-source>/{source_path.name}")
+        return text
+
     with tempfile.TemporaryDirectory(prefix="headroom-probe-") as run_dir:
         npz_in, json_out = Path(run_dir) / "probe-in.npz", Path(run_dir) / "probe-out.json"
         _write_artifacts_npz(npz_in, artifacts, source_path)
@@ -530,11 +538,11 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
         )
         if code == _WORKER_CONTRACT_EXIT:
             raise ProbeContractViolation(
-                f"probe {display_id!r} broke the probe contract inside the worker:\n{tail}"
+                f"probe {display_id!r} broke the probe contract inside the worker:\n{_scrub(tail)}"
             )
         if code != 0:
             raise ProbeCrash(
-                f"probe {display_id!r} crashed in the worker (exit code {code}):\n{tail}"
+                f"probe {display_id!r} crashed in the worker (exit code {code}):\n{_scrub(tail)}"
             )
         try:
             wrapper = json.loads(json_out.read_text(encoding="utf-8"))
@@ -567,14 +575,14 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
 def run_probe(source_path: Path, artifacts: dict[str, Any], timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
     """Run one (validated) probe on real evaluation artifacts; returns its output dict.
 
-    The source is vetted before any subprocess spawns (cand.SourceRejected on
-    violation).  The probe object's probe_id must equal the directory name —
-    probes/<probe-id>/probe.py is the layout the loop reads, so a swapped file
-    cannot silently run under another id.  Raises ProbeTimeout, ProbeCrash,
-    ProbeContractViolation or ProbeOutputTooLarge; never returns partial data.
+    The source is the heldout frozen copy that passed validation (the
+    validation path vets the source before freezing it).  The probe object's
+    probe_id must equal the directory name — probes/<probe-id>/probe.py is
+    the layout the loop reads, so a swapped file cannot silently run under
+    another id.  Raises ProbeTimeout, ProbeCrash, ProbeContractViolation or
+    ProbeOutputTooLarge; never returns partial data.
     """
     source_path = Path(source_path)
-    check_probe_source(source_path.read_text(encoding="utf-8"))
     wrapper = _run_probe_subprocess(source_path, artifacts, timeout)
     expected = source_path.parent.name
     actual = wrapper["probeId"]
