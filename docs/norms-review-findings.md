@@ -30,7 +30,7 @@
 15. `backend/harnessing_ts/headroom/synthetic.py:19, 24, 203, 457` 模块级 `_PREFIX`/`_HORIZON` 取自默认 `HeadroomConfig()`。非默认的 `horizon` 会得到错误长度的理论 MSE 和错误尺寸的前缀。
 16. `backend/harnessing_ts/headroom/feedback.py:142, 158` 探针的 id、detail、output 里出现 `|` 或换行会破坏智能体读到的 markdown 表格。
 17. `experiments/fixture_gen.py:570-573` 确定性重跑的 `error` 被忽略，`assert repeat_outputs is not None` 会把本该 FAIL 的门控变成 AssertionError 崩溃。
-18. `backend/harnessing_ts/headroom/feedback.py:156-165` 每轮只渲染最新 8 个探针的输出，其余显示 "N earlier probes not shown"。这同样限制送给 LLM 的输入，但它是 main-v2.json 冻结的规格行为（"8 newest rows"），是否去掉需要用户决定（由审核者于 2026-10-18 复核时指出）。
+18. `backend/harnessing_ts/headroom/feedback.py:156-165` 每轮只渲染最新 8 个探针的输出，其余显示 "N earlier probes not shown"。这是 main-v2.json 冻结的规格行为（"8 newest rows"），用户决定在 v3 中保留 8 行上限。
 
 ## 第二节：交互系统的功能错误（后端核心模块、前端）
 
