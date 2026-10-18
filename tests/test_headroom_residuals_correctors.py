@@ -404,3 +404,49 @@ def test_channel_block_spans_lags_0_to_23() -> None:
     coord = Coordinate("channel", "channel->0", "cross-channel", {"target_channel": 0})
     x, _ = build_features(seg, coord, cfg)
     assert x.shape[1] == 2 * 24
+
+
+def test_greedy_selection_ignores_residual_level_bias() -> None:
+    """A large residual mean must not stop greedy selection from picking the
+    coordinate that explains the variation around that mean: candidates carry
+    the same intercept-only term the empty-label baseline does."""
+    from harnessing_ts.headroom.correctors import (
+        FittedCorrector,
+        corrector_gain,
+        fit_greedy,
+    )
+
+    cfg = small_cfg()
+    rng = np.random.default_rng(12)
+    values = rng.normal(size=(T_LEN, N_CHANNELS))
+    n_rows = SEG_STOP - SEG_START - cfg.horizon
+    phi = 0.6
+    level = 4.0
+    # Same planted AR(1) defect as the lag-recovery test, but the chain (and
+    # therefore every residual) sits at a large nonzero level.
+    eps = rng.normal(size=(n_rows + 1, N_CHANNELS))
+    chain = np.empty((n_rows + 1, N_CHANNELS))
+    chain[0] = level + eps[0]
+    for i in range(1, n_rows + 1):
+        chain[i] = level + phi * (chain[i - 1] - level) + eps[i]
+    var_e = float(chain.var())
+    r_planted = rng.normal(size=(n_rows, cfg.horizon, N_CHANNELS))
+    r_planted[:, 0, :] = chain[1:]
+    r_planted[:, 1:, :] += level + phi * chain[:-1, None, :]
+    seg = segment_from_residuals(values, r_planted, cfg)
+    seg_a, seg_b = split_ab(seg, cfg)
+    fitted = fit_greedy(seg_a, cfg, [])
+    assert "lag[0,23]" in [coord.label for coord in fitted.coordinates]
+    total = corrector_gain(fitted, seg_b, cfg)
+    # The selection must beat an intercept-only corrector by the AR signal:
+    # every (h, c) cell carries phi^2 * Var(e) on top of the level, which
+    # both correctors' intercepts absorb equally.
+    intercept_only = FittedCorrector(
+        coordinates=(),
+        means=np.zeros(0),
+        stds=np.ones(0),
+        coef=np.zeros((0, cfg.horizon * N_CHANNELS)),
+        intercept=seg_a.r.mean(axis=0).reshape(-1),
+    )
+    base = corrector_gain(intercept_only, seg_b, cfg)
+    assert total.delta > base.delta + 0.5 * phi**2 * var_e, (total.delta, base.delta)

@@ -455,7 +455,10 @@ def fit_greedy(
         best = np.inf
         for alpha in cfg.ridge_alphas:
             coef = np.linalg.solve(gram + alpha * eye, cross)
-            best = min(best, float(np.mean(np.square(y_val - design_val @ coef))))
+            # Candidates share the baseline's intercept — the fit-part mean
+            # of y — so a nonzero residual mean inflates nobody's MSE.
+            resid = y_val - design_val @ coef - y_fit.mean(axis=0)
+            best = min(best, float(np.mean(np.square(resid))))
         return best
 
     baseline_mse = _val_mse(())
