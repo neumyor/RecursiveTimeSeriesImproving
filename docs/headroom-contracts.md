@@ -128,8 +128,7 @@ def select_period_peaks(e_full: np.ndarray, a_origins: np.ndarray, cfg: Headroom
     # （同一谱瓣只报一次，长周期与短周期一视同仁）；相邻 bin 舍入到同一整数周期的重复
     # 剔除；返回至多 max_period_peaks 个周期（整数步）
 
-def enumerate_coordinates(cfg, period_peaks: list[int], n_channels: int,
-                          horizon: int) -> list[Coordinate]
+def enumerate_coordinates(cfg, period_peaks: list[int], n_channels: int) -> list[Coordinate]
     # = lag 段坐标 + band(P) 坐标 + beyond_l + 每个通道一个 channel(->i) + horizon
     # n_channels < 2 时不生成 channel 坐标（没有其他通道可喂，会退化为纯截距拟合）
     # （total/hgroup 由认证族与 corrector_gain 单独处理，不在本表）
@@ -184,15 +183,13 @@ class FittedCorrector:
     stds: np.ndarray      # [F] A 内拟合行的特征标准差（0 记 1）
     coef: np.ndarray      # [F, H*C] 标准化空间中的 ridge 系数
     intercept: np.ndarray # [H*C]
-    label: str = "total"
 
-def fit_greedy(seg_a: SegmentData, cfg: HeadroomConfig, period_peaks: list[int],
-               *, max_steps: int = 4) -> FittedCorrector
+def fit_greedy(seg_a: SegmentData, cfg: HeadroomConfig, period_peaks: list[int]) -> FittedCorrector
     # total = 坐标的**贪心前向选择**，不再是全部特征的并集（并集 ridge 在低信号任务上
     # 过参数化、样本外负迁移，已废弃）。候选池 = enumerate_coordinates 去掉 horizon；
     # 每个坐标的特征块按 A 内拟合行（前 80%）的均值/标准差标准化，只预计算一次；
     # 在 A 内 80/20 时间切分（间隔 H embargo）上以验证 MSE 逐个加入最能改进的坐标
-    # （alpha 在 cfg.ridge_alphas 中取最优），至多 max_steps 步、无改进即停
+    # （alpha 在 cfg.ridge_alphas 中取最优），至多 4 步、无改进即停
     # （空选择 = 仅截距基线）；选中的坐标集最后用 _fit_ridge 在全部 A 行上重拟合，
     # 标准化参数存入 FittedCorrector。选择只看 A，eval 段（B/cert/test）全程干净。
 
@@ -207,10 +204,6 @@ def all_gains(seg_a, seg_b, cfg, period_peaks, level: float = 0.95) -> list[Gain
     # greedy total + 全部坐标 + hgroup[1, H//2] + hgroup[H//2+1, H]；
     # total 与两个 hgroup 共享同一个在 A 上拟合的 greedy 校正器，hgroup 只把评估
     # 限制到各自步长区间（与认证语义一致）
-
-def certification_family(cfg, period_peaks: list[int], n_channels: int) -> list[Coordinate]
-    # 认证统计量族 K：total + enumerate_coordinates 的全部坐标 + 两个 hgroup；
-    # total/hgroup 的 spec["periods"] 携带 A 上选出的周期峰
 
 def certify_level(cfg, j_max: int, period_peaks: list[int], n_channels: int) -> float
     # 认证增益的逐统计量 Bonferroni 水平 1 - (certify_alpha / j_max) / |K|（见 §7）
