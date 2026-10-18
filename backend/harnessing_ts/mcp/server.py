@@ -75,7 +75,12 @@ def _post_control(control_url: str, capability: str, payload: dict[str, Any]) ->
         method="POST",
     )
     try:
-        with urlopen(request, timeout=305) as response:  # nosec B310: loopback URL is capability-gated
+        # A bridged call can run a full LLM turn server-side (e.g.
+        # query_knowledge validating the extractor with runTests, or a
+        # finish_node that triggers downstream work). The budget must
+        # comfortably exceed the longest server-side turn, so the
+        # loopback request never times out before the work finishes.
+        with urlopen(request, timeout=3600) as response:  # nosec B310: loopback URL is capability-gated
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from harnessing_ts.node_state import _workspace_relative_path
 from harnessing_ts.orchestrator import HarnessOrchestrator
 
 
@@ -313,6 +314,46 @@ def test_explicit_next_node_overrides_node_spec_default(tmp_path, make_orchestra
     persisted = orchestrator.store.read_node_session(node["id"])
     assert persisted["nextNodeSpecified"] is True
     assert result["nextNode"] == "final-summary"
+
+
+def test_workspace_relative_path_rejects_parent_escape(tmp_path) -> None:
+    workspace = tmp_path.resolve()
+
+    with pytest.raises(RuntimeError, match="escapes the workspace"):
+        _workspace_relative_path("../user/problem-contract.md", workspace)
+    with pytest.raises(RuntimeError, match="escapes the workspace"):
+        _workspace_relative_path("reports/iterations/../user/x.md", workspace)
+    with pytest.raises(RuntimeError, match="escapes the workspace"):
+        # Absolute path outside the workspace whose raw form climbs out.
+        _workspace_relative_path(f"{workspace}/../user/problem-contract.md", workspace)
+
+
+def test_workspace_relative_path_preserves_leading_dot_names(tmp_path) -> None:
+    workspace = tmp_path.resolve()
+
+    # A leading-dot directory is a legitimate workspace-relative file;
+    # normalization must not silently strip the dot.
+    assert _workspace_relative_path(".dsh-sessions/x", workspace) == ".dsh-sessions/x"
+    assert _workspace_relative_path("user/problem-contract.md", workspace) == "user/problem-contract.md"
+    assert _workspace_relative_path("./user/problem-contract.md", workspace) == "user/problem-contract.md"
+    # Absolute paths under the workspace resolve relative to it.
+    assert _workspace_relative_path(str(workspace / "user" / "problem-contract.md"), workspace) == "user/problem-contract.md"
+
+
+def test_problem_contract_finish_rejects_parent_escape_output_path(tmp_path, make_orchestrator) -> None:
+    orchestrator = make_orchestrator(tmp_path, mode="auto")
+    _activate_node(orchestrator, "problem-contract")
+
+    with pytest.raises(RuntimeError, match="escapes the workspace"):
+        asyncio.run(orchestrator.finish_node({
+            "success": True,
+            "summary": "contract complete",
+            "goalMet": False,
+            "outputPaths": ["../user/problem-contract.md", "user/data-spec.md"],
+        }))
+
+    persisted = orchestrator.store.read_node_session(orchestrator.get_state()["activeNodeSessionId"])
+    assert persisted["status"] == "running"
 
 
 def test_enter_node_rejects_when_another_node_is_active(tmp_path, make_orchestrator) -> None:

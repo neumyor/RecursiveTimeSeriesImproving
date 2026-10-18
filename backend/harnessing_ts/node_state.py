@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
@@ -228,10 +228,22 @@ class NodeStateMachine:
 
 
 def _workspace_relative_path(path: str, workspace_path: Path) -> str:
+    """Normalize an LLM-reported outputPath for workspace-relative checks.
+
+    Absolute paths under the workspace resolve against it; other absolute
+    paths keep only their trailing components. A leading-dot name (e.g.
+    ``.dsh-sessions/x``) is a legitimate workspace-relative file and is
+    preserved. Any ``..`` component escapes the workspace and is rejected.
+    """
     candidate = Path(path)
     if candidate.is_absolute():
         try:
             return candidate.resolve().relative_to(workspace_path.resolve()).as_posix()
         except ValueError:
-            return candidate.as_posix().lstrip("/")
-    return candidate.as_posix().lstrip("./")
+            value = candidate.as_posix().lstrip("/")
+    else:
+        value = candidate.as_posix()
+    normalized = PurePosixPath(value)
+    if ".." in normalized.parts:
+        raise RuntimeError(f"finish_node outputPath escapes the workspace: {path}")
+    return normalized.as_posix()

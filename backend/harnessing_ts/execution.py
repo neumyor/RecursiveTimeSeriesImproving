@@ -69,7 +69,10 @@ class ExecutionController:
     async def begin(self, actor_id: str, session_id: str) -> dict[str, Any]:
         async with self._lock:
             state = self.ensure_actor(actor_id, session_id)
-            if state["phase"] not in {"ready", "paused"}:
+            # A failed attempt holds no lease (fail() cleared it), so a new
+            # prompt starts a fresh attempt in a new epoch instead of locking
+            # the session out forever.
+            if state["phase"] not in {"ready", "paused", "failed"}:
                 raise RuntimeError(f"execution is {state['phase']}; it cannot accept a prompt")
             state.update({
                 "sessionId": session_id,

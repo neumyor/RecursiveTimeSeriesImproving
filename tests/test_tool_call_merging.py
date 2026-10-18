@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+import pytest
+
 from harnessing_ts.agent.translate import (
     collapse_tool_parts,
     dsh_event_to_parts,
@@ -158,3 +163,72 @@ def test_display_filter_drops_audit_payload_and_bounds_large_tool_output() -> No
     assert "resultRaw" not in parts[0]
     assert parts[0]["input"]["truncated"] is True
     assert "已截断" in parts[0]["resultText"]
+
+
+def test_write_json_and_jsonl_go_through_a_temp_sibling_and_replace(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.state import jsonl
+
+    seen: list[tuple[object, object]] = []
+    real_replace = os.replace
+
+    def tracked_replace(src, dst) -> None:
+        seen.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(jsonl.os, "replace", tracked_replace)
+
+    json_path = tmp_path / "state" / "execution.json"
+    jsonl.write_json(json_path, {"phase": "running"})
+    assert len(seen) == 1
+    assert seen[0][1] == json_path
+    # The replacement source is a distinct temp sibling, never the target.
+    assert Path(seen[0][0]).parent == json_path.parent
+    assert Path(seen[0][0]) != json_path
+
+    jsonl_path = tmp_path / "logs" / "main.jsonl"
+    jsonl.write_jsonl(jsonl_path, [{"id": "a"}, {"id": "b"}])
+    assert len(seen) == 2
+    assert Path(seen[1][0]).parent == jsonl_path.parent
+
+    assert jsonl.read_json(json_path) == {"phase": "running"}
+    assert jsonl.read_jsonl(jsonl_path) == [{"id": "a"}, {"id": "b"}]
+    # No temp files are left behind next to the written files.
+    assert [p.name for p in (tmp_path / "state").iterdir()] == ["execution.json"]
+    assert [p.name for p in (tmp_path / "logs").iterdir()] == ["main.jsonl"]
+
+
+def test_failed_replace_leaves_the_original_file_untouched(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.state import jsonl
+
+    json_path = tmp_path / "state" / "execution.json"
+    jsonl.write_json(json_path, {"phase": "ready"})
+    original = json_path.read_text(encoding="utf-8")
+
+    def failing_replace(_src, _dst) -> None:
+        raise OSError("crashed before the swap")
+
+    monkeypatch.setattr(jsonl.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="crashed before the swap"):
+        jsonl.write_json(json_path, {"phase": "running"})
+
+    assert json_path.read_text(encoding="utf-8") == original
+    assert [p.name for p in (tmp_path / "state").iterdir()] == ["execution.json"]
+
+
+def test_message_log_tool_result_merge_keeps_original_on_failed_replace(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.state import jsonl
+
+    log = MessageLog(tmp_path / "main.jsonl")
+    log.append(dsh_event_to_parts(_dsh_tool_call())[0])
+    original = log.path.read_text(encoding="utf-8")
+
+    def failing_replace(_src, _dst) -> None:
+        raise OSError("crashed before the swap")
+
+    monkeypatch.setattr(jsonl.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="crashed before the swap"):
+        log.append(dsh_event_to_parts(_dsh_tool_result())[0])
+
+    # The audit log still holds the unmerged tool call, byte for byte.
+    assert log.path.read_text(encoding="utf-8") == original
+    assert [part["type"] for part in read_jsonl(log.path)] == ["tool_call"]

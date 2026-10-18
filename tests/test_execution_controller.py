@@ -92,6 +92,29 @@ def test_force_stop_only_exists_while_pausing(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_begin_after_failure_starts_a_fresh_attempt(tmp_path) -> None:
+    async def run() -> None:
+        control = controller(tmp_path)
+        first = await control.begin("main", "session-1")
+        failed = await control.fail(RuntimeError("transport died mid-turn"))
+        assert failed["phase"] == "failed"
+        assert failed["leaseId"] is None
+        assert failed["operationId"] is None
+
+        # A new prompt on the failed execution starts a fresh attempt:
+        # new epoch, new lease, and the failure cleared from view.
+        second = await control.begin("main", "session-1")
+        assert second["phase"] == "running"
+        assert second["leaseId"]
+        assert second["leaseId"] != first["leaseId"]
+        assert second["epoch"] == first["epoch"] + 1
+        assert second["lastError"] is None
+
+        finished = await control.turn_finished(checkpoint_seq=5)
+        assert finished["phase"] == "ready"
+    asyncio.run(run())
+
+
 def test_restart_fences_abandoned_lease_without_changing_session(tmp_path) -> None:
     async def start() -> None:
         control = controller(tmp_path)
