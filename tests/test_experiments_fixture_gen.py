@@ -69,9 +69,9 @@ def test_frozen_registry_satisfies_the_dsl_schema() -> None:
     assert all(origins[f] == "seed" for f in ("period24", "cross-lag3", "nonlinear", "activation"))
 
 
-def test_seed_families_keep_their_historical_seed_slots() -> None:
-    """The migration must not move a child-seed slot: the legacy layout was
-    family-major pairs at 2*f+p and controls at 6 + position*2 + c."""
+def test_seed_families_occupy_fixed_seed_slots() -> None:
+    """Seed families occupy fixed child-seed slots: family-major pairs at
+    2*f+p and controls at 6 + position*2 + c."""
     expected_pairs = {"period24": [0, 1], "cross-lag3": [2, 3], "nonlinear": [4, 5]}
     for family_id, pair_seeds in expected_pairs.items():
         layout = family_entry(family_id)["seedLayout"]
@@ -192,8 +192,7 @@ def test_more_schema_rejections(mutation: Any, expected: str) -> None:
 
 def test_amplitude_gate_rejects_a_mean_shifting_injection() -> None:
     """cycles=0.05 is a near-constant drift: the whole offset lands in the
-    marginal mean and gate 3 must reject it with numbers (this is the
-    level-bias design's failed first iteration)."""
+    marginal mean and gate 3 must reject it with numbers."""
     entry = copy.deepcopy(family_entry("level-bias"))
     entry["familyId"] = "level-bias-mean-shift"
     entry["generator"]["injection"]["cycles"] = 0.05
@@ -252,8 +251,7 @@ def test_witness_gate_reports_an_erroring_determinism_rerun(
 
 def test_specificity_gate_rejects_a_design_the_band_probe_sees() -> None:
     """A period-24 sinusoid injection is NOT a new family: the registered
-    band-24 witness completes it at every seed, so gate 2 rejects the proposal
-    (the horizon-range design's failed first iteration)."""
+    band-24 witness completes it at every seed, so gate 2 rejects the proposal."""
     entry = copy.deepcopy(family_entry("horizon-range"))
     entry["familyId"] = "period24-clone"
     entry["generator"]["injection"] = {
