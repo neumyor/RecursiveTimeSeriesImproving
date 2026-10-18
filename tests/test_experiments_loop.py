@@ -24,7 +24,7 @@ def _load_loop():
     return module
 
 
-def _small_cfg(loop_module: Any, evolution: bool = False):
+def _small_cfg(loop_module: Any, evolution: bool = False, budget: int = 3):
     return loop_module.HeadroomConfig(
         input_length=48,
         horizon=8,
@@ -32,7 +32,7 @@ def _small_cfg(loop_module: Any, evolution: bool = False):
         fir_len_cap=48,
         beyond_l_lags=2,
         band_period_range=(4, 24),
-        budget_candidates=3,
+        budget_candidates=budget,
         candidate_timeout_seconds=60.0,
         ridge_alphas=(1.0, 100.0),
         evolution=evolution,
@@ -746,6 +746,35 @@ def test_judge_triggers_fire_from_pure_ledger_rules(tmp_path: Path) -> None:
     loop, state, calls = _judge_loop(loop_module, tmp_path / "standing", ledger, cert_rows=cert)
     asyncio.run(loop._judge_recommendation(state))
     assert not calls
+
+
+def test_judge_rejections_trigger_fires_once_per_streak(tmp_path: Path) -> None:
+    """A rejection streak asks the judge at its JUDGE_STREAK_ROUNDS-th round
+    and every further multiple — rounds four and five of a five-streak stay
+    silent, so the call budget is never spent every round."""
+    loop_module = _load_loop()
+    loop, state, calls = _judge_loop(loop_module, tmp_path, [_row(1, "c1", "m0", False)])
+    streak = 5
+    for n in range(1, streak + 1):
+        ledger = [_row(i, f"c{i}", "m0", False) for i in range(1, n + 1)]
+        loop.rounds_path.write_text(
+            "\n".join(json.dumps(row) for row in ledger) + "\n", encoding="utf-8"
+        )
+        trigger = loop._judge_trigger(state)
+        expected = "rejections" if n % loop_module.JUDGE_STREAK_ROUNDS == 0 else None
+        assert trigger == expected, f"after {n} straight rejections"
+
+
+def test_round_prompt_renders_the_full_history(tmp_path: Path) -> None:
+    """The history table shows every earlier candidate, not just a tail: the
+    prompt asks the agent to differ from each of them."""
+    loop_module = _load_loop()
+    ledger = [_row(i, f"c{i}", "m0", False) for i in range(1, 13)]
+    loop, state, calls = _judge_loop(loop_module, tmp_path, ledger)
+    state = loop.load_state()
+    prompt = loop._render_round(state, "feedback", "", None)
+    for i in range(1, 13):
+        assert f"| {i} | c{i} | False |" in prompt
 
 
 def test_judge_valid_switch_renders_in_the_round_prompt(tmp_path: Path) -> None:

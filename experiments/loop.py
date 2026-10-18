@@ -107,9 +107,9 @@ ASPECT_VOCABULARY = (
     "level-bias",
     "other",
 )
-# Diversity judge: called after each acceptance,
-# after a streak of JUDGE_STREAK_ROUNDS rejected/failed rounds, and once per
-# new saturated certification — about 10-15 calls per run, never every round.
+# Diversity judge: called after each acceptance, at every
+# JUDGE_STREAK_ROUNDS-th consecutive rejected/failed round, and once per new
+# saturated certification — about 10-15 calls per run, never every round.
 JUDGE_STREAK_ROUNDS = 3
 JUDGE_RETRIES = 1  # one retry on any judge failure, then greedy continuation
 # The judge's reason must contain no digits (candidate ids and scores are
@@ -842,9 +842,11 @@ class HeadroomLoop:
         """'acceptance' | 'rejections' | 'saturation' | None — pure ledger rules.
 
         When to ask the judge is bookkeeping, not measurement: after each
-        acceptance, after a streak of rejected/failed rounds, and once per new
-        saturated certification (the last-call check keeps a standing
-        saturated state from re-asking every round).
+        acceptance, once per rejection streak (at its JUDGE_STREAK_ROUNDS-th
+        round and every further multiple, so a long streak costs one call per
+        three rounds, not one per round), and once per new saturated
+        certification (the last-call check keeps a standing saturated state
+        from re-asking every round).
         """
         assert self.heldout is not None
         rounds = _read_jsonl(self.rounds_path)
@@ -852,8 +854,12 @@ class HeadroomLoop:
             return None
         if rounds[-1].get("accepted"):
             return "acceptance"
-        tail = rounds[-JUDGE_STREAK_ROUNDS:]
-        if len(tail) == JUDGE_STREAK_ROUNDS and not any(row.get("accepted") for row in tail):
+        streak = 0
+        for row in reversed(rounds):
+            if row.get("accepted"):
+                break
+            streak += 1
+        if streak and streak % JUDGE_STREAK_ROUNDS == 0:
             return "rejections"
         cert = _read_jsonl(self.heldout / "certification.jsonl")
         if cert and cert[-1].get("saturated"):
@@ -1073,9 +1079,9 @@ class HeadroomLoop:
             if self.arm in PROBE_ARMS:
                 # Probes are tools, not deliverables: validation never costs a
                 # repair turn, and the verdict rides the next round's feedback.
-                started = time.monotonic()
+                probe_started = time.monotonic()
                 submitted, kept = self._collect_probes(state)
-                probes_seconds += time.monotonic() - started
+                probes_seconds += time.monotonic() - probe_started
                 probes_submitted += submitted
                 probes_kept += kept
             candidate_id, source, proposal, problem = self._collect_candidate(state, round_seen)
