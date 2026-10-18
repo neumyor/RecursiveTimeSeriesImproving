@@ -12,7 +12,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_loop():
+def _load_loop(tmp_path: Path):
     source = _REPO_ROOT / "experiments" / "loop.py"
     import importlib.util
 
@@ -21,6 +21,8 @@ def _load_loop():
     module = importlib.util.module_from_spec(spec)
     sys.modules["rhg_loop"] = module
     spec.loader.exec_module(module)
+    # Heldout dirs stay inside the test's tmp_path, never under ~.
+    module.HELDOUT_ROOT = tmp_path / "rhg-heldout"
     return module
 
 
@@ -122,7 +124,7 @@ def _rounds(run_dir: Path) -> list[dict[str, Any]]:
 def test_hgroup_mse_splits_the_horizon_axis(tmp_path: Path) -> None:
     """The two hgroup MSEs split the horizon axis of r [B, H, C]: residuals
     confined to the late horizons land entirely in the second group."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     half = 4
     r = np.zeros((6, 8, 2))
     r[:, half:, :] = 1.5
@@ -139,7 +141,7 @@ def test_hgroup_mse_splits_the_horizon_axis(tmp_path: Path) -> None:
 
 
 def test_loop_runs_three_rounds_and_writes_ledger(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     factory = _make_factory([_better_candidate, _better_candidate, _better_candidate])
     run_dir = tmp_path / "run1"
     loop = loop_module.HeadroomLoop(
@@ -162,7 +164,7 @@ def test_loop_runs_three_rounds_and_writes_ledger(tmp_path: Path) -> None:
 
 
 def test_loop_resume_continues_from_ledger(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     factory = _make_factory([_better_candidate, _better_candidate, _better_candidate])
     run_dir = tmp_path / "run2"
     common = dict(
@@ -187,7 +189,7 @@ def test_prepare_reuses_one_heldout_dir_across_a_crash(tmp_path: Path) -> None:
     """A crash in the first round (ledger empty, incumbent reference not yet
     written) must not fork a second heldout directory on the retry: one run
     dir maps to exactly one heldout dir, and the missing reference lands."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     common = dict(
         run_dir=tmp_path / "run-crash",
         task_name="lgssm_xchannel",
@@ -216,7 +218,7 @@ def test_resume_drops_heldout_records_without_a_ledger_line(tmp_path: Path) -> N
     crash between the two appends leaves records whose round has no ledger
     counterpart, and the resumed run drops them and completes the round
     exactly once."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     run_dir = tmp_path / "run-orphan"
     factory = _make_factory([_better_candidate])
     common = dict(
@@ -270,7 +272,7 @@ def test_loop_repair_round_recovers_within_the_round(tmp_path: Path) -> None:
     Repairs happen INSIDE the round (up to MAX_REPAIRS extra sends), so the
     ledger still records one evaluated round.
     """
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     script: list[Any] = [None, _better_candidate, _better_candidate, _better_candidate]
     factory = _make_factory(script)
     run_dir = tmp_path / "run3"
@@ -295,7 +297,7 @@ def test_repair_recovers_the_same_candidate_directory(tmp_path: Path) -> None:
     proposal.json) is fixed in place by the repair turn; the loop
     re-examines that same directory instead of claiming no candidate was
     written."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     script_pos = {"pos": 0}
 
     def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
@@ -336,7 +338,7 @@ def test_repair_recovers_the_same_candidate_directory(tmp_path: Path) -> None:
 
 
 def test_loop_round_fails_after_exhausted_repairs(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     factory = _make_factory([None, None, None])
     run_dir = tmp_path / "run3b"
     loop = loop_module.HeadroomLoop(
@@ -359,7 +361,7 @@ def test_loop_round_fails_after_exhausted_repairs(tmp_path: Path) -> None:
 
 
 def test_loop_heldout_records_and_isolation(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     factory = _make_factory([_better_candidate] * 3)
     run_dir = tmp_path / "run4"
     loop = loop_module.HeadroomLoop(
@@ -387,15 +389,17 @@ def test_loop_heldout_records_and_isolation(tmp_path: Path) -> None:
         assert "saturated" in row and "level" in row
     posthoc_files = list((heldout / "posthoc").glob("*.json"))
     assert len(posthoc_files) >= sum(1 for row in rounds if row["status"] == "evaluated")
-    # The heldout directory lives outside the agent-visible workspace.
-    assert heldout.resolve().is_relative_to(Path.home())
+    # The heldout directory lives outside the agent-visible workspace, under
+    # the redirected root (never under the home directory).
+    assert loop_module.HELDOUT_ROOT == tmp_path / "rhg-heldout"
+    assert heldout.resolve().is_relative_to(loop_module.HELDOUT_ROOT)
     assert not heldout.resolve().is_relative_to(run_dir.resolve())
 
 
 def test_empty_dsh_turn_is_fatal_not_silent(tmp_path: Path) -> None:
     """A turn that produces no parts (billing/auth rejection) must raise
     after the retries, not burn the budget as silent no-op rounds."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
 
     class _EmptySdkRunner:
         """A duck-typed SdkRunner whose turns produce nothing (the observed
@@ -467,7 +471,7 @@ def test_self_built_arm_validates_and_runs_probes(tmp_path: Path) -> None:
     """The self-built round trip: write probes -> fixture validation (good one
     kept, wrong-direction one rejected) -> verdicts + probe output in the next
     round's prompt, and none of the fixed card's content anywhere."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     script_pos = {"pos": 0}
     prompts: list[str] = []
 
@@ -549,7 +553,7 @@ def test_self_built_arm_validates_and_runs_probes(tmp_path: Path) -> None:
 def test_validated_probe_runs_from_the_heldout_frozen_copy(tmp_path: Path) -> None:
     """The library runs the source that passed validation, not whatever the
     agent's write tools later left in ws/probes/<id>/probe.py."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     script_pos = {"pos": 0}
 
     def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
@@ -610,7 +614,7 @@ def test_augmented_arm_combines_card_and_probes(tmp_path: Path) -> None:
     round 1 shows m0's card plus the probe bootstrap message; round 2 shows
     the verdicts and the probe output below the card, with the
     complementarity note riding above the probe guide."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     script_pos = {"pos": 0}
     prompts: list[str] = []
 
@@ -679,7 +683,7 @@ def test_augmented_arm_combines_card_and_probes(tmp_path: Path) -> None:
 def test_self_built_samples_activations_with_alignment(tmp_path: Path) -> None:
     """The activation artifact: [B, P, D] per layer, aligned to residual rows,
     and absent (not an error) for incumbents without the extension."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     loop = loop_module.HeadroomLoop(
         run_dir=tmp_path / "run-act",
         task_name="lgssm_xchannel",
@@ -842,7 +846,7 @@ def _row(
 
 
 def test_judge_triggers_fire_from_pure_ledger_rules(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     cert = [{"round": 0, "incumbentId": "m0", "saturated": True, "level": 0.95, "failures": []}]
 
     def rows(n: int, accepted_last: bool = False) -> list[dict[str, Any]]:
@@ -878,7 +882,7 @@ def test_judge_rejections_trigger_fires_every_third_streak_round(tmp_path: Path)
     """A rejection streak asks the judge at its JUDGE_STREAK_ROUNDS-th round
     and every further multiple; rounds four and five of a five-streak stay
     silent."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     loop, state, calls = _judge_loop(loop_module, tmp_path, [_row(1, "c1", "m0", False)])
     streak = 5
     for n in range(1, streak + 1):
@@ -894,7 +898,7 @@ def test_judge_rejections_trigger_fires_every_third_streak_round(tmp_path: Path)
 def test_round_prompt_renders_the_full_history(tmp_path: Path) -> None:
     """The history table shows every earlier candidate: the
     prompt asks the agent to differ from each of them."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     ledger = [_row(i, f"c{i}", "m0", False) for i in range(1, 13)]
     loop, state, calls = _judge_loop(loop_module, tmp_path, ledger)
     state = loop.load_state()
@@ -904,7 +908,7 @@ def test_round_prompt_renders_the_full_history(tmp_path: Path) -> None:
 
 
 def test_judge_valid_switch_renders_in_the_round_prompt(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     ledger = [
         _row(1, "c1", "m0", False),
         _row(2, "c-other", "m0", False, 0.42),
@@ -929,7 +933,7 @@ def test_judge_valid_switch_renders_in_the_round_prompt(tmp_path: Path) -> None:
 
 
 def test_judge_invalid_parent_falls_back_to_greedy(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     bogus = json.dumps(
         {"switch": True, "parent": "c-does-not-exist", "reason": "try a different direction"}
     )
@@ -949,7 +953,7 @@ def test_judge_invalid_parent_falls_back_to_greedy(tmp_path: Path) -> None:
 
 
 def test_judge_transient_failure_retries_then_greedy(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     ledger = [
         _row(1, "c1", "m0", False),
         _row(2, "c-other", "m0", False, 0.42),
@@ -973,7 +977,7 @@ def test_judge_transient_failure_retries_then_greedy(tmp_path: Path) -> None:
 
 
 def test_judge_reason_leak_filter_rejects_numbers_and_status_words(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     leaky_digits = json.dumps(
         {"switch": True, "parent": "c-other", "reason": "the last candidate improved by 12 percent"}
     )
@@ -1007,7 +1011,7 @@ def test_resume_completes_missing_heldout_records_of_an_accepted_round(tmp_path:
     """A crash between the ledger line and the heldout appends leaves the
     accepted round without records; the next load_state completes the
     acceptance and the certification exactly once."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     run_dir = tmp_path / "run-window"
     common = dict(
         run_dir=run_dir,
@@ -1152,7 +1156,7 @@ def test_deep_incumbent_round_trip(tmp_path: Path) -> None:
     path: in-process fit in load_state, round feedback over its residuals,
     the round-0 deep posthoc card, and candidate evaluation against it.
     Every torch candidate in P2 v2 derives from this template."""
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     script_pos = {"pos": 0}
 
     def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
