@@ -1003,6 +1003,84 @@ def test_judge_reason_leak_filter_rejects_numbers_and_status_words(tmp_path: Pat
     assert loop._last_judge["failed"] is True
 
 
+def test_resume_completes_missing_heldout_records_of_an_accepted_round(tmp_path: Path) -> None:
+    """A crash between the ledger line and the heldout appends leaves the
+    accepted round without records; the next load_state completes the
+    acceptance and the certification exactly once."""
+    loop_module = _load_loop()
+    run_dir = tmp_path / "run-window"
+    common = dict(
+        run_dir=run_dir,
+        task_name="lgssm_xchannel",
+        arm="fixed",
+        seed=0,
+        cfg=_small_cfg(loop_module, budget=1),
+        m0_template="m0.py",
+        sizes=SMALL_SIZES,
+        runner_factory=_make_factory([]),
+    )
+    setup = loop_module.HeadroomLoop(**common)
+    setup.prepare()
+    heldout = setup.heldout
+    ws = run_dir / "ws"
+    # The crash window: the ledger already counts an accepted round whose
+    # heldout appends never happened.  The accepted candidate's source sits
+    # in its candidate directory, where the ledger incumbent resolves from.
+    candidate_dir = ws / "models" / "candidates" / "c-window"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "model.py").write_text(
+        (ws / "models" / "incumbent" / "model.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (run_dir / "rounds.jsonl").write_text(
+        json.dumps(
+            {
+                "round": 1,
+                "candidateId": "c-window",
+                "parent": "m0",
+                "arm": "fixed",
+                "status": "evaluated",
+                "diagMse": 1.0,
+                "dmP": 0.001,
+                "accepted": True,
+                "error": None,
+                "evalNote": None,
+                "proposal": {},
+                "tokens": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    resumed = loop_module.HeadroomLoop(**common)
+    resumed.prepare()
+    resumed.load_state()
+    accs = [
+        json.loads(line)
+        for line in (heldout / "acceptances.jsonl").read_text().splitlines()
+    ]
+    assert accs == [{"round": 1, "candidateId": "c-window"}]
+    certs = [
+        json.loads(line)
+        for line in (heldout / "certification.jsonl").read_text().splitlines()
+    ]
+    assert [row["incumbentId"] for row in certs] == ["c-window"]
+    assert certs[0]["round"] == 1
+    # A second resume changes nothing: the completion is once.
+    again = loop_module.HeadroomLoop(**common)
+    again.prepare()
+    again.load_state()
+    accs_after = [
+        json.loads(line)
+        for line in (heldout / "acceptances.jsonl").read_text().splitlines()
+    ]
+    certs_after = [
+        json.loads(line)
+        for line in (heldout / "certification.jsonl").read_text().splitlines()
+    ]
+    assert len(accs_after) == 1 and len(certs_after) == 1
+
+
 def test_judge_reads_heldout_cards_in_the_digest(tmp_path: Path) -> None:
     loop_module = _load_loop()
     ledger = [

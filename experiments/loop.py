@@ -44,6 +44,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -747,7 +748,9 @@ class HeadroomLoop:
         if self._segments_incumbent_id != incumbent_id:
             self._refresh_incumbent_segments()
             self._segments_incumbent_id = incumbent_id
-        return LoopState(round_index=len(rounds) + 1, incumbent_id=incumbent_id, history=history)
+        state = LoopState(round_index=len(rounds) + 1, incumbent_id=incumbent_id, history=history)
+        self._complete_accepted_heldout(rounds, state)
+        return state
 
     def _reconcile_heldout(self, rounds: list[dict[str, Any]]) -> None:
         """Drop heldout acceptances/certifications whose round has no ledger
@@ -767,9 +770,41 @@ class HeadroomLoop:
             lines = _read_jsonl(path)
             kept = [row for row in lines if int(row["round"]) in done]
             if len(kept) != len(lines):
-                path.write_text(
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(
                     "".join(json.dumps(row) + "\n" for row in kept), encoding="utf-8"
                 )
+                os.replace(tmp, path)
+
+    def _complete_accepted_heldout(
+        self, rounds: list[dict[str, Any]], state: LoopState
+    ) -> None:
+        """Complete the heldout records of the last accepted round.
+
+        The ledger line lands before the heldout appends, so a crash between
+        them leaves an accepted round whose acceptance or certification is
+        missing; the ledger already counts the round, so the next resume
+        appends the missing records here.
+        """
+        assert self.heldout is not None
+        if not rounds or not rounds[-1].get("accepted"):
+            return
+        round_no = int(rounds[-1]["round"])
+        candidate_id = str(rounds[-1]["candidateId"])
+        # The initial m0 certification shares round 1 with the first accepted
+        # candidate's, so the certification match is on the incumbent id.
+        acceptances = _read_jsonl(self.heldout / "acceptances.jsonl")
+        if not any(
+            int(row["round"]) == round_no and row.get("candidateId") == candidate_id
+            for row in acceptances
+        ):
+            _append_jsonl(
+                self.heldout / "acceptances.jsonl",
+                {"round": round_no, "candidateId": candidate_id},
+            )
+        certifications = _read_jsonl(self.heldout / "certification.jsonl")
+        if not any(row.get("incumbentId") == candidate_id for row in certifications):
+            self._certify_incumbent(replace(state, round_index=round_no), candidate_id)
 
     def _certify_incumbent(self, state: LoopState, incumbent_id: str) -> None:
         """Append one certification of the CURRENT incumbent (heldout only).
@@ -1168,10 +1203,10 @@ class HeadroomLoop:
             },
         )
         if accepted:
-            # Heldout records follow the ledger line: a crash between the
-            # two appends leaves the round re-runnable (the next load_state
-            # drops the heldout record with no ledger counterpart), never an
-            # orphan certification a completed round can never match.
+            # Heldout records follow the ledger line: the next load_state
+            # drops heldout records whose round never reached the ledger
+            # and completes the missing acceptance/certification of the
+            # last accepted round.
             _append_jsonl(
                 self.heldout / "acceptances.jsonl",
                 {"round": state.round_index, "candidateId": candidate_id},
