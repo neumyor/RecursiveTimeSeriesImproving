@@ -936,7 +936,7 @@ class HeadroomLoop:
                 return "saturation"
         return None
 
-    def _evolution_digest(self, state: LoopState) -> str:
+    def _judge_archive(self, state: LoopState) -> str:
         """Structured archive for the judge: the ledger plus heldout cards.
 
         The judge reads the measured cards directly, so "what did this
@@ -1030,7 +1030,7 @@ class HeadroomLoop:
         for _attempt in range(1 + JUDGE_RETRIES):
             runner = self.judge_factory(judge_ws, JUDGE_SYSTEM_PROMPT)
             try:
-                parts = await runner.send(self._evolution_digest(state))
+                parts = await runner.send(self._judge_archive(state))
                 verdict = self._parse_verdict(parts, state)
                 if verdict is not None:
                     break

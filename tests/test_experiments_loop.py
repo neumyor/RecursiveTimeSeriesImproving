@@ -918,7 +918,7 @@ def test_judge_valid_switch_renders_in_the_round_prompt(tmp_path: Path) -> None:
     parent, reason, cause = verdict
     assert (parent, cause) == ("c-other", "acceptance")
     assert "cross-channel direction" in reason
-    # The digest carried the ledger and the measured card for the judge.
+    # The archive carried the ledger and the measured card for the judge.
     assert "c-other" in calls[0] and "diagMse" in calls[0]
     assert loop._last_judge["failed"] is False
     prompt = loop._render_round(state, "feedback", "", verdict)
@@ -1081,8 +1081,8 @@ def test_resume_completes_missing_heldout_records_of_an_accepted_round(tmp_path:
     assert len(accs_after) == 1 and len(certs_after) == 1
 
 
-def test_judge_reads_heldout_cards_in_the_digest(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+def test_judge_reads_heldout_cards_in_the_archive(tmp_path: Path) -> None:
+    loop_module = _load_loop(tmp_path)
     ledger = [
         _row(1, "c1", "m0", False),
         _row(2, "c-other", "m0", False, 0.42),
@@ -1101,15 +1101,15 @@ def test_judge_reads_heldout_cards_in_the_digest(tmp_path: Path) -> None:
     }
     (loop.heldout / "posthoc").mkdir(parents=True, exist_ok=True)
     (loop.heldout / "posthoc" / "c2.json").write_text(json.dumps(card), encoding="utf-8")
-    digest = loop._evolution_digest(state)
-    assert "remaining improvement by aspect: lag-structure: 0.0110" in digest
-    assert "claimed: lag-structure; recent lags; less ridge shrinkage" in digest
+    archive = loop._judge_archive(state)
+    assert "remaining improvement by aspect: lag-structure: 0.0110" in archive
+    assert "claimed: lag-structure; recent lags; less ridge shrinkage" in archive
     # The judge workspace lives inside heldout, never under ws/.
     assert str(loop._judge_ws()).startswith(str(loop.heldout))
 
 
 def test_judge_disabled_by_config_never_calls(tmp_path: Path) -> None:
-    loop_module = _load_loop()
+    loop_module = _load_loop(tmp_path)
     ledger = [
         _row(1, "c1", "m0", False),
         _row(2, "c-other", "m0", False, 0.42),
