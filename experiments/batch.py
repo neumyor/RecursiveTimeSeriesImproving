@@ -364,7 +364,6 @@ def spawn_cell(cmd: list[str], run_dir: Path, log_path: Path, attempt: int) -> t
 # ------------------------------------------------------------------ driver
 
 
-@dataclass
 class SystemicFailure(RuntimeError):
     """Consecutive cell failures that indicate a batch-wide fault."""
 
@@ -438,6 +437,10 @@ class BatchDriver:
                     # A billing/auth failure kills every cell identically;
                     # running the rest of the matrix would only burn time.
                     kill_live_cells()
+                    # Cancel the queued cells too: without this they would all
+                    # run and fail the same way after the abort.  The finally
+                    # below repeats the shutdown, which is a no-op by then.
+                    pool.shutdown(wait=True, cancel_futures=True)
                     raise SystemicFailure(
                         f"{consecutive_failures} consecutive cell failures "
                         "(suspect billing/auth); aborting the pass"

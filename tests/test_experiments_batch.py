@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import shlex
 import sys
+import time
 
 import pytest
 
@@ -311,3 +312,37 @@ def test_bad_specs_and_args_are_batch_fatal(
 
     with pytest.raises(SystemExit):
         batch.main(["--spec", str(good), "--runs-root", str(runs), "--workers", "0"])
+
+
+def test_systemic_failure_cancels_queued_cells(tmp_path: Path) -> None:
+    """A billing/auth-style failure streak aborts the pass AND cancels the
+    queued cells: only the cells up to (or just past) the six-failure abort
+    threshold ever start, and everything still queued is never invoked."""
+    batch = _load_batch()
+    spec = batch.load_spec(
+        _write_spec(
+            tmp_path / "spec.json",
+            tasks=[{"name": "hmm", "kind": "synthetic"}],
+            arms=["fixed", "scalar"],
+            seeds=[0, 1, 2, 3],
+        )
+    )
+    driver = batch.BatchDriver(spec, tmp_path / "runs", "python -c pass", workers=1)
+    driver.runs_root.mkdir(parents=True, exist_ok=True)
+    driver.log_dir.mkdir(parents=True, exist_ok=True)
+    started: list[str] = []
+
+    def fake_attempt(cell: "batch.Cell", attempt: int) -> "batch.CellOutcome":
+        started.append(cell.cell_id)
+        time.sleep(0.2)  # long enough that the abort lands while a cell runs
+        return batch.CellOutcome(cell, attempt, 2, 0.0, "boom")
+
+    driver._attempt = fake_attempt  # type: ignore[method-assign]
+    cells = batch.enumerate_cells(spec)
+    with pytest.raises(batch.SystemicFailure):
+        driver.run_pass(cells, attempt=1)
+    # the streak hit the max(6, workers) threshold and aborted mid-matrix:
+    # at most the first seven cells started (the one in flight when the
+    # sixth failure landed), and the rest were cancelled while queued
+    assert 6 <= len(started) <= 7
+    assert "hmm-scalar-3" not in started
