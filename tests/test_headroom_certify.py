@@ -17,32 +17,19 @@ class _StubCoordinate:
 
 @dataclass(frozen=True)
 class _StubGain:
-    """Duck-typed stand-in for correctors.GainReport; certify reads `.label`/`.ucb`/`.level`."""
+    """Duck-typed stand-in for correctors.GainReport; certify reads `.label`/`.ucb`."""
 
     coordinate: _StubCoordinate
     ucb: float
-    level: float
 
 
-def _level(cfg: HeadroomConfig) -> float:
-    # The fixed level certify demands of every gain, whatever the number of
-    # statistics.
-    return 1.0 - cfg.certify_alpha
-
-
-def _gains(pairs: list[tuple[str, float]], level: float) -> list[_StubGain]:
-    return [
-        _StubGain(coordinate=_StubCoordinate(label), ucb=ucb, level=level)
-        for label, ucb in pairs
-    ]
+def _gains(pairs: list[tuple[str, float]]) -> list[_StubGain]:
+    return [_StubGain(coordinate=_StubCoordinate(label), ucb=ucb) for label, ucb in pairs]
 
 
 def test_all_ucbs_below_thresholds_certifies_saturation() -> None:
     cfg = HeadroomConfig(certify_alpha=0.05, certify_epsilon=0.02)
-    gains = _gains(
-        [("total", 0.5), ("hgroup[1,12]", 0.1), ("hgroup[13,24]", 0.05)],
-        level=_level(cfg),
-    )
+    gains = _gains([("total", 0.5), ("hgroup[1,12]", 0.1), ("hgroup[13,24]", 0.05)])
     mse_by_group = {"total": 100.0, "hgroup[1,12]": 80.0, "hgroup[13,24]": 40.0}
     report = certify(gains, mse_by_group, cfg)
     assert isinstance(report, CertReport)
@@ -56,10 +43,7 @@ def test_single_violation_is_reported_with_its_threshold() -> None:
     cfg = HeadroomConfig()
     # 0.02 * 80.0 = 1.6: the middle gain sits exactly at its threshold, which must
     # count as a violation because the stop rule demands a strict ucb < threshold.
-    gains = _gains(
-        [("total", 0.5), ("hgroup[1,12]", 1.6), ("hgroup[13,24]", 0.05)],
-        level=_level(cfg),
-    )
+    gains = _gains([("total", 0.5), ("hgroup[1,12]", 1.6), ("hgroup[13,24]", 0.05)])
     mse_by_group = {"total": 100.0, "hgroup[1,12]": 80.0, "hgroup[13,24]": 40.0}
     report = certify(gains, mse_by_group, cfg)
     assert report.saturated is False
@@ -72,7 +56,7 @@ def test_single_violation_is_reported_with_its_threshold() -> None:
 
 def test_invalid_arguments_raise_value_error() -> None:
     cfg = HeadroomConfig()
-    gains = _gains([("total", 0.5)], level=_level(cfg))
+    gains = _gains([("total", 0.5)])
     mse_by_group = {"total": 100.0}
     with pytest.raises(ValueError, match="total"):
         certify(gains, {"hgroup[1,12]": 80.0}, cfg)  # gain label missing
@@ -88,14 +72,12 @@ def test_realistic_numbers_round_trip_against_epsilon_rule() -> None:
         "hgroup[1,12]": 5.83,
         "hgroup[13,24]": 2.47,
     }
-    level = _level(cfg)
     near = _gains(
         [
             ("total", 0.02 * 4.21 * 0.999),
             ("hgroup[1,12]", 0.02 * 5.83 * 0.999),
             ("hgroup[13,24]", 0.02 * 2.47 * 0.999),
-        ],
-        level=level,
+        ]
     )
     report = certify(near, mse_by_group, cfg)
     assert report.saturated is True
@@ -107,8 +89,7 @@ def test_realistic_numbers_round_trip_against_epsilon_rule() -> None:
             ("total", 0.02 * 4.21 * 1.001),
             ("hgroup[1,12]", 0.02 * 5.83 * 0.999),
             ("hgroup[13,24]", 0.02 * 2.47 * 0.999),
-        ],
-        level=level,
+        ]
     )
     report = certify(crossed, mse_by_group, cfg)
     assert report.saturated is False
