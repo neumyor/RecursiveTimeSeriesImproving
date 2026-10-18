@@ -24,11 +24,11 @@ from harnessing_ts.headroom.config import ARM_VALUES, HeadroomConfig
 from harnessing_ts.headroom.correctors import GainReport
 
 # Probe output rendering: the probe contract bounds one probe's serialized
-# output at 4 KB (experiments/probes.py OUTPUT_CAP_BYTES), and cell escaping
-# can at most double the rendered characters, so 8192 renders any
-# contract-legal output uncut.
+# output at 4 KB (experiments/probes.py OUTPUT_CAP_BYTES); the cap applies
+# to the escaped cell text, where escaping can at most double the characters,
+# so 8192 renders any contract-legal output uncut.
 _PROBE_OUTPUT_CHARS = 8192
-# Rows shown, not content truncated: only the newest probes render.
+# Only the newest probes render; each rendered row shows its full output.
 _PROBE_MAX_ROWS = 8
 
 
@@ -166,10 +166,10 @@ def _probe_table(
             if "error" in row and row["error"]:
                 output = f"ERROR: {row['error']}"
             else:
-                output = json.dumps(_probe_safe(row.get("output")), ensure_ascii=False)
+                output = _cell(json.dumps(_probe_safe(row.get("output")), ensure_ascii=False))
                 if len(output) > _PROBE_OUTPUT_CHARS:
                     output = output[:_PROBE_OUTPUT_CHARS] + "… (truncated)"
-            lines.append(f"| {_cell(row['probeId'])} | {_cell(row.get('measures', ''))} | {_cell(output)} |")
+            lines.append(f"| {_cell(row['probeId'])} | {_cell(row.get('measures', ''))} | {output} |")
         if len(probe_rows) > _PROBE_MAX_ROWS:
             lines.append(f"({len(probe_rows) - _PROBE_MAX_ROWS} earlier probes not shown)")
     sections.append("\n".join(lines))

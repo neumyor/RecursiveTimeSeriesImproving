@@ -874,10 +874,10 @@ def test_judge_triggers_fire_from_pure_ledger_rules(tmp_path: Path) -> None:
     assert not calls
 
 
-def test_judge_rejections_trigger_fires_once_per_streak(tmp_path: Path) -> None:
+def test_judge_rejections_trigger_fires_every_third_streak_round(tmp_path: Path) -> None:
     """A rejection streak asks the judge at its JUDGE_STREAK_ROUNDS-th round
-    and every further multiple — rounds four and five of a five-streak stay
-    silent, so the call budget is never spent every round."""
+    and every further multiple; rounds four and five of a five-streak stay
+    silent."""
     loop_module = _load_loop()
     loop, state, calls = _judge_loop(loop_module, tmp_path, [_row(1, "c1", "m0", False)])
     streak = 5
@@ -892,7 +892,7 @@ def test_judge_rejections_trigger_fires_once_per_streak(tmp_path: Path) -> None:
 
 
 def test_round_prompt_renders_the_full_history(tmp_path: Path) -> None:
-    """The history table shows every earlier candidate, not just a tail: the
+    """The history table shows every earlier candidate: the
     prompt asks the agent to differ from each of them."""
     loop_module = _load_loop()
     ledger = [_row(i, f"c{i}", "m0", False) for i in range(1, 13)]

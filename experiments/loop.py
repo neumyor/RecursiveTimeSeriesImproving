@@ -110,7 +110,7 @@ ASPECT_VOCABULARY = (
 )
 # Diversity judge: called after each acceptance, at every
 # JUDGE_STREAK_ROUNDS-th consecutive rejected/failed round, and once per new
-# saturated certification — about 10-15 calls per run, never every round.
+# saturated certification — about 10-15 calls per run.
 JUDGE_STREAK_ROUNDS = 3
 JUDGE_RETRIES = 1  # one retry on any judge failure, then greedy continuation
 # The judge's reason must contain no digits (candidate ids and scores are
@@ -428,9 +428,8 @@ class HeadroomLoop:
         assert self.seg_diag is not None
         diag_mse = float(np.mean(np.square(self.seg_diag.r)))
         history_rows = ["| round | candidateId | accepted | diagMse | status |", "|---|---|---|---|---|"]
-        # The full history, not a tail: the prompt asks the agent to differ
-        # from EVERY earlier candidate, so every earlier candidate must be
-        # visible in the table.
+        # The prompt asks the agent to differ from EVERY earlier candidate,
+        # so every earlier candidate is visible in the table.
         for row in state.history:
             diag_mse_row = "n/a" if row["diagMse"] is None else f"{row['diagMse']:.4f}"
             history_rows.append(
@@ -910,11 +909,10 @@ class HeadroomLoop:
         """'acceptance' | 'rejections' | 'saturation' | None — pure ledger rules.
 
         When to ask the judge is bookkeeping, not measurement: after each
-        acceptance, once per rejection streak (at its JUDGE_STREAK_ROUNDS-th
-        round and every further multiple, so a long streak costs one call per
-        three rounds, not one per round), and once per new saturated
-        certification (the last-call check keeps a standing saturated state
-        from re-asking every round).
+        acceptance, at every JUDGE_STREAK_ROUNDS-th consecutive
+        rejected/failed round (a long streak costs one call per three
+        rounds), and once per new saturated certification (the last-call
+        check keeps a standing saturated state from re-asking every round).
         """
         assert self.heldout is not None
         rounds = _read_jsonl(self.rounds_path)
