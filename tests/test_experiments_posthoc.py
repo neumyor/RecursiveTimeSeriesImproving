@@ -474,3 +474,154 @@ def test_real_run_reports_null_gaps_and_ratio(tmp_path: Path) -> None:
     assert missing["runs"][0]["error"] is not None
     assert "real-fake" in missing["runs"][0]["error"]
     assert missing["endpointTable"] == []
+
+
+def test_probe_accounting_reports_the_probe_output_fraction(tmp_path: Path) -> None:
+    """roundsWithProbeOutput is the FRACTION of rounds whose prompt carried
+    at least one probe output (2 of 4 rounds -> 0.5), null for no rounds."""
+    probes_dir = tmp_path / "ws" / "probes"
+    probes_dir.mkdir(parents=True)
+    (probes_dir / "validation.jsonl").write_text(
+        json.dumps({"ok": True}) + "\n" + json.dumps({"ok": False}) + "\n", encoding="utf-8"
+    )
+    rounds = [
+        {"probeOutputsRendered": 2, "probesSeconds": 1.0},
+        {"probeOutputsRendered": 0, "probesSeconds": 0.5},
+        {"probeOutputsRendered": 5, "probesSeconds": 2.0},
+        {"probeOutputsRendered": 0, "probesSeconds": 0.5},
+    ]
+    accounting = posthoc._probe_accounting(tmp_path, rounds)
+    assert accounting is not None
+    assert accounting["written"] == 2
+    assert accounting["validated"] == 1
+    assert accounting["roundsWithProbeOutput"] == pytest.approx(0.5)
+    assert accounting["probesSeconds"] == pytest.approx(4.0)
+    empty = posthoc._probe_accounting(tmp_path, [])
+    assert empty is not None
+    assert empty["roundsWithProbeOutput"] is None
+
+
+def test_judge_accounting_counts_calls_failures_and_tokens() -> None:
+    rounds = [
+        {
+            "judgeCause": "acceptance",
+            "judgeFailed": False,
+            "judgeTokens": {"inputTokens": 10, "outputTokens": 2, "cacheReadTokens": 1, "reasoningTokens": 0},
+        },
+        {"judgeCause": None, "judgeFailed": False, "judgeTokens": None},
+        {
+            "judgeCause": "rejected-streak",
+            "judgeFailed": True,
+            "judgeTokens": {"inputTokens": 5, "outputTokens": 1, "cacheReadTokens": 0, "reasoningTokens": 3},
+        },
+    ]
+    assert posthoc._judge_accounting(rounds) == {
+        "calls": 2,
+        "failed": 1,
+        "tokens": {"inputTokens": 15, "outputTokens": 3, "cacheReadTokens": 1, "reasoningTokens": 3},
+    }
+    assert posthoc._judge_accounting([]) == {
+        "calls": 0,
+        "failed": 0,
+        "tokens": {"inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0, "reasoningTokens": 0},
+    }
+
+
+def _card(*aspects: tuple[str, float]) -> list[dict[str, Any]]:
+    return [
+        {"label": f"row-{aspect}", "aspect": aspect, "delta": 1.0, "lcb": lcb, "ucb": lcb + 1.0}
+        for aspect, lcb in aspects
+    ]
+
+
+def test_evolution_accounting_post_switch_diversity() -> None:
+    """postSwitchDiversity is the fraction of switches whose first acceptance
+    closed a disjoint aspect family; null when no acceptance follows."""
+    cards = {
+        "m0": _card(("lag-structure", 10.0), ("periodicity", 8.0)),
+        "c1": _card(("lag-structure", 4.0), ("periodicity", 8.0)),
+        "c2": _card(("lag-structure", 4.0), ("periodicity", 8.0)),
+        "c3": _card(("lag-structure", 3.0), ("periodicity", 8.0)),
+        "c4": _card(("lag-structure", 3.0), ("periodicity", 8.0)),
+        "c5": _card(("lag-structure", 3.0), ("periodicity", 2.0)),
+    }
+    rounds = [
+        {"round": 1, "candidateId": "c1", "parent": "m0", "accepted": True},
+        {"round": 2, "candidateId": "c2", "parent": "c1", "accepted": False,
+         "inspirationParent": "x1"},
+        {"round": 3, "candidateId": "c3", "parent": "c2", "accepted": True},
+        {"round": 4, "candidateId": "c4", "parent": "c3", "accepted": False,
+         "inspirationParent": "x2"},
+        {"round": 5, "candidateId": "c5", "parent": "c4", "accepted": True},
+    ]
+    result = posthoc._evolution_accounting(rounds, lambda cid: cards.get(cid))
+    assert result["switchCount"] == 2
+    # switch 1: the first acceptance after it repeats lag-structure -> not disjoint;
+    # switch 2: the first acceptance after it closes periodicity -> disjoint
+    assert result["switches"][0]["disjoint"] is False
+    assert result["switches"][1]["disjoint"] is True
+    assert result["postSwitchDiversity"] == pytest.approx(0.5)
+
+    # a switch with no acceptance after it is unmeasured: excluded from the
+    # fraction, and with no measured switch at all the value is null
+    tail = {"round": 6, "candidateId": "c6", "parent": "c5", "accepted": False,
+            "inspirationParent": "x3"}
+    only_unmeasured = posthoc._evolution_accounting(
+        rounds + [tail], lambda cid: cards.get(cid)
+    )
+    assert only_unmeasured["switchCount"] == 3
+    assert only_unmeasured["switches"][2]["disjoint"] is None
+    assert only_unmeasured["postSwitchDiversity"] == pytest.approx(0.5)
+    no_switches = posthoc._evolution_accounting(
+        [row for row in rounds if not row.get("inspirationParent")],
+        lambda cid: cards.get(cid),
+    )
+    assert no_switches["postSwitchDiversity"] is None
+
+
+def test_m0_template_precedence_flag_over_recorded(synthetic_analysis: dict[str, Any]) -> None:
+    """An explicit --m0-template wins over the run's recorded template; without
+    the flag the recorded name decides what the replay loads for m0."""
+    cfg = loop.HeadroomConfig.from_json(synthetic_analysis["config"])
+    run_dir = synthetic_analysis["runs_dir"] / "fixed-s0"
+    # the runs were made with the linear template, so that is what they record
+    recorded = posthoc._read_json(
+        Path(posthoc._read_json(run_dir / "heldout.json")["path"]) / "incumbent-reference.json"
+    )["template"]
+    assert recorded == "m0.py"
+
+    replay = posthoc._Replay(run_dir, cfg, {}, None)  # no explicit flag
+    assert "Initial parent model (m0)" in replay.candidate_state("m0")["source"]
+
+    explicit = posthoc._Replay(
+        run_dir, cfg, {}, posthoc._REPO_ROOT / "experiments" / "templates" / "m0_deep.py"
+    )
+    assert "Initial incumbent (m0-patchtst)" in explicit.candidate_state("m0")["source"]
+
+
+def test_incomplete_runs_are_listed_not_averaged(synthetic_analysis: dict[str, Any]) -> None:
+    """A run with a rounds ledger but no done.json is interrupted: excluded
+    from the runs/endpoint table, and reported by name under "incomplete"."""
+    # the fixture's own runs all carry done.json on their heldout side
+    clean = posthoc.analyze_runs(
+        synthetic_analysis["runs_dir"], config=synthetic_analysis["config"], real_csvs={}
+    )
+    assert clean["incomplete"] == []
+    assert len(clean["runs"]) == 2
+
+    src = synthetic_analysis["runs_dir"] / "fixed-s0"
+    heldout_src = Path(posthoc._read_json(src / "heldout.json")["path"])
+    scratch = synthetic_analysis["runs_dir"].parent / "interrupted"
+    runs_dir = scratch / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    dst = runs_dir / "interrupted-s0"
+    shutil.copytree(src, dst)
+    heldout_dst = scratch / "heldout-interrupted"
+    shutil.copytree(heldout_src, heldout_dst)
+    (heldout_dst / "done.json").unlink()  # the interruption marker
+    (dst / "heldout.json").write_text(json.dumps({"path": str(heldout_dst)}), encoding="utf-8")
+
+    report = posthoc.analyze_runs(runs_dir, config=synthetic_analysis["config"], real_csvs={})
+    assert report["runs"] == []
+    assert report["incomplete"] == ["interrupted-s0"]
+    assert report["endpointTable"] == []

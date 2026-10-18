@@ -78,9 +78,10 @@ from harnessing_ts.headroom.timeidx import segment_origins, windows
 
 # m0's source is the repo template: the loop copies it into
 # ws/models/incumbent/model.py at prepare(), but every acceptance overwrites
-# that file, so only the template still holds m0 verbatim.  The v2 default is
-# the PatchTST-lite template; --m0-template overrides it for analyzing
-# runs made with the linear template.
+# that file, so only the template still holds m0 verbatim.  An explicit
+# --m0-template wins over the run's recorded template name; without the
+# flag the recorded name from heldout/incumbent-reference.json is used,
+# falling back to the PatchTST-lite template.
 _DEFAULT_M0_TEMPLATE = "m0_deep.py"
 # The only absolute roots a well-behaved agent may touch besides its own ws.
 _ALLOWED_ROOTS = (_REPO_ROOT / "experiments" / "templates", _REPO_ROOT / "backend")
@@ -179,7 +180,7 @@ class _Replay:
         run_dir: Path,
         base_cfg: HeadroomConfig,
         real_csvs: dict[str, Path],
-        m0_template: Path,
+        m0_template: Path | None,
     ) -> None:
         self.run_dir = run_dir
         self.ws = run_dir / "ws"
@@ -244,19 +245,23 @@ class _Replay:
             return self._states[cand_id]
         state: dict[str, Any] | None
         try:
-            source = (
+            source: Path | None = (
                 self.m0_template
                 if cand_id == "m0"
                 else self.ws / "models" / "candidates" / cand_id / "model.py"
             )
             if cand_id == "m0":
                 # A wrong template silently recomputes every gap baseline
-                # (ngap divides by gap(m0)).  The run's heldout side recorded
-                # the template NAME the loop copied, so the replay loads that
-                # exact file; --m0-template stays as an explicit override.
-                recorded = _read_json(self.heldout / "incumbent-reference.json").get("template")
-                if recorded:
-                    source = _REPO_ROOT / "experiments" / "templates" / recorded
+                # (ngap divides by gap(m0)).  An explicit --m0-template wins;
+                # otherwise the run's heldout side recorded the template NAME
+                # the loop copied, and that exact file is loaded (the deep
+                # template when nothing is recorded).
+                if self.m0_template is None:
+                    recorded = _read_json(self.heldout / "incumbent-reference.json").get("template")
+                    if recorded:
+                        source = _REPO_ROOT / "experiments" / "templates" / recorded
+                if source is None:
+                    source = _REPO_ROOT / "experiments" / "templates" / _DEFAULT_M0_TEMPLATE
             if not source.is_file():
                 raise _RunError(f"candidate source is missing: {source}")
             text = source.read_text(encoding="utf-8")
@@ -415,7 +420,7 @@ def _audit_paths(run_dir: Path) -> list[str]:
 
 
 def _analyze_run(
-    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path], m0_template: Path
+    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path], m0_template: Path | None
 ) -> dict[str, Any]:
     """One run's record; any failure becomes {"run", "error"} and nothing else."""
     record: dict[str, Any] = {"run": run_dir.name, "error": None}
@@ -427,7 +432,7 @@ def _analyze_run(
 
 
 def _analyze_run_inner(
-    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path], m0_template: Path
+    run_dir: Path, base_cfg: HeadroomConfig, real_csvs: dict[str, Path], m0_template: Path | None
 ) -> dict[str, Any]:
     replay = _Replay(run_dir, base_cfg, real_csvs, m0_template)
     cfg = replay.cfg
@@ -618,6 +623,7 @@ def _analyze_run_inner(
         "ngapAtStop": ngap_at_stop,
         "postStopGain": post_stop_gain,
         "evolution": _evolution_accounting(rounds, replay.card),
+        "judgeAccounting": _judge_accounting(rounds),
         "probes": _probe_accounting(run_dir, rounds),
         "audit": {
             "flagged": bool(violations),
@@ -669,11 +675,13 @@ def _diagnostic_attribution(
 def _evolution_accounting(
     rounds: list[dict[str, Any]], card_of: "Callable[[str], list[dict[str, Any]] | None]"
 ) -> dict[str, Any]:
-    """Spec v2 diagnostics: switchCount and postSwitchDiversity.
+    """Spec v2 diagnostics: switchCount, the per-switch record, and
+    postSwitchDiversity.
 
     The diversity switch recommends a parent with a residual signature
-    disjoint from the incumbent line's; the diagnostic checks whether the
-    first ACCEPTANCE after a switch actually closed a disjoint family.
+    disjoint from the incumbent line's; postSwitchDiversity is the fraction
+    of switches whose first ACCEPTANCE closed a disjoint family (null when
+    no switch has an acceptance after it).
     """
     by_id = {str(row.get("candidateId")): row for row in rounds if row.get("candidateId")}
     accepted = [row for row in rounds if row.get("accepted")]
@@ -704,10 +712,33 @@ def _evolution_accounting(
             entry["postSwitchSignature"] = list(sig_after)
             entry["disjoint"] = bool(sig_after) and set(sig_after).isdisjoint(reference)
         switches.append(entry)
+    measured = [entry["disjoint"] for entry in switches if entry["disjoint"] is not None]
     return {
         "switchCount": len(switches),
         "switches": switches,
+        "postSwitchDiversity": (
+            sum(1 for value in measured if value) / len(measured) if measured else None
+        ),
     }
+
+
+def _judge_accounting(rounds: list[dict[str, Any]]) -> dict[str, Any]:
+    """Spec v2 judgeAccounting: judge calls, failures, and token totals.
+
+    A round's judgeCause is set exactly when the judge session ran that
+    round; judgeFailed marks the rounds where no valid verdict survived
+    the retry; judgeTokens carries that call's token delta.
+    """
+    tokens = {"inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0, "reasoningTokens": 0}
+    calls = failed = 0
+    for row in rounds:
+        if row.get("judgeCause") is not None:
+            calls += 1
+        if row.get("judgeFailed"):
+            failed += 1
+        for key in tokens:
+            tokens[key] += int((row.get("judgeTokens") or {}).get(key, 0))
+    return {"calls": calls, "failed": failed, "tokens": tokens}
 
 
 def _probe_accounting(run_dir: Path, rounds: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -723,7 +754,7 @@ def _probe_accounting(run_dir: Path, rounds: list[dict[str, Any]]) -> dict[str, 
         "validated": sum(1 for row in validations if row.get("ok")),
         "kept": len(library),
         "roundsWithProbeOutput": (
-            sum(1 for row in rounds if int(row.get("probeOutputsRendered", 0) > 0) / len(rounds))
+            sum(1 for row in rounds if int(row.get("probeOutputsRendered", 0)) > 0) / len(rounds)
             if rounds
             else None
         ),
@@ -833,34 +864,66 @@ def _contrast(records: list[dict[str, Any]], arm_a: str, arm_b: str) -> dict[str
 # --- entry points ------------------------------------------------------------------------
 
 
-def _discover_runs(runs_dir: Path) -> list[Path]:
-    """Subdirectories carrying a rounds ledger (or the directory itself)."""
+def _run_done(run_dir: Path) -> bool:
+    """True when the run finished: done.json in the run dir, or in the heldout
+    dir whose path run_dir/heldout.json records (where loop.py writes it)."""
+    if (run_dir / "done.json").is_file():
+        return True
+    marker = run_dir / "heldout.json"
+    if not marker.is_file():
+        return False
+    try:
+        heldout = Path(_read_json(marker)["path"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return (heldout / "done.json").is_file()
+
+
+def _discover_runs(runs_dir: Path) -> tuple[list[Path], list[Path]]:
+    """(complete, incomplete) run directories carrying a rounds ledger.
+
+    A run is complete only when its done.json exists; a rounds ledger
+    without it is an interrupted run, reported by name and never averaged
+    into the endpoints.  The runs directory itself counts as one run when
+    it carries a rounds ledger directly.
+    """
     runs_dir = Path(runs_dir)
     if not runs_dir.is_dir():
         raise _RunError(f"runs directory does not exist: {runs_dir}")
     if (runs_dir / "rounds.jsonl").is_file():
-        return [runs_dir]
-    return sorted(path for path in runs_dir.iterdir() if path.is_dir() and (path / "rounds.jsonl").is_file())
+        candidates = [runs_dir]
+    else:
+        candidates = sorted(
+            path for path in runs_dir.iterdir() if path.is_dir() and (path / "rounds.jsonl").is_file()
+        )
+    complete = [path for path in candidates if _run_done(path)]
+    incomplete = [path for path in candidates if not _run_done(path)]
+    return complete, incomplete
 
 
 def analyze_runs(
     runs_dir: Path,
     config: Path | None = None,
     real_csvs: dict[str, Path] | None = None,
-    m0_template: str = _DEFAULT_M0_TEMPLATE,
+    m0_template: str | None = None,
 ) -> dict[str, Any]:
-    """Analyze every run under ``runs_dir``; returns a JSON-ready dict.
+    """Analyze every complete run under ``runs_dir``; returns a JSON-ready dict.
 
     Every run is independent: a broken run yields {"run", "error"} and the
-    table, contrasts and audit summaries simply skip it.
+    table, contrasts and audit summaries simply skip it.  Runs with a rounds
+    ledger but no done.json are interrupted: they are listed under
+    "incomplete" by name and never analyzed.  ``m0_template`` is the explicit
+    template override; without it each run's recorded template name is used.
     """
     base_cfg = HeadroomConfig.from_json(config) if config is not None else HeadroomConfig()
-    template_path = _REPO_ROOT / "experiments" / "templates" / m0_template
-    if not template_path.is_file():
-        raise _RunError(f"m0 template does not exist: {template_path}")
+    template_path: Path | None = None
+    if m0_template is not None:
+        template_path = _REPO_ROOT / "experiments" / "templates" / m0_template
+        if not template_path.is_file():
+            raise _RunError(f"m0 template does not exist: {template_path}")
+    complete, incomplete = _discover_runs(Path(runs_dir))
     records = [
-        _analyze_run(run_dir, base_cfg, real_csvs or {}, template_path)
-        for run_dir in _discover_runs(Path(runs_dir))
+        _analyze_run(run_dir, base_cfg, real_csvs or {}, template_path) for run_dir in complete
     ]
     flagged = [rec["run"] for rec in records if rec.get("audit", {}).get("flagged")]
     gain_flagged = [rec["run"] for rec in records if rec.get("audit", {}).get("gainRatioFlags")]
@@ -869,6 +932,7 @@ def analyze_runs(
             "runsDir": str(runs_dir),
             "config": str(config) if config is not None else None,
             "runs": records,
+            "incomplete": [path.name for path in incomplete],
             "endpointTable": _endpoint_table(records),
             "contrasts": [_contrast(records, arm_a, arm_b) for arm_a, arm_b in _CONTRASTS],
             "audit": {"pathViolationRuns": flagged, "gainRatioFlagRuns": gain_flagged},
@@ -885,8 +949,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--m0-template",
-        default=_DEFAULT_M0_TEMPLATE,
-        help=f"m0 template filename under experiments/templates (default: {_DEFAULT_M0_TEMPLATE})",
+        default=None,
+        help="m0 template filename under experiments/templates; overrides the "
+        "template name each run recorded (default: the recorded name, else "
+        f"{_DEFAULT_M0_TEMPLATE})",
     )
     parser.add_argument(
         "--real-csv",
@@ -902,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
         if not (sep and name and path):
             parser.error(f"--real-csv expects TASK=CSV, got {item!r}")
         real_csvs[name] = Path(path)
-    if not args.runs.is_dir() or not _discover_runs(args.runs):
+    if not args.runs.is_dir() or not any(_discover_runs(args.runs)):
         parser.error(f"no run directories under {args.runs}")
     report = analyze_runs(
         args.runs, config=args.config, real_csvs=real_csvs, m0_template=args.m0_template
