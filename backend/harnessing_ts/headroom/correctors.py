@@ -15,6 +15,7 @@ from harnessing_ts.headroom.residuals import SegmentData
 # to the first lag segment so the e history and value differences stay
 # comparable in depth.
 _CHANNEL_LAGS = 24
+_GREEDY_MAX_STEPS = 4
 
 # From this lag depth on neighbouring lags are nearly collinear in any series
 # slow enough to matter at that depth, so _lag_block samples them every second
@@ -456,7 +457,7 @@ def fit_greedy(
     baseline_mse = _val_mse(())
     selected: list[str] = []
     remaining = [coord.label for coord in pool]
-    while remaining and len(selected) < 4:
+    while remaining and len(selected) < _GREEDY_MAX_STEPS:
         best_label: str | None = None
         best_mse = baseline_mse
         for label in remaining:

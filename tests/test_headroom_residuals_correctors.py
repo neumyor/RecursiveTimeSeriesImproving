@@ -319,8 +319,8 @@ def test_build_features_rejects_unknown_kind() -> None:
 
 
 def test_band_filter_passes_target_period_at_production_scale() -> None:
-    """Regression for the missing firwin Nyquist factor: at the default
-    fir_len_cap the band(P=24) filter must actually pass period 24."""
+    """At the default fir_len_cap the band(P=24) filter must actually pass
+    period 24."""
     from scipy.signal import firwin, freqz
 
     period = 24

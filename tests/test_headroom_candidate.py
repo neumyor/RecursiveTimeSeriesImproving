@@ -450,7 +450,7 @@ def test_build_env_is_a_whitelist(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_incumbent_templates_pass_the_source_check() -> None:
-    """Regression: every candidate derives from an m0 template, whose
+    """Every candidate derives from an m0 template, whose
     `from __future__ import annotations` line the whitelist must allow.
     Both templates are covered: the linear one (still used by the fast test
     suite and the model-agnostic G0 gates) and the PatchTST-lite deep one
