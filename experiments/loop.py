@@ -420,7 +420,10 @@ class HeadroomLoop:
         assert self.seg_diag is not None
         diag_mse = float(np.mean(np.square(self.seg_diag.r)))
         history_rows = ["| round | candidateId | accepted | diagMse | status |", "|---|---|---|---|---|"]
-        for row in state.history[-10:]:
+        # The full history, not a tail: the prompt asks the agent to differ
+        # from EVERY earlier candidate, so every earlier candidate must be
+        # visible in the table.
+        for row in state.history:
             diag_mse_row = "n/a" if row["diagMse"] is None else f"{row['diagMse']:.4f}"
             history_rows.append(
                 f"| {row['round']} | {row['candidateId']} | {row['accepted']} | {diag_mse_row} | {row['status']} |"
@@ -1158,7 +1161,6 @@ class HeadroomLoop:
             )
         candidate_dir = max(fresh, key=lambda path: path.stat().st_mtime)
         candidate_id = candidate_dir.name
-        round_seen.add(candidate_id)
         source = candidate_dir / "model.py"
         proposal_path = candidate_dir / "proposal.json"
         if not source.is_file() or not proposal_path.is_file():
@@ -1187,6 +1189,10 @@ class HeadroomLoop:
         )
         if not smoke["ok"]:
             return candidate_id, None, None, f"model.py failed its smoke test: {smoke['error']}"
+        # Only a successfully collected candidate is spent for the round: a
+        # directory that produced a problem stays eligible, so the agent can
+        # fix it in place and the repair turn re-examines it.
+        round_seen.add(candidate_id)
         return candidate_id, source, proposal, None
 
     def _evaluate(

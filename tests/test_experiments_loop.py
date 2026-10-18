@@ -209,6 +209,51 @@ def test_loop_repair_round_recovers_within_the_round(tmp_path: Path) -> None:
     assert all(row["status"] == "evaluated" for row in rounds)
 
 
+def test_repair_recovers_the_same_candidate_directory(tmp_path: Path) -> None:
+    """A candidate directory whose first collection failed (missing
+    proposal.json) is fixed in place by the repair turn; the loop
+    re-examines that same directory instead of claiming no candidate was
+    written."""
+    loop_module = _load_loop()
+    script_pos = {"pos": 0}
+
+    def factory(ws: Path, system_prompt: str, round_index: int) -> Any:
+        class _Runner(ScriptedRunner):
+            async def send(self, prompt: str) -> list[Any]:
+                self.calls.append(prompt)
+                pos = script_pos["pos"]
+                script_pos["pos"] += 1
+                source, proposal = _better_candidate(ws, 0)
+                candidate_dir = ws / "models" / "candidates" / proposal["candidateId"]
+                candidate_dir.mkdir(parents=True, exist_ok=True)
+                (candidate_dir / "model.py").write_text(source, encoding="utf-8")
+                if pos > 0:  # the repair turn adds the missing proposal.json
+                    (candidate_dir / "proposal.json").write_text(
+                        json.dumps(proposal), encoding="utf-8"
+                    )
+                return []
+
+        return _Runner()
+
+    run_dir = tmp_path / "run-repair-same-dir"
+    loop = loop_module.HeadroomLoop(
+        run_dir=run_dir,
+        task_name="lgssm_xchannel",
+        arm="scalar",
+        seed=0,
+        cfg=_small_cfg(loop_module, budget=1),
+        m0_template="m0.py",
+        sizes=SMALL_SIZES,
+        runner_factory=factory,
+    )
+    asyncio.run(loop.run())
+    rounds = _rounds(run_dir)
+    assert len(rounds) == 1
+    assert rounds[0]["status"] == "evaluated"
+    assert rounds[0]["candidateId"] == "c-lowreg-0"
+    assert rounds[0]["attempts"] == 2  # one failed collection, one repair
+
+
 def test_loop_round_fails_after_exhausted_repairs(tmp_path: Path) -> None:
     loop_module = _load_loop()
     factory = _make_factory([None, None, None])
