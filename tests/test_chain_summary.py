@@ -88,7 +88,6 @@ def test_normalize_chain_summary_keeps_structured_next_decision() -> None:
     decision = summary["iterations"][0]["nextDecision"]
     assert decision["domainKnowledge"][0]["sourcePath"] == "knowledge_base/ecg.md"
     assert decision["actions"][0]["validation"] == "比较HYP AUC与LAE子集召回率"
-    assert "summary" not in summary["iterations"][0]
 
 
 def test_chain_summary_placeholder_reads_timeline_iterations(tmp_path) -> None:

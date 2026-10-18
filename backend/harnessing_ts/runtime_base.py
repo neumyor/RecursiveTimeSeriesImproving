@@ -60,9 +60,9 @@ def prepare_runtime_base(
         write_json(status_path, status)
         return status
 
-    _report(reporter, f"[1/4] Detected {machine['system']} {machine['machine']} ({machine['accelerator']}).")
-    _report(reporter, f"      {machine['acceleratorDetail']}")
-    _report(reporter, f"[2/4] Preparing Python {python_version} runtime base at {root}.")
+    report(reporter, f"[1/4] Detected {machine['system']} {machine['machine']} ({machine['accelerator']}).")
+    report(reporter, f"      {machine['acceleratorDetail']}")
+    report(reporter, f"[2/4] Preparing Python {python_version} runtime base at {root}.")
     _write_base_project(root, python_version)
 
     env = _base_uv_env(root)
@@ -80,8 +80,8 @@ def prepare_runtime_base(
         env["UV_TORCH_BACKEND"],
         *RUNTIME_BASE_DEPENDENCIES,
     ]
-    _report(reporter, "[3/4] Resolving and installing torch plus the full workspace dependency set with uv.")
-    _report(reporter, "      PyTorch backend selection: auto (GPU preferred when supported).")
+    report(reporter, "[3/4] Resolving and installing torch plus the full workspace dependency set with uv.")
+    report(reporter, "      PyTorch backend selection: auto (GPU preferred when supported).")
     try:
         result = _run_base_command(venv_command, root, env, 300)
         if result.returncode == 0:
@@ -104,7 +104,7 @@ def prepare_runtime_base(
         write_json(status_path, status)
         return status
 
-    _report(reporter, "[4/4] Verifying imports and detected compute backend.")
+    report(reporter, "[4/4] Verifying imports and detected compute backend.")
     verification = _verify_base(root)
     if verification.get("error"):
         status = _base_status(root, "failed", "runtime base verification failed", machine, python_version)
@@ -121,7 +121,7 @@ def prepare_runtime_base(
         "torchBackend": _resolved_torch_backend(verification["torch"], machine, env["UV_TORCH_BACKEND"]),
     })
     write_json(status_path, status)
-    _report(reporter, _ready_summary(status))
+    report(reporter, _ready_summary(status))
     return status
 
 
@@ -336,6 +336,7 @@ def _ready_summary(status: dict[str, Any]) -> str:
     )
 
 
-def _report(reporter: Callable[[str], None] | None, message: str) -> None:
+def report(reporter: Callable[[str], None] | None, message: str) -> None:
+    """Forward a progress message to the caller's optional reporter callback."""
     if reporter:
         reporter(message)

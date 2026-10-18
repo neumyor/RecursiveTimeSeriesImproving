@@ -7,7 +7,6 @@ from harnessing_ts.config.markdown import node_documents
 
 NodeType = str
 ControlMode = Literal["manual", "auto"]
-CONTROL_MODES: tuple[str, ...] = ("manual", "auto")
 
 
 @dataclass(frozen=True)

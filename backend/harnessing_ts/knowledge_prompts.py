@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from harnessing_ts.state.workspace_store import now_iso
+from harnessing_ts.state.workspace_store import bounded_int, now_iso
 
 
 BUILDER_SYSTEM_PROMPT_BASE = """你是 HarnessingTS 的 Agent 1：Literature Knowledge Builder。
@@ -25,7 +25,7 @@ BUILDER_SYSTEM_PROMPT_BASE = """你是 HarnessingTS 的 Agent 1：Literature Kno
 9. 最后调用 validate_knowledge_base；如果没有 error，再调用 finalize_knowledge_base。
    - 如果校验报告某个 class has no relation edge，必须回到错误中提示的 evidence 和 source_knowledge，重新阅读证据，抽取至少一条有证据支持的 relation，或将该 class 合并到已有相关 class；不要通过删除证据或伪造 relation 绕过校验。
 
-不要做 RDF/OWL 或数据库导入。第一版用 CSV 表模拟数据库即可。
+不要做 RDF/OWL 或数据库导入。知识库以 knowledge_base/tables/ 下的 CSV 表存储。
 不要回答在线问题；只负责构建和更新知识库。
 不要编造没有 evidence 支持的 knowledge/class/relation。证据不足时，在 notes 中写明 uncertainty，不要写成确定关系。
 
@@ -40,7 +40,7 @@ BUILDER_SYSTEM_PROMPT_BASE = """你是 HarnessingTS 的 Agent 1：Literature Kno
 
 
 def builder_system_prompt(extraction_depth: int) -> str:
-    depth = _bounded_int(extraction_depth, default=2, minimum=1, maximum=4)
+    depth = bounded_int(extraction_depth, default=2, minimum=1, maximum=4)
     return "\n\n".join([
         BUILDER_SYSTEM_PROMPT_BASE,
         graph_extraction_rules(depth),
@@ -135,11 +135,3 @@ def knowledge_graph_prompt(trigger: str, uploaded_paths: list[str] | None = None
         "",
         f"当前时间：{now_iso()}",
     ])
-
-
-def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))

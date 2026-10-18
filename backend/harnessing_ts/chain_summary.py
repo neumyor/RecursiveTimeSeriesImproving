@@ -12,14 +12,12 @@ from harnessing_ts.prompts.compose import (
     build_chain_summary_repair_system_prompt,
     build_chain_summary_system_prompt,
 )
-from harnessing_ts.schema import Part
 from harnessing_ts.settings.llm import LlmConfig, build_sdk_invocation_config
-from harnessing_ts.state.jsonl import read_json, read_jsonl, write_json
+from harnessing_ts.state.jsonl import read_json, read_jsonl
 from harnessing_ts.state.message_log import MessageLog
 from harnessing_ts.state.workspace_store import WorkspaceStore, now_iso
 
 
-CHAIN_READ_TOOLS = ["bash"]
 CHAIN_GENERATE_TOOLS = ["bash"]
 CHAIN_REPAIR_TOOLS = ["bash"]
 CHAIN_DRAFT_PATH = "artifacts/chain-summary.draft.json"
@@ -34,9 +32,6 @@ async def build_chain_summary(
     on_runner: Any | None = None,
 ) -> dict[str, Any]:
     sdk_config = build_sdk_invocation_config(llm_config)
-    if llm_config.authMode == "manual" and not llm_config.apiKey:
-        raise RuntimeError("Chain builder LLM config requires apiKey when authMode=manual.")
-
     draft_path = workspace_path / CHAIN_DRAFT_PATH
     draft_path.unlink(missing_ok=True)
 
@@ -172,20 +167,7 @@ def collect_workspace_manifest(workspace_path: Path) -> dict[str, Any]:
     }
 
 
-def parse_chain_summary(parts: list[Part]) -> dict[str, Any]:
-    text = ""
-    for part in reversed(parts):
-        if part.get("role") == "assistant" and isinstance(part.get("text"), str) and part["text"].strip():
-            text = part["text"]
-            break
-    if not text:
-        raise RuntimeError("Chain builder did not return a JSON summary.")
-    return _loads_json_object(text)
-
-
 def read_chain_summary(path: Path) -> dict[str, Any]:
-    from harnessing_ts.state.jsonl import read_json
-
     raw = read_json(path)
     return normalize_chain_summary(raw if isinstance(raw, dict) else {})
 
@@ -340,11 +322,10 @@ def _normalize_iteration(item: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_next_decision(item: dict[str, Any]) -> dict[str, Any]:
     raw = item.get("nextDecision") if isinstance(item.get("nextDecision"), dict) else {}
-    legacy = str(item.get("nextStep") or "")
     domain_knowledge = raw.get("domainKnowledge") if isinstance(raw.get("domainKnowledge"), list) else []
     actions = raw.get("actions") if isinstance(raw.get("actions"), list) else []
     return {
-        "decision": str(raw.get("decision") or legacy),
+        "decision": str(raw.get("decision") or ""),
         "iterationEvidence": str(raw.get("iterationEvidence") or ""),
         "domainKnowledge": [
             {key: str(entry.get(key) or "") for key in ("knowledge", "sourcePath", "guidance")}
@@ -354,7 +335,6 @@ def _normalize_next_decision(item: dict[str, Any]) -> dict[str, Any]:
             {key: str(entry.get(key) or "") for key in ("action", "expectedEffect", "validation")}
             for entry in actions if isinstance(entry, dict)
         ],
-        "legacy": bool(legacy and not raw),
     }
 
 
@@ -371,23 +351,6 @@ def _normalize_list_of_dicts(value: Any, keys: tuple[str, ...]) -> list[dict[str
             continue
         out.append({key: str(item.get(key) or "") for key in keys})
     return out
-
-
-def _loads_json_object(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        value = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, flags=re.S)
-        if not match:
-            raise
-        value = json.loads(match.group(0))
-    if not isinstance(value, dict):
-        raise RuntimeError("Chain builder output must be a JSON object.")
-    return value
 
 
 def _glob_relative(root: Path, pattern: str, limit: int) -> list[str]:

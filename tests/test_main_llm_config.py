@@ -62,9 +62,27 @@ def test_write_main_llm_config_sanitizes_invalid_values(tmp_path) -> None:
             "model": 12345,  # type: ignore[dict-item]
         }
     )
-    assert written["authMode"] == "manual"
+    assert written["authMode"] == "sdk-default"
     assert written["protocol"] is None
     assert written["model"] == ""
+
+
+def test_write_main_llm_config_round_trip_preserves_auth_mode(tmp_path) -> None:
+    store = _build_workspace(tmp_path)
+    assert store.read_main_llm_config()["authMode"] == "sdk-default"
+
+    store.write_main_llm_config({"model": "first-model"})
+    first = store.read_main_llm_config()
+
+    store.write_main_llm_config({"model": "second-model"})
+    second = store.read_main_llm_config()
+
+    assert first["authMode"] == "sdk-default"
+    assert second["authMode"] == "sdk-default"
+    assert {key: value for key, value in second.items() if key != "model"} == {
+        key: value for key, value in first.items() if key != "model"
+    }
+    assert second["model"] == "second-model"
 
 
 def test_post_llm_config_endpoint_round_trips(tmp_path, monkeypatch) -> None:

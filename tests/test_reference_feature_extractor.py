@@ -143,6 +143,20 @@ def test_validates_executes_and_inspects_reference_feature_extractor(tmp_path) -
     assert inspected["evaluationReport"]["controlCaseCount"] == 1
 
 
+def test_readiness_expires_when_extractor_source_changes_after_validation(tmp_path) -> None:
+    orchestrator = HarnessOrchestrator(tmp_path, dry_run=True)
+    orchestrator.initialize()
+    _write_extractor(tmp_path)
+    orchestrator.store.validate_and_store_reference_feature(run_tests=False)
+
+    assert orchestrator.store.is_reference_feature_extractor_ready() is True
+
+    source = tmp_path / "tools" / "reference-feature-extractor" / "extractor.py"
+    source.write_text(source.read_text(encoding="utf-8") + "\n# changed after validation\n", encoding="utf-8")
+
+    assert orchestrator.store.is_reference_feature_extractor_ready() is False
+
+
 def test_static_validation_does_not_import_or_execute_extractor_source(tmp_path) -> None:
     _write_extractor(tmp_path)
     source = tmp_path / "tools" / "reference-feature-extractor" / "extractor.py"

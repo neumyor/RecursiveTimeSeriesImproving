@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 import shutil
@@ -9,20 +10,42 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
-from harnessing_ts.agent.translate import collapse_tool_parts, filter_display_parts, project_dsh_tool_events
-from harnessing_ts.schema import CONTROL_MODES, NODE_TYPES, ControlRequest, NodeSession, NodeType, Part, RunRecord, RuntimeSettings, TimelineEvent, WorkspaceState
+from harnessing_ts.agent.translate import collapse_tool_parts, filter_display_parts
+from harnessing_ts.schema import ControlRequest, NodeSession, NodeType, Part, RunRecord, RuntimeSettings, TimelineEvent, WorkspaceState
+from harnessing_ts.settings.llm import mask_llm_config, sanitize_llm_config
 from harnessing_ts.state.jsonl import append_jsonl, clear_file, read_json, read_jsonl, write_json
-from harnessing_ts.state.workspace_layout import (
-    ensure_builtin_tools,
-    ensure_reference_text_derivatives,
-    ensure_workspace_layout,
-    write_reference_text_derivative,
-)
+from harnessing_ts.state.workspace_layout import ensure_workspace_layout, write_reference_text_derivative
 from harnessing_ts.workspace_runtime import ensure_workspace_uv_environment
 
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+# Workflow outputs removed by every reset; uploads, references and the
+# knowledge base survive reset_chat and the asset-preserving workflow reset.
+WORKFLOW_OUTPUT_PATHS = (
+    "user",
+    "data/processed",
+    "plots",
+    "runs",
+    "reports",
+    "training",
+    "logs/nodes",
+    "state/nodes",
+)
+
+
+def _read_llm_config_file(path: Path) -> dict[str, Any]:
+    return asdict(sanitize_llm_config(read_json(path) or {}))
 
 
 class WorkspaceStore:
@@ -59,69 +82,18 @@ class WorkspaceStore:
             })
         existing = self.read_state()
         if existing:
-            if existing.get("mode") not in CONTROL_MODES:
-                existing["mode"] = control_mode
-                self.write_state(existing)
             if existing.get("controlMode") != control_mode:
                 existing["controlMode"] = control_mode
-                existing["mode"] = control_mode
-                self.write_state(existing)
-            if "pendingControl" not in existing:
-                existing["pendingControl"] = None
-                self.write_state(existing)
-            if "activeNodeSessionId" not in existing:
-                existing["activeNodeSessionId"] = None
-                self.write_state(existing)
-            if "mainSdkSessionId" not in existing:
-                existing["mainSdkSessionId"] = None
-                self.write_state(existing)
-            if "contractConfirmed" not in existing:
-                existing["contractConfirmed"] = bool(existing.pop("taskContractConfirmed", False))
-                self.write_state(existing)
-            if "contractReady" not in existing:
-                completed = set(existing.get("completedNodes") or [])
-                existing["contractReady"] = "problem-contract" in completed
-                self.write_state(existing)
-            if "finalSummaryConfirmed" not in existing:
-                existing["finalSummaryConfirmed"] = bool(existing.pop("finalSolutionConfirmed", False))
                 self.write_state(existing)
             settings = self.read_runtime_settings()
             if existing.get("runtimeSettings") != settings:
                 existing["runtimeSettings"] = settings
                 self.write_state(existing)
-            if "pendingHumanGate" in existing:
-                existing.pop("pendingHumanGate", None)
-                self.write_state(existing)
-            valid_nodes = set(NODE_TYPES)
-            filtered_completed = [node for node in existing.get("completedNodes", []) if node in valid_nodes]
-            if filtered_completed != existing.get("completedNodes", []):
-                existing["completedNodes"] = filtered_completed
-                self.write_state(existing)
-            if existing.get("activeNode") and existing["activeNode"] not in valid_nodes:
-                existing["activeNode"] = None
-                existing["activeNodeSessionId"] = None
-                self.write_state(existing)
             return existing
         ts = now_iso()
-        state: WorkspaceState = {
-            "workspaceId": str(uuid4()),
-            "workspacePath": str(self.root),
-            "createdAt": ts,
-            "updatedAt": ts,
-            "mode": control_mode,
-            "controlMode": control_mode,
-            "pendingControl": None,
-            "activeNode": None,
-            "activeNodeSessionId": None,
-            "completedNodes": [],
-            "contractConfirmed": False,
-            "contractReady": False,
-            "finalSummaryConfirmed": False,
-            "runtimeSettings": self.read_runtime_settings(),
-            "mainSdkSessionId": None,
-        }
+        state = self._new_workspace_state(control_mode, self.read_runtime_settings(), ts)
         self.write_state(state)
-        self.append_timeline({"type": "workspace_initialized", "timestamp": ts, "payload": {"mode": state["mode"]}})
+        self.append_timeline({"type": "workspace_initialized", "timestamp": ts, "payload": {"controlMode": state["controlMode"]}})
         return state
 
     def set_pending_control(self, request: ControlRequest) -> ControlRequest:
@@ -219,13 +191,21 @@ class WorkspaceStore:
         return current
 
     def is_reference_feature_extractor_ready(self, *, allow_execution: bool = True) -> bool:
-        if self.read_reference_feature_status().get("status") != "completed":
+        """Read the verdict that validate_and_store_reference_feature persisted.
+
+        The verdict expires when extractor.py or manifest.json changed after
+        validation; a stale verdict means the extractor must be re-validated."""
+        status = self.read_reference_feature_status()
+        if status.get("status") != "completed":
             return False
-        try:
-            from harnessing_ts.reference_feature_extractor import validate_reference_feature_extractor
-            return bool(validate_reference_feature_extractor(self.root, allow_execution=allow_execution).get("ready"))
-        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-            return False
+        from harnessing_ts.reference_feature_extractor import MANIFEST_PATH, SOURCE_PATH
+
+        verdict_mtime = self.reference_feature_status_path.stat().st_mtime
+        for rel in (SOURCE_PATH, MANIFEST_PATH):
+            source = self.root / rel
+            if source.exists() and source.stat().st_mtime > verdict_mtime:
+                return False
+        return not allow_execution or status.get("executionAllowed") is True
 
     def validate_and_store_reference_feature(
         self,
@@ -285,73 +265,57 @@ class WorkspaceStore:
         return self.root / "config.llm.json"
 
     def read_main_llm_config(self) -> dict[str, Any]:
-        raw = read_json(self.main_llm_path) or {}
-        return _sanitize_llm_config(raw, default_auth_mode="manual")
+        return _read_llm_config_file(self.main_llm_path)
 
     def write_main_llm_config(self, values: dict[str, Any]) -> dict[str, Any]:
-        current = self.read_main_llm_config()
-        merged = dict(current)
-        for key in ("authMode", "protocol", "model", "apiKey", "baseUrl"):
-            if key not in values:
-                continue
-            value = values[key]
-            if key == "apiKey" and (value is None or value == "" or _looks_masked_secret(str(value))):
-                continue
-            merged[key] = value
-        sanitized = _sanitize_llm_config(merged, default_auth_mode="manual")
-        self.main_llm_path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(self.main_llm_path, sanitized)
-        self.append_timeline({
-            "type": "main_llm_updated",
-            "timestamp": now_iso(),
-            "message": f"model={sanitized.get('model') or 'sdk-default'}",
-            "payload": _mask_llm_config_dict(sanitized),
-        })
-        return sanitized
+        return self._write_llm_config(self.main_llm_path, values, timeline_type="main_llm_updated")
 
     def read_knowledge_graph_llm_config(self) -> dict[str, Any]:
-        raw = read_json(self.knowledge_graph_llm_path) or {}
-        return _sanitize_llm_config(raw, default_auth_mode="manual")
+        return _read_llm_config_file(self.knowledge_graph_llm_path)
 
     def write_knowledge_graph_llm_config(self, values: dict[str, Any]) -> dict[str, Any]:
-        current = self.read_knowledge_graph_llm_config()
-        merged = dict(current)
-        for key in ("authMode", "protocol", "model", "apiKey", "baseUrl"):
+        return self._write_llm_config(self.knowledge_graph_llm_path, values, timeline_type="knowledge_graph_llm_updated")
+
+    def _write_llm_config(self, path: Path, values: dict[str, Any], *, timeline_type: str) -> dict[str, Any]:
+        merged = dict(_read_llm_config_file(path))
+        for key in ("authMode", "protocol", "model", "apiKey", "baseUrl", "maxTokens"):
             if key not in values:
                 continue
             value = values[key]
             if key == "apiKey" and (value is None or value == "" or _looks_masked_secret(str(value))):
                 continue
             merged[key] = value
-        sanitized = _sanitize_llm_config(merged, default_auth_mode="manual")
-        write_json(self.knowledge_graph_llm_path, sanitized)
+        config = sanitize_llm_config(merged)
+        sanitized = asdict(config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, sanitized)
         self.append_timeline({
-            "type": "knowledge_graph_llm_updated",
+            "type": timeline_type,
             "timestamp": now_iso(),
             "message": f"model={sanitized.get('model') or 'sdk-default'}",
-            "payload": _mask_llm_config_dict(sanitized),
+            "payload": mask_llm_config(config),
         })
         return sanitized
 
     def read_reference_feature_parts(self) -> list[Part]:
-        """The reference feature extractor is now built by the main
-        session, so there is no separate builder log; return an empty
-        list for backward compatibility with the bootstrap payload."""
+        """The reference feature extractor is built by the main session and
+        logs into the main transcript; the bootstrap payload expects this
+        key, so it returns an empty list."""
         return []
 
     def read_runtime_settings(self) -> RuntimeSettings:
         raw = read_json(self.runtime_settings_path) or {}
         return {
-            "iterativeCandidateCount": _bounded_int(raw.get("iterativeCandidateCount"), default=3, minimum=1, maximum=8),
-            "knowledgeGraphExtractionDepth": _bounded_int(raw.get("knowledgeGraphExtractionDepth"), default=2, minimum=1, maximum=4),
+            "iterativeCandidateCount": bounded_int(raw.get("iterativeCandidateCount"), default=3, minimum=1, maximum=8),
+            "knowledgeGraphExtractionDepth": bounded_int(raw.get("knowledgeGraphExtractionDepth"), default=2, minimum=1, maximum=4),
         }
 
     def write_runtime_settings(self, settings: dict[str, Any]) -> RuntimeSettings:
         current = self.read_runtime_settings()
         if "iterativeCandidateCount" in settings:
-            current["iterativeCandidateCount"] = _bounded_int(settings.get("iterativeCandidateCount"), default=current["iterativeCandidateCount"], minimum=1, maximum=8)
+            current["iterativeCandidateCount"] = bounded_int(settings.get("iterativeCandidateCount"), default=current["iterativeCandidateCount"], minimum=1, maximum=8)
         if "knowledgeGraphExtractionDepth" in settings:
-            current["knowledgeGraphExtractionDepth"] = _bounded_int(settings.get("knowledgeGraphExtractionDepth"), default=current["knowledgeGraphExtractionDepth"], minimum=1, maximum=4)
+            current["knowledgeGraphExtractionDepth"] = bounded_int(settings.get("knowledgeGraphExtractionDepth"), default=current["knowledgeGraphExtractionDepth"], minimum=1, maximum=4)
         write_json(self.runtime_settings_path, current)
         state = self.read_state()
         if state:
@@ -381,7 +345,7 @@ class WorkspaceStore:
         return read_knowledge_base_cards(self.root, kind, limit)
 
     def read_knowledge_graph_parts(self, limit: int | None = 200) -> list[Part]:
-        parts = filter_display_parts(collapse_tool_parts(project_dsh_tool_events(read_jsonl(self.knowledge_graph_log_path))))
+        parts = filter_display_parts(collapse_tool_parts(read_jsonl(self.knowledge_graph_log_path)))
         return parts[-limit:] if limit is not None else parts
 
     def clear_knowledge_graph(self) -> None:
@@ -416,7 +380,7 @@ class WorkspaceStore:
         return summary
 
     def read_chain_summary_parts(self, limit: int | None = 200) -> list[Part]:
-        parts = filter_display_parts(collapse_tool_parts(project_dsh_tool_events(read_jsonl(self.chain_summary_log_path))))
+        parts = filter_display_parts(collapse_tool_parts(read_jsonl(self.chain_summary_log_path)))
         return parts[-limit:] if limit is not None else parts
 
     def write_state(self, state: WorkspaceState) -> None:
@@ -501,11 +465,11 @@ class WorkspaceStore:
         return events[-limit:] if limit is not None else events
 
     def read_main_parts(self, limit: int | None = 200) -> list[Part]:
-        parts = filter_display_parts(collapse_tool_parts(project_dsh_tool_events(read_jsonl(self.main_log_path))))
+        parts = filter_display_parts(collapse_tool_parts(read_jsonl(self.main_log_path)))
         return parts[-limit:] if limit is not None else parts
 
     def read_node_parts(self, node_session_id: str, limit: int | None = 200) -> list[Part]:
-        parts = filter_display_parts(collapse_tool_parts(project_dsh_tool_events(read_jsonl(self.node_log_path(node_session_id)))))
+        parts = filter_display_parts(collapse_tool_parts(read_jsonl(self.node_log_path(node_session_id))))
         return parts[-limit:] if limit is not None else parts
 
     def list_file_tree(self, max_depth: int = 5, max_children_per_dir: int = 100) -> dict[str, Any]:
@@ -593,7 +557,7 @@ class WorkspaceStore:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
         rel = str(target.relative_to(self.root))
-        derivative = self._write_reference_text_derivative(target)
+        derivative = write_reference_text_derivative(self.root, target)
         self.append_timeline({
             "type": "reference_uploaded",
             "timestamp": now_iso(),
@@ -687,15 +651,6 @@ class WorkspaceStore:
             "targetDir": "data/raw",
         }
 
-    def ensure_reference_text_derivatives(self) -> None:
-        ensure_reference_text_derivatives(self.root)
-
-    def _write_reference_text_derivative(self, path: Path) -> str | None:
-        return write_reference_text_derivative(self.root, path)
-
-    def ensure_builtin_tools(self) -> None:
-        ensure_builtin_tools(self.root)
-
     def clear_debug_logs(self, scope: str = "main") -> None:
         clear_file(self.main_log_path)
         if scope == "chat":
@@ -710,16 +665,7 @@ class WorkspaceStore:
         control_mode = "auto" if existing.get("controlMode") == "auto" else "manual"
         runtime_settings = self.read_runtime_settings()
 
-        for rel in (
-            "user",
-            "data/processed",
-            "plots",
-            "runs",
-            "reports",
-            "training",
-            "logs/nodes",
-            "state/nodes",
-        ):
+        for rel in WORKFLOW_OUTPUT_PATHS:
             _remove_path(self.root / rel)
 
         tools_root = self.root / "tools"
@@ -805,10 +751,7 @@ class WorkspaceStore:
             if event.get("type") in retained_timeline_types
         ]
 
-        for rel in (
-            "user", "data/processed", "plots", "runs", "reports", "training",
-            "logs/nodes", "state/nodes", ".dsh-sessions",
-        ):
+        for rel in (*WORKFLOW_OUTPUT_PATHS, ".dsh-sessions"):
             _remove_path(self.root / rel)
 
         tools_root = self.root / "tools"
@@ -864,19 +807,13 @@ class WorkspaceStore:
         runtime_settings = self.read_runtime_settings()
 
         for rel in (
-            "user",
             "data/raw",
-            "data/processed",
             "references",
             "knowledge_base",
             "artifacts",
-            "plots",
             "tools",
-            "runs",
-            "reports",
             "logs",
-            "training",
-            "state/nodes",
+            *WORKFLOW_OUTPUT_PATHS,
         ):
             _remove_path(self.root / rel)
 
@@ -917,15 +854,12 @@ class WorkspaceStore:
             "workspacePath": str(self.root),
             "createdAt": ts,
             "updatedAt": ts,
-            "mode": control_mode,
             "controlMode": control_mode,
             "pendingControl": None,
             "activeNode": None,
             "activeNodeSessionId": None,
             "completedNodes": [],
-            "contractConfirmed": False,
             "contractReady": False,
-            "finalSummaryConfirmed": False,
             "runtimeSettings": runtime_settings,
             "mainSdkSessionId": None,
         }
@@ -983,34 +917,6 @@ def _safe_filename(filename: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in {".", "-", "_", " "} else "_" for ch in name)
     safe = safe.strip(" .")
     return safe or f"reference-{uuid4().hex[:8]}"
-
-
-def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
-def _sanitize_llm_config(raw: dict[str, Any], *, default_auth_mode: str) -> dict[str, Any]:
-    auth = raw.get("authMode") if raw.get("authMode") in {"manual", "sdk-default"} else default_auth_mode
-    protocol = raw.get("protocol") if raw.get("protocol") in {"deepseek", "openai-compat"} else None
-    return {
-        "authMode": auth,
-        "model": raw.get("model") if isinstance(raw.get("model"), str) else "",
-        "apiKey": raw.get("apiKey") if isinstance(raw.get("apiKey"), str) else None,
-        "baseUrl": raw.get("baseUrl") if isinstance(raw.get("baseUrl"), str) else None,
-        "protocol": protocol,
-    }
-
-
-def _mask_llm_config_dict(config: dict[str, Any]) -> dict[str, Any]:
-    out = dict(config)
-    secret = out.get("apiKey")
-    if isinstance(secret, str) and secret:
-        out["apiKey"] = "****" if len(secret) <= 8 else f"****{secret[-4:]}"
-    return out
 
 
 def _looks_masked_secret(value: str) -> bool:

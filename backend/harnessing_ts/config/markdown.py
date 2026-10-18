@@ -10,10 +10,6 @@ CONFIG_DIR = Path(__file__).resolve().parent
 NODES_DIR = CONFIG_DIR / "nodes"
 
 
-def read_config_text(name: str) -> str:
-    return (CONFIG_DIR / name).read_text(encoding="utf-8")
-
-
 def read_prompt_text(relative_path: str) -> str:
     return (CONFIG_DIR / "prompts" / relative_path).read_text(encoding="utf-8").strip()
 

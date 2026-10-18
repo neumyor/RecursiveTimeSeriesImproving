@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import re
 import shutil
@@ -17,7 +16,7 @@ from harnessing_ts.reference_feature_extractor import inspect_reference_feature_
 from harnessing_ts.schema import Part
 from harnessing_ts.settings.llm import LlmConfig, build_sdk_invocation_config
 from harnessing_ts.state.message_log import MessageLog
-from harnessing_ts.state.workspace_store import WorkspaceStore, now_iso
+from harnessing_ts.state.workspace_store import WorkspaceStore, bounded_int, now_iso
 
 
 KG_TOOL_NAMES = [
@@ -36,7 +35,7 @@ KG_TOOL_NAMES = [
     "finalize_knowledge_base",
 ]
 KG_ALLOWED_TOOLS = ["bash", *[f"mcp__ts_harness__{name}" for name in KG_TOOL_NAMES]]
-REFERENCE_FIELDS = ["reference_id", "path", "sha256", "title", "brief", "status", "updated_at"]
+REFERENCE_FIELDS = ["reference_id", "path", "size", "mtime", "title", "brief", "status", "updated_at"]
 EVIDENCE_FIELDS = ["evidence_id", "reference_file", "page", "section", "quoted_fragments", "notes"]
 KNOWLEDGE_FIELDS = ["knowledge_id", "topic", "description", "summary", "evidence_ids", "class_ids", "relation_ids", "status", "notes"]
 CLASS_FIELDS = ["class_id", "label", "normalized_label", "concept_level", "concept_type", "description", "source_knowledge_ids", "evidence_ids", "aliases"]
@@ -73,8 +72,6 @@ async def build_knowledge_graph(
     _ensure_domain_brief(store.root)
     extraction_depth = _graph_extraction_depth(store.root)
     sdk_config = build_sdk_invocation_config(llm_config)
-    if llm_config.authMode == "manual" and not llm_config.apiKey:
-        raise RuntimeError("Knowledge builder LLM config requires apiKey when authMode=manual.")
     runner = SdkRunner(SdkRunnerConfig(
         cwd=workspace_path,
         system_prompt=builder_system_prompt(extraction_depth),
@@ -102,6 +99,34 @@ async def build_knowledge_graph(
     return parts
 
 
+async def _run_reasoning_query(
+    *,
+    workspace_path: Path,
+    store: WorkspaceStore,
+    llm_config: LlmConfig,
+    role: str,
+    system_prompt: str,
+    allowed_tools: list[str],
+    prompt: str,
+) -> list[Part]:
+    sdk_config = build_sdk_invocation_config(llm_config)
+    runner = SdkRunner(SdkRunnerConfig(
+        cwd=workspace_path,
+        system_prompt=system_prompt,
+        attachment_text=None,
+        allowed_tools=allowed_tools,
+        model=sdk_config.model,
+        provider=sdk_config.provider,
+        max_tokens=sdk_config.max_tokens,
+        env=sdk_config.env,
+        log=MessageLog(store.knowledge_reasoning_log_path),
+    ))
+    try:
+        return await runner.send_with_user_echo(prompt)
+    finally:
+        await runner.close()
+
+
 async def answer_knowledge_query(
     *,
     workspace_path: Path,
@@ -115,9 +140,6 @@ async def answer_knowledge_query(
 ) -> dict[str, Any]:
     ensure_knowledge_base_layout(store.root)
     retrieval = retrieve_knowledge_context(store.root, question, top_k=6)
-    sdk_config = build_sdk_invocation_config(llm_config)
-    if llm_config.authMode == "manual" and not llm_config.apiKey:
-        raise RuntimeError("Knowledge reasoning LLM config requires apiKey when authMode=manual.")
     prompt = "\n".join([
         "请根据以下检索上下文回答问题。",
         "",
@@ -139,21 +161,15 @@ async def answer_knowledge_query(
         "默认输出简洁、面向主会话可直接使用的答案。只有 Include evidence details 为 true 时，才输出 supporting_evidence、related_graph_edges 或 retrieval 细节；否则这些字段应省略或为空数组。",
         "只输出合法 JSON，不要输出 Markdown fence。",
     ])
-    runner = SdkRunner(SdkRunnerConfig(
-        cwd=workspace_path,
+    parts = await _run_reasoning_query(
+        workspace_path=workspace_path,
+        store=store,
+        llm_config=llm_config,
+        role="Knowledge reasoning",
         system_prompt=REASONER_SYSTEM_PROMPT,
-        attachment_text=None,
         allowed_tools=[],
-        model=sdk_config.model,
-        provider=sdk_config.provider,
-        max_tokens=sdk_config.max_tokens,
-        env=sdk_config.env,
-        log=MessageLog(store.knowledge_reasoning_log_path),
-    ))
-    try:
-        parts = await runner.send_with_user_echo(prompt)
-    finally:
-        await runner.close()
+        prompt=prompt,
+    )
     answer_text = _last_assistant_text(parts)
     parsed = _parse_json_answer(answer_text)
     if include_evidence:
@@ -174,9 +190,6 @@ async def answer_reference_query(
     observations: list[str] | None = None,
     include_evidence: bool = False,
 ) -> dict[str, Any]:
-    sdk_config = build_sdk_invocation_config(llm_config)
-    if llm_config.authMode == "manual" and not llm_config.apiKey:
-        raise RuntimeError("Reference reasoning LLM config requires apiKey when authMode=manual.")
     prompt = "\n".join([
         "请直接根据当前 workspace 的 `references/**` 原文回答问题，不要使用 knowledge graph、knowledge_base CSV、class、relation 或 graph edges。",
         "可读取 `user/problem-contract.md`、`user/data-spec.md` 和 references 下的文本/PDF/DOCX 文本衍生文件来确定任务边界。",
@@ -202,21 +215,15 @@ async def answer_reference_query(
         "只有 Include evidence details 为 true 时，supporting_evidence 才应包含必要的短引用、文件路径、页码或章节；否则保持空数组或省略。",
         "只输出合法 JSON，不要输出 Markdown fence。",
     ])
-    runner = SdkRunner(SdkRunnerConfig(
-        cwd=workspace_path,
+    parts = await _run_reasoning_query(
+        workspace_path=workspace_path,
+        store=store,
+        llm_config=llm_config,
+        role="Reference reasoning",
         system_prompt=REFERENCE_REASONER_SYSTEM_PROMPT,
-        attachment_text=None,
         allowed_tools=["bash"],
-        model=sdk_config.model,
-        provider=sdk_config.provider,
-        max_tokens=sdk_config.max_tokens,
-        env=sdk_config.env,
-        log=MessageLog(store.knowledge_reasoning_log_path),
-    ))
-    try:
-        parts = await runner.send_with_user_echo(prompt)
-    finally:
-        await runner.close()
+        prompt=prompt,
+    )
     parsed = _parse_json_answer(_last_assistant_text(parts))
     if include_evidence:
         parsed.setdefault("retrieval", {"source": "references"})
@@ -237,9 +244,6 @@ async def answer_extractor_source_query(
     observations: list[str] | None = None,
     include_evidence: bool = False,
 ) -> dict[str, Any]:
-    sdk_config = build_sdk_invocation_config(llm_config)
-    if llm_config.authMode == "manual" and not llm_config.apiKey:
-        raise RuntimeError("Extractor-source reasoning LLM config requires apiKey when authMode=manual.")
     source = inspect_reference_feature_source(workspace_path)
     source_payload = {
         "manifest": source.get("manifest"),
@@ -279,21 +283,15 @@ async def answer_extractor_source_query(
         "只有 Include evidence details 为 true 时，supporting_evidence 才应包含必要的短引用、字段路径或文件路径；否则保持空数组或省略。",
         "只输出合法 JSON，不要输出 Markdown fence。",
     ])
-    runner = SdkRunner(SdkRunnerConfig(
-        cwd=workspace_path,
+    parts = await _run_reasoning_query(
+        workspace_path=workspace_path,
+        store=store,
+        llm_config=llm_config,
+        role="Extractor-source reasoning",
         system_prompt=REFERENCE_REASONER_SYSTEM_PROMPT,
-        attachment_text=None,
         allowed_tools=[],
-        model=sdk_config.model,
-        provider=sdk_config.provider,
-        max_tokens=sdk_config.max_tokens,
-        env=sdk_config.env,
-        log=MessageLog(store.knowledge_reasoning_log_path),
-    ))
-    try:
-        parts = await runner.send_with_user_echo(prompt)
-    finally:
-        await runner.close()
+        prompt=prompt,
+    )
     parsed = _parse_json_answer(_last_assistant_text(parts))
     if include_evidence:
         parsed.setdefault("retrieval", {"source": "extractor_source"})
@@ -378,13 +376,16 @@ def scan_references(root: Path, include_processed: bool = False) -> dict[str, An
             continue
         rel_path = str(path.relative_to(root))
         seen_paths.add(rel_path)
-        digest = _sha256_file(path)
+        stat = path.stat()
+        size = str(stat.st_size)
+        mtime = str(stat.st_mtime_ns)
         row = by_path.get(rel_path)
         if row is None:
             row = {
                 "reference_id": _next_id(references, "reference_id", "REF"),
                 "path": rel_path,
-                "sha256": digest,
+                "size": size,
+                "mtime": mtime,
                 "title": "",
                 "brief": "",
                 "status": "new",
@@ -394,8 +395,9 @@ def scan_references(root: Path, include_processed: bool = False) -> dict[str, An
             by_path[rel_path] = row
             new_or_changed.append(_reference_result(row))
             continue
-        if row.get("sha256") != digest:
-            row["sha256"] = digest
+        if row.get("size") != size or row.get("mtime") != mtime:
+            row["size"] = size
+            row["mtime"] = mtime
             row["status"] = "changed"
             row["updated_at"] = now_iso()
             new_or_changed.append(_reference_result(row))
@@ -565,7 +567,7 @@ def upsert_class(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_label(label)
     if not normalized:
         raise RuntimeError("upsert_class requires label.")
-    concept_level = _bounded_int(args.get("concept_level"), default=1, minimum=1, maximum=4)
+    concept_level = bounded_int(args.get("concept_level"), default=1, minimum=1, maximum=4)
     if concept_level > max_depth:
         raise RuntimeError(f"concept_level {concept_level} exceeds configured extraction depth {max_depth}.")
     concept_type = _normalize_concept_type(str(args.get("concept_type", "") or "entity"))
@@ -590,7 +592,7 @@ def upsert_class(root: Path, args: dict[str, Any]) -> dict[str, Any]:
         classes.append(row)
         created = True
     row["label"] = row.get("label") or label
-    row["concept_level"] = str(min(_bounded_int(row.get("concept_level"), default=concept_level, minimum=1, maximum=4), concept_level))
+    row["concept_level"] = str(min(bounded_int(row.get("concept_level"), default=concept_level, minimum=1, maximum=4), concept_level))
     row["concept_type"] = row.get("concept_type") or concept_type
     row["description"] = _merge_text(row.get("description", ""), str(args.get("description_addition", "") or ""))
     row["source_knowledge_ids"] = _json_list(_merged_ids(_split_ids(row.get("source_knowledge_ids", "")), knowledge_ids))
@@ -627,7 +629,7 @@ def upsert_relation(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     source = str(args.get("source_class_id", "") or "").strip()
     target = str(args.get("target_class_id", "") or "").strip()
     relation_type = _normalize_relation_type(str(args.get("relation_type", "") or "related_to"))
-    relation_depth = _bounded_int(args.get("relation_depth"), default=max(_class_level(classes, source), _class_level(classes, target)), minimum=1, maximum=4)
+    relation_depth = bounded_int(args.get("relation_depth"), default=max(_class_level(classes, source), _class_level(classes, target)), minimum=1, maximum=4)
     if relation_depth > max_depth:
         raise RuntimeError(f"relation_depth {relation_depth} exceeds configured extraction depth {max_depth}.")
     if source not in class_ids or target not in class_ids:
@@ -654,22 +656,13 @@ def upsert_relation(root: Path, args: dict[str, Any]) -> dict[str, Any]:
         }
         relations.append(row)
         created = True
-    row["relation_depth"] = str(min(_bounded_int(row.get("relation_depth"), default=relation_depth, minimum=1, maximum=4), relation_depth))
+    row["relation_depth"] = str(min(bounded_int(row.get("relation_depth"), default=relation_depth, minimum=1, maximum=4), relation_depth))
     row["description"] = _merge_text(row.get("description", ""), str(args.get("description_addition", "") or ""))
     row["source_knowledge_ids"] = _json_list(_merged_ids(_split_ids(row.get("source_knowledge_ids", "")), knowledge_ids))
     row["evidence_ids"] = _json_list(_merged_ids(_split_ids(row.get("evidence_ids", "")), evidence_ids))
     _write_csv_rows(root / "knowledge_base" / "tables" / "relations.csv", RELATION_FIELDS, relations)
     _update_knowledge_links(root, knowledge_ids, relation_ids=[row["relation_id"]])
     return {"relation_id": row["relation_id"], "created": created}
-
-
-def validate_knowledge_base(root: Path) -> dict[str, Any]:
-    report = validate_knowledge_base_report(root)
-    if report["errors"]:
-        if any("has extra columns" in error for error in report["errors"]):
-            raise RuntimeError("Knowledge CSV formatting failed: " + "; ".join(report["errors"][:12]))
-        raise RuntimeError("Knowledge base validation failed: " + "; ".join(report["errors"][:12]))
-    return report
 
 
 def validate_knowledge_base_report(root: Path) -> dict[str, Any]:
@@ -701,14 +694,14 @@ def validate_knowledge_base_report(root: Path) -> dict[str, Any]:
         })
         if not _split_ids(inherited):
             warnings.append(f"{row.get('class_id', 'class')} has no evidence.")
-        level = _bounded_int(row.get("concept_level"), default=1, minimum=1, maximum=4)
+        level = bounded_int(row.get("concept_level"), default=1, minimum=1, maximum=4)
         if level > _graph_extraction_depth(root):
             errors.append(f"{row.get('class_id', 'class')}.concept_level exceeds configured extraction depth: {level}")
         concept_type = row.get("concept_type", "") or "entity"
         if concept_type not in CONCEPT_TYPES:
             errors.append(f"{row.get('class_id', 'class')}.concept_type unsupported: {concept_type}")
     for row in relations:
-        depth = _bounded_int(row.get("relation_depth"), default=1, minimum=1, maximum=4)
+        depth = bounded_int(row.get("relation_depth"), default=1, minimum=1, maximum=4)
         if depth > _graph_extraction_depth(root):
             errors.append(f"{row.get('relation_id', 'relation')}.relation_depth exceeds configured extraction depth: {depth}")
     _collect_depth_coverage_warnings(root, knowledge, classes, warnings)
@@ -1074,14 +1067,6 @@ def _next_id(rows: list[dict[str, str]], field: str, prefix: str) -> str:
     return f"{prefix}-{max_id + 1:05d}"
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _resolve_reference(root: Path, reference_id: str, source_path: str) -> dict[str, str]:
     references = read_reference_rows(root)
     if reference_id:
@@ -1167,7 +1152,8 @@ def _reference_result(row: dict[str, str]) -> dict[str, Any]:
     return {
         "reference_id": row.get("reference_id", ""),
         "path": row.get("path", ""),
-        "sha256": row.get("sha256", ""),
+        "size": row.get("size", ""),
+        "mtime": row.get("mtime", ""),
         "title": row.get("title", ""),
         "brief": row.get("brief", ""),
         "status": row.get("status", ""),
@@ -1290,20 +1276,12 @@ def _normalize_concept_type(value: str) -> str:
 
 def _class_level(classes: list[dict[str, str]], class_id: str) -> int:
     row = next((item for item in classes if item.get("class_id") == class_id), None)
-    return _bounded_int(row.get("concept_level") if row else "", default=1, minimum=1, maximum=4)
+    return bounded_int(row.get("concept_level") if row else "", default=1, minimum=1, maximum=4)
 
 
 def _graph_extraction_depth(root: Path) -> int:
     raw = _read_json(root / "state" / "runtime-settings.json") or {}
-    return _bounded_int(raw.get("knowledgeGraphExtractionDepth"), default=2, minimum=1, maximum=4)
-
-
-def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(minimum, min(maximum, parsed))
+    return bounded_int(raw.get("knowledgeGraphExtractionDepth"), default=2, minimum=1, maximum=4)
 
 
 DEPTH_COVERAGE_TERMS = [
@@ -1544,59 +1522,6 @@ def _evidence_result(row: dict[str, str], score: int) -> dict[str, Any]:
         "page": row.get("page", ""),
         "section": row.get("section", ""),
     }
-
-
-def _validate_csv_references(
-    evidence: list[dict[str, str]],
-    knowledge: list[dict[str, str]],
-    classes: list[dict[str, str]],
-    relations: list[dict[str, str]],
-) -> None:
-    evidence_ids = {row.get("evidence_id", "") for row in evidence}
-    knowledge_ids = {row.get("knowledge_id", "") for row in knowledge}
-    class_ids = {row.get("class_id", "") for row in classes}
-    relation_ids = {row.get("relation_id", "") for row in relations}
-    problems: list[str] = []
-    for row in knowledge:
-        problems += _missing_refs(row.get("knowledge_id", "knowledge"), "evidence_ids", row.get("evidence_ids", ""), evidence_ids)
-        problems += _missing_refs(row.get("knowledge_id", "knowledge"), "class_ids", row.get("class_ids", ""), class_ids)
-        problems += _missing_refs(row.get("knowledge_id", "knowledge"), "relation_ids", row.get("relation_ids", ""), relation_ids)
-    for row in classes:
-        problems += _missing_refs(row.get("class_id", "class"), "source_knowledge_ids", row.get("source_knowledge_ids", ""), knowledge_ids)
-        problems += _missing_refs(row.get("class_id", "class"), "evidence_ids", row.get("evidence_ids", ""), evidence_ids)
-    for row in relations:
-        rel_id = row.get("relation_id", "relation")
-        if row.get("source_class_id") not in class_ids:
-            problems.append(f"{rel_id}.source_class_id missing: {row.get('source_class_id')}")
-        if row.get("target_class_id") not in class_ids:
-            problems.append(f"{rel_id}.target_class_id missing: {row.get('target_class_id')}")
-        problems += _missing_refs(rel_id, "source_knowledge_ids", row.get("source_knowledge_ids", ""), knowledge_ids)
-        problems += _missing_refs(rel_id, "evidence_ids", row.get("evidence_ids", ""), evidence_ids)
-    if problems:
-        raise RuntimeError("Knowledge CSV reference validation failed: " + "; ".join(problems[:12]))
-
-
-def _validate_csv_shape(tables: dict[str, list[dict[str, str]]]) -> None:
-    problems: list[str] = []
-    for table_name, rows in tables.items():
-        for index, row in enumerate(rows, start=2):
-            extras = row.get("__extra_columns__", "")
-            if not extras:
-                continue
-            row_id = (
-                row.get("evidence_id")
-                or row.get("knowledge_id")
-                or row.get("class_id")
-                or row.get("relation_id")
-                or f"line {index}"
-            )
-            problems.append(f"{table_name}:{row_id} has extra columns {extras}")
-    if problems:
-        raise RuntimeError(
-            "Knowledge CSV formatting failed: "
-            + "; ".join(problems[:8])
-            + ". List fields must be JSON arrays inside one CSV cell, for example [\"E-00001\",\"E-00003\"]."
-        )
 
 
 def _collect_csv_shape_errors(tables: dict[str, list[dict[str, str]]], errors: list[str]) -> None:
@@ -1849,8 +1774,3 @@ def _split_ids(value: str) -> list[str]:
     if stripped.startswith("["):
         return _parse_json_list(stripped)
     return [item.strip() for item in re.split(r"[,;|]+", stripped) if item.strip()]
-
-
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug or "concept"

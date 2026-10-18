@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from harnessing_ts.agent.translate import dsh_event_to_parts, user_text_part
+from harnessing_ts.paths import REQUIRED_DSH_RUNTIME_FILES
 from harnessing_ts.schema import Part
 from harnessing_ts.state.message_log import MessageLog
 
@@ -408,12 +409,7 @@ def _cordis_config_path() -> Path:
 
 def _dsh_runtime_root() -> Path:
     root = Path(__file__).resolve().parents[2] / "dsh_runtime"
-    required = (
-        root / "node_modules" / "@deepseek-ai" / "dsh-mcp-client" / "lib" / "index.js",
-        root / "node_modules" / "@deepseek-ai" / "dsh-sdk-jsonrpc-demo" / "lib" / "bin.js",
-        root / "tool-allowlist.mjs",
-        root / "session-jsonrpc.mjs",
-    )
+    required = [root / rel for rel in REQUIRED_DSH_RUNTIME_FILES]
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(
@@ -427,7 +423,7 @@ def _dsh_runtime_root() -> Path:
 def _dsh_runtime_bin() -> Path:
     root = _dsh_runtime_root()
     entry = root / "node_modules" / "@deepseek-ai" / "dsh-sdk-jsonrpc-demo" / "lib" / "bin.js"
-    if not entry.is_file():  # guarded by _dsh_runtime_root; retained for type narrowing
+    if not entry.is_file():  # guarded by _dsh_runtime_root; this check only narrows the type
         raise RuntimeError("DeepSeek Harness JSON-RPC runtime entrypoint is missing.")
     return entry
 
@@ -447,14 +443,6 @@ def _owned_process_group(proc: subprocess.Popen[Any]) -> int | None:
     return group if group == proc.pid else None
 
 
-def _dsh_events_to_parts(events: list[Any]) -> list[Part]:
-    return [
-        part
-        for event in events
-        for part in dsh_event_to_parts(event)
-    ]
-
-
 def _dsh_session_event(notification: Any, session_id: str | None) -> dict[str, Any] | None:
     """Extract a root-session DSH event from a streaming notification."""
     if session_id is None or getattr(notification, "method", None) != "session.event":
@@ -472,8 +460,8 @@ def _dsh_event_key(event: dict[str, Any]) -> str:
     if isinstance(sequence, (str, int)):
         return f"seq:{sequence}"
     # Runtime events normally carry seq.  For the small number that do not,
-    # object identity remains stable because the SDK returns the same object
-    # instance it previously supplied through its notification callback.
+    # object identity is a stable key because the SDK hands the notification
+    # callback and the final result list the same event object.
     return f"object:{id(event)}"
 
 

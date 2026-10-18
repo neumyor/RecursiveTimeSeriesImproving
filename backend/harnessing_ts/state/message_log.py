@@ -24,16 +24,6 @@ class MessageLog:
         append_jsonl(self.path, part)
         return part
 
-    @staticmethod
-    def rollback_last_user_turn(path: Path) -> bool:
-        parts = read_jsonl(path)
-        for index in range(len(parts) - 1, -1, -1):
-            part = parts[index]
-            if part.get("role") == "user" and part.get("type") == "text":
-                write_jsonl(path, parts[:index])
-                return True
-        return False
-
     def _merge_tool_result(self, tool_result: Part) -> Part | None:
         parts = collapse_tool_parts(read_jsonl(self.path))
         for index in range(len(parts) - 1, -1, -1):

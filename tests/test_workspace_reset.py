@@ -29,24 +29,21 @@ def test_reset_workspace_clears_references_graph_and_run_outputs(tmp_path):
         "workspacePath": str(tmp_path),
         "createdAt": "2026-01-01T00:00:00Z",
         "updatedAt": "2026-01-01T00:00:00Z",
-        "mode": "manual",
         "controlMode": "manual",
         "pendingControl": {"kind": "review"},
         "activeNode": "iterative-solving",
         "activeNodeSessionId": "node-1",
         "completedNodes": ["problem-contract"],
-        "contractConfirmed": True,
-        "finalSummaryConfirmed": True,
         "runtimeSettings": {"iterativeCandidateCount": 5},
     })
 
     (tmp_path / "references" / "paper.pdf").write_text("reference", encoding="utf-8")
-    legacy_evidence = tmp_path / "knowledge_base" / "evidence_notes" / "E-00001.md"
-    legacy_graph = tmp_path / "knowledge_base" / "ontology_graph" / "graph_edges.csv"
-    legacy_evidence.parent.mkdir(parents=True, exist_ok=True)
-    legacy_graph.parent.mkdir(parents=True, exist_ok=True)
-    legacy_evidence.write_text("evidence", encoding="utf-8")
-    legacy_graph.write_text("source,target,relation\n", encoding="utf-8")
+    evidence_note = tmp_path / "knowledge_base" / "evidence_notes" / "E-00001.md"
+    graph_edges = tmp_path / "knowledge_base" / "ontology_graph" / "graph_edges.csv"
+    evidence_note.parent.mkdir(parents=True, exist_ok=True)
+    graph_edges.parent.mkdir(parents=True, exist_ok=True)
+    evidence_note.write_text("evidence", encoding="utf-8")
+    graph_edges.write_text("source,target,relation\n", encoding="utf-8")
     (tmp_path / "knowledge_base" / "tables" / "knowledge.csv").write_text("knowledge_id,topic,description,evidence_ids,class_ids,relation_ids,notes\n", encoding="utf-8")
     (tmp_path / "artifacts" / "knowledge-graph.json").write_text("{}", encoding="utf-8")
     (tmp_path / "logs" / "main.jsonl").write_text("{}\n", encoding="utf-8")
@@ -58,8 +55,6 @@ def test_reset_workspace_clears_references_graph_and_run_outputs(tmp_path):
     assert state["workspaceId"] != "old-workspace"
     assert state["activeNode"] is None
     assert state["completedNodes"] == []
-    assert state["contractConfirmed"] is False
-    assert state["finalSummaryConfirmed"] is False
     assert state["runtimeSettings"]["iterativeCandidateCount"] == 5
 
     assert not (tmp_path / "references" / "paper.pdf").exists()
@@ -88,14 +83,11 @@ def test_reset_chat_preserves_raw_references_and_knowledge_graph(tmp_path):
         "workspacePath": str(tmp_path),
         "createdAt": "2026-01-01T00:00:00Z",
         "updatedAt": "2026-01-01T00:00:00Z",
-        "mode": "auto",
         "controlMode": "auto",
         "pendingControl": {"kind": "enter_node"},
         "activeNode": "iterative-solving",
         "activeNodeSessionId": "node-1",
         "completedNodes": ["problem-contract"],
-        "contractConfirmed": True,
-        "finalSummaryConfirmed": False,
         "runtimeSettings": {"iterativeCandidateCount": 4},
     })
 
@@ -125,7 +117,6 @@ def test_reset_chat_preserves_raw_references_and_knowledge_graph(tmp_path):
     assert state["controlMode"] == "auto"
     assert state["activeNode"] is None
     assert state["completedNodes"] == []
-    assert state["contractConfirmed"] is False
     assert state["runtimeSettings"]["iterativeCandidateCount"] == 4
 
     assert (tmp_path / "data" / "raw" / "dataset.csv").exists()

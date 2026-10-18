@@ -20,7 +20,7 @@ from harnessing_ts.knowledge_graph import (
     search_knowledge_notes,
     upsert_class,
     upsert_relation,
-    validate_knowledge_base,
+    validate_knowledge_base_report,
 )
 from harnessing_ts.knowledge_prompts import builder_system_prompt
 
@@ -38,7 +38,7 @@ def test_csv_knowledge_base_validates_and_builds_graph_view(tmp_path):
     kb.mkdir()
     (kb / "domain-brief.md").write_text("# Domain Brief\n", encoding="utf-8")
     tables = kb / "tables"
-    write_csv(tables / "references.csv", ["reference_id", "path", "sha256", "title", "brief", "status", "updated_at"], [])
+    write_csv(tables / "references.csv", ["reference_id", "path", "size", "mtime", "title", "brief", "status", "updated_at"], [])
     write_csv(tables / "evidence.csv", ["evidence_id", "reference_file", "page", "section", "quoted_fragments", "notes"], [{
         "evidence_id": "E-00001",
         "reference_file": "paper.pdf",
@@ -90,7 +90,7 @@ def test_csv_knowledge_base_validates_and_builds_graph_view(tmp_path):
         "evidence_ids": '["E-00001"]',
     }])
 
-    manifest = validate_knowledge_base(tmp_path)
+    manifest = validate_knowledge_base_report(tmp_path)
     graph = read_graph_view(tmp_path)
     results = search_knowledge_notes(tmp_path, "QRS conduction", top_k=3)
 
@@ -273,10 +273,9 @@ def test_validation_rejects_class_without_relation_edge_and_points_to_evidence(t
         "source_knowledge_ids": [knowledge["knowledge_id"]],
     })
 
-    with pytest.raises(RuntimeError) as exc_info:
-        validate_knowledge_base(tmp_path)
+    report = validate_knowledge_base_report(tmp_path)
 
-    message = str(exc_info.value)
+    message = "; ".join(report["errors"])
     assert "C-00001 has no relation edge" in message
     assert evidence["evidence_id"] in message
     assert knowledge["knowledge_id"] in message
@@ -304,10 +303,11 @@ def test_evidence_cards_resolve_reference_ids_to_pdf_preview(tmp_path):
     tables = kb / "tables"
     (tmp_path / "references").mkdir()
     (tmp_path / "references" / "paper.pdf").write_bytes(b"%PDF-1.4\n")
-    write_csv(tables / "references.csv", ["reference_id", "path", "sha256", "title", "brief", "status", "updated_at"], [{
+    write_csv(tables / "references.csv", ["reference_id", "path", "size", "mtime", "title", "brief", "status", "updated_at"], [{
         "reference_id": "REF-00001",
         "path": "references/paper.pdf",
-        "sha256": "abc",
+        "size": "3",
+        "mtime": "0",
         "title": "",
         "brief": "",
         "status": "processed",
@@ -398,7 +398,7 @@ def test_csv_knowledge_base_rejects_unescaped_list_columns(tmp_path):
     kb.mkdir()
     (kb / "domain-brief.md").write_text("# Domain Brief\n", encoding="utf-8")
     tables = kb / "tables"
-    write_csv(tables / "references.csv", ["reference_id", "path", "sha256", "title", "brief", "status", "updated_at"], [])
+    write_csv(tables / "references.csv", ["reference_id", "path", "size", "mtime", "title", "brief", "status", "updated_at"], [])
     write_csv(tables / "evidence.csv", ["evidence_id", "reference_file", "page", "section", "quoted_fragments", "notes"], [{
         "evidence_id": "E-00001",
         "reference_file": "references/paper.pdf",
@@ -431,5 +431,6 @@ def test_csv_knowledge_base_rejects_unescaped_list_columns(tmp_path):
         "evidence_ids": '["E-00001"]',
     }])
 
-    with pytest.raises(RuntimeError, match="Knowledge CSV formatting failed"):
-        validate_knowledge_base(tmp_path)
+    report = validate_knowledge_base_report(tmp_path)
+
+    assert any("has extra columns" in error for error in report["errors"])
