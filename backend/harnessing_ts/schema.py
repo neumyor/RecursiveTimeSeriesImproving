@@ -43,15 +43,12 @@ class WorkspaceState(TypedDict):
     workspacePath: str
     createdAt: str
     updatedAt: str
-    mode: ControlMode
     controlMode: ControlMode
     pendingControl: "ControlRequest | None"
     activeNode: NodeType | None
     activeNodeSessionId: str | None
     completedNodes: list[NodeType]
-    contractConfirmed: bool
     contractReady: bool
-    finalSummaryConfirmed: bool
     runtimeSettings: "RuntimeSettings"
     variantId: str
     variantName: str

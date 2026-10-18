@@ -20,18 +20,9 @@ FQA_NO_EXEC_CASE = "NOD-FQA-KTL-CXR-SUB-ADA"
 DIRECT = "DIR"
 
 
-def test_variant_registry_exposes_feature_code_profiles_and_legacy_aliases(monkeypatch) -> None:
+def test_variant_registry_exposes_feature_code_profiles(monkeypatch) -> None:
     monkeypatch.delenv("TS_HARNESS_VARIANT", raising=False)
     assert resolve_variant().id == FULL
-    assert [get_variant(f"v{index}").id for index in range(7)] == [
-        FULL,
-        RQA_FULL,
-        RQA_NO_CASE,
-        RQA_NO_TOOLS,
-        RQA_NO_CASE_NO_TOOLS,
-        DIRECT,
-        FQA_NO_EXEC_CASE,
-    ]
     assert get_variant("RQA-NOD-KTL-SUB-ADA").id == RQA_NO_CASE
     assert canonical_variant_id("ADA-SUB-KTL-RQA-NOD") == RQA_NO_CASE
     assert get_variant("rqa-nod-ktl-sub-ada").id == RQA_NO_CASE
@@ -50,53 +41,53 @@ def test_variant_registry_exposes_feature_code_profiles_and_legacy_aliases(monke
 
 
 def test_rebuilt_variant_capabilities_match_ablation_table() -> None:
-    v0 = get_variant(FULL)
-    v1 = get_variant(RQA_FULL)
-    v2 = get_variant(RQA_NO_CASE)
-    v3 = get_variant(RQA_NO_TOOLS)
-    v4 = get_variant(RQA_NO_CASE_NO_TOOLS)
-    v5 = get_variant(DIRECT)
-    v6 = get_variant(FQA_NO_EXEC_CASE)
+    full = get_variant(FULL)
+    rqa_full = get_variant(RQA_FULL)
+    rqa_no_case = get_variant(RQA_NO_CASE)
+    rqa_no_tools = get_variant(RQA_NO_TOOLS)
+    rqa_no_case_no_tools = get_variant(RQA_NO_CASE_NO_TOOLS)
+    direct = get_variant(DIRECT)
+    fqa_no_exec_case = get_variant(FQA_NO_EXEC_CASE)
 
-    assert v0.knowledge_graph is True
-    assert v0.knowledge_query_source == "graph"
-    assert v0.knowledge_to_tools is True
-    assert v0.case_review is True
+    assert full.knowledge_graph is True
+    assert full.knowledge_query_source == "graph"
+    assert full.knowledge_to_tools is True
+    assert full.case_review is True
 
-    assert v1.knowledge_graph is False
-    assert v1.knowledge_query is True
-    assert v1.knowledge_query_source == "references"
-    assert v1.knowledge_to_tools is True
-    assert v1.case_review is True
+    assert rqa_full.knowledge_graph is False
+    assert rqa_full.knowledge_query is True
+    assert rqa_full.knowledge_query_source == "references"
+    assert rqa_full.knowledge_to_tools is True
+    assert rqa_full.case_review is True
 
-    assert v2.knowledge_query_source == "references"
-    assert v2.knowledge_to_tools is True
-    assert v2.case_review is False
+    assert rqa_no_case.knowledge_query_source == "references"
+    assert rqa_no_case.knowledge_to_tools is True
+    assert rqa_no_case.case_review is False
 
-    assert v3.knowledge_query_source == "references"
-    assert v3.knowledge_to_tools is False
-    assert v3.reference_feature_execution is False
-    assert v3.case_review is True
+    assert rqa_no_tools.knowledge_query_source == "references"
+    assert rqa_no_tools.knowledge_to_tools is False
+    assert rqa_no_tools.reference_feature_execution is False
+    assert rqa_no_tools.case_review is True
 
-    assert v4.knowledge_query_source == "references"
-    assert v4.knowledge_to_tools is False
-    assert v4.reference_feature_execution is False
-    assert v4.case_review is False
+    assert rqa_no_case_no_tools.knowledge_query_source == "references"
+    assert rqa_no_case_no_tools.knowledge_to_tools is False
+    assert rqa_no_case_no_tools.reference_feature_execution is False
+    assert rqa_no_case_no_tools.case_review is False
 
-    assert v5.node_chain is False
-    assert v5.knowledge_query is False
-    assert v5.reference_feature_execution is False
-    assert v5.direct_main_tool_use is True
+    assert direct.node_chain is False
+    assert direct.knowledge_query is False
+    assert direct.reference_feature_execution is False
+    assert direct.direct_main_tool_use is True
 
-    assert v6.knowledge_graph is False
-    assert v6.knowledge_query is True
-    assert v6.knowledge_query_source == "extractor_source"
-    assert v6.knowledge_to_tools is True
-    assert v6.reference_feature_source is True
-    assert v6.reference_feature_extractor is False
-    assert v6.reference_feature_execution is False
-    assert v6.case_review is True
-    assert v6.case_review_reference_features is False
+    assert fqa_no_exec_case.knowledge_graph is False
+    assert fqa_no_exec_case.knowledge_query is True
+    assert fqa_no_exec_case.knowledge_query_source == "extractor_source"
+    assert fqa_no_exec_case.knowledge_to_tools is True
+    assert fqa_no_exec_case.reference_feature_source is True
+    assert fqa_no_exec_case.reference_feature_extractor is False
+    assert fqa_no_exec_case.reference_feature_execution is False
+    assert fqa_no_exec_case.case_review is True
+    assert fqa_no_exec_case.case_review_reference_features is False
 
 
 def test_variant_capabilities_change_actual_tool_permissions() -> None:
@@ -123,20 +114,20 @@ def test_variant_capabilities_change_actual_tool_permissions() -> None:
 
 def test_variant_prompt_overlays_are_composed_without_changing_full_profile() -> None:
     context = PromptContext("/tmp/workspace")
-    v0_main = build_main_system_prompt(context, get_variant(FULL))
-    v1_node = build_node_system_prompt("iterative-solving", context, get_variant(RQA_FULL))
-    v2_node = build_node_system_prompt("iterative-solving", context, get_variant(RQA_NO_CASE))
-    v3_node = build_node_system_prompt("iterative-solving", context, get_variant(RQA_NO_TOOLS))
-    v5_main = build_main_system_prompt(context, get_variant(DIRECT))
-    v6_node = build_node_system_prompt("iterative-solving", context, get_variant(FQA_NO_EXEC_CASE))
+    full_main = build_main_system_prompt(context, get_variant(FULL))
+    rqa_full_node = build_node_system_prompt("iterative-solving", context, get_variant(RQA_FULL))
+    rqa_no_case_node = build_node_system_prompt("iterative-solving", context, get_variant(RQA_NO_CASE))
+    rqa_no_tools_node = build_node_system_prompt("iterative-solving", context, get_variant(RQA_NO_TOOLS))
+    direct_main = build_main_system_prompt(context, get_variant(DIRECT))
+    fqa_no_exec_case_node = build_node_system_prompt("iterative-solving", context, get_variant(FQA_NO_EXEC_CASE))
 
-    assert "## Node Chain" in v0_main
-    assert "direct reference QA" in v1_node
-    assert "No Knowledge Graph + No Case Review" in v2_node
-    assert "No Knowledge Graph + No Knowledge Tools" in v3_node
-    assert "## Node Chain" not in v5_main
-    assert "Single-Agent Tool Use" in v5_main
-    assert "Extractor Source QA + No Extractor Execution" in v6_node
+    assert "## Node Chain" in full_main
+    assert "direct reference QA" in rqa_full_node
+    assert "No Knowledge Graph + No Case Review" in rqa_no_case_node
+    assert "No Knowledge Graph + No Knowledge Tools" in rqa_no_tools_node
+    assert "## Node Chain" not in direct_main
+    assert "Single-Agent Tool Use" in direct_main
+    assert "Extractor Source QA + No Extractor Execution" in fqa_no_exec_case_node
 
 
 def test_no_case_review_variants_remove_only_case_review_finish_artifact(tmp_path) -> None:
@@ -224,9 +215,6 @@ def test_knowledge_tools_variants_skip_knowledge_to_tools_node_and_disable_valid
     with pytest.raises(RuntimeError, match="disables the knowledge-to-tools node"):
         asyncio.run(orchestrator.enter_node({"nodeType": "knowledge-to-tools", "rationale": "should be blocked"}))
 
-    with pytest.raises(RuntimeError, match=f"disabled by ablation variant {RQA_NO_TOOLS}"):
-        asyncio.run(orchestrator.request_validate_reference_feature_extractor({}))
-
     state = NodeStateMachine(tmp_path, get_variant(RQA_NO_TOOLS))
     node: dict = {
         "id": "pc-1",
@@ -291,8 +279,6 @@ def test_fqa_variant_rejects_executable_reference_feature_tools(tmp_path, monkey
 
     with pytest.raises(RuntimeError, match=f"disabled by ablation variant {FQA_NO_EXEC_CASE}"):
         orchestrator.request_extract_reference_features({"input": {"case": "x"}})
-    with pytest.raises(RuntimeError, match=f"disabled by ablation variant {FQA_NO_EXEC_CASE}"):
-        orchestrator.request_inspect_reference_feature_extractor({})
     assert orchestrator.get_reference_feature_tool() == {}
 
 

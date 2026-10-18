@@ -23,15 +23,6 @@ FEATURE_DESCRIPTIONS: dict[str, str] = {
 FEATURE_ORDER = ("NOD", "KGR", "RQA", "FQA", "KTL", "CRV", "CXR", "SUB", "ADA")
 DIRECT_FEATURE = "DIR"
 DEFAULT_VARIANT_ID = "NOD-KGR-KTL-CRV-SUB-ADA"
-LEGACY_ALIASES: dict[str, str] = {
-    "V0": DEFAULT_VARIANT_ID,
-    "V1": "NOD-RQA-KTL-CRV-SUB-ADA",
-    "V2": "NOD-RQA-KTL-SUB-ADA",
-    "V3": "NOD-RQA-CRV-SUB-ADA",
-    "V4": "NOD-RQA-SUB-ADA",
-    "V5": DIRECT_FEATURE,
-    "V6": "NOD-FQA-KTL-CXR-SUB-ADA",
-}
 
 
 @dataclass(frozen=True)
@@ -44,13 +35,11 @@ class AblationVariant:
     knowledge_graph: bool = True
     knowledge_query: bool = True
     knowledge_query_source: str = "graph"
-    reference_knowledge: bool = True
     knowledge_to_tools: bool = True
     reference_feature_execution: bool = True
     independent_subagents: bool = True
     case_review: bool = True
     case_review_reference_features: bool = True
-    max_iterations: int | None = None
     main_prompt: str | None = None
     node_prompts: dict[str, str] = field(default_factory=dict)
     node_purposes: dict[str, str] = field(default_factory=dict)
@@ -91,7 +80,6 @@ class AblationVariant:
                 "knowledgeGraph": self.knowledge_graph,
                 "knowledgeQuery": self.knowledge_query,
                 "knowledgeQuerySource": self.knowledge_query_source,
-                "referenceKnowledge": self.reference_knowledge,
                 "knowledgeToTools": self.knowledge_to_tools,
                 "referenceFeatureExtractor": self.reference_feature_extractor,
                 "referenceFeatureSource": self.reference_feature_source,
@@ -99,14 +87,13 @@ class AblationVariant:
                 "independentSubagents": self.independent_subagents,
                 "caseReview": self.case_review,
                 "caseReviewReferenceFeatures": self.case_review_reference_features,
-                "maxIterations": self.max_iterations,
                 "directMainToolUse": self.direct_main_tool_use,
             },
         }
 
     def node_requires(self, node_type: str, paths: tuple[str, ...]) -> list[str]:
         values = list(paths)
-        if not self.reference_knowledge and node_type == "problem-contract":
+        if not self.node_chain and node_type == "problem-contract":
             values = [value for value in values if "references/" not in value]
         if not self.knowledge_graph:
             values = [
@@ -160,8 +147,6 @@ def _parse_features(value: str) -> frozenset[str]:
         raise RuntimeError(
             f"Invalid TS_HARNESS_VARIANT={value!r}; expected a feature-code profile such as {DEFAULT_VARIANT_ID}."
         )
-    if raw in LEGACY_ALIASES:
-        raw = LEGACY_ALIASES[raw]
     parts = [part.strip() for part in raw.split("-") if part.strip()]
     features = set(parts)
     unknown = sorted(features - set(FEATURE_DESCRIPTIONS))
@@ -195,11 +180,6 @@ def _validate_feature_combination(value: str, features: set[str]) -> None:
         raise RuntimeError(f"Invalid TS_HARNESS_VARIANT={value!r}; CRV and CXR are mutually exclusive.")
     if "CXR" in features and "KTL" not in features:
         raise RuntimeError(f"Invalid TS_HARNESS_VARIANT={value!r}; CXR requires KTL so there is an extractor to prohibit executing.")
-    node_only = {"KTL", "CRV", "CXR", "SUB", "ADA"}
-    if node_only & features and "NOD" not in features:
-        raise RuntimeError(
-            f"Invalid TS_HARNESS_VARIANT={value!r}; {', '.join(sorted(node_only & features))} require NOD."
-        )
 
 
 def _variant(
@@ -219,7 +199,6 @@ def _variant(
         knowledge_graph="KGR" in features,
         knowledge_query=("KGR" in features or "RQA" in features or "FQA" in features),
         knowledge_query_source="graph" if "KGR" in features else ("references" if "RQA" in features else ("extractor_source" if "FQA" in features else "none")),
-        reference_knowledge=("NOD" in features and "DIR" not in features),
         knowledge_to_tools="KTL" in features,
         reference_feature_execution=("KTL" in features and "FQA" not in features),
         independent_subagents="SUB" in features,
@@ -273,7 +252,6 @@ VARIANTS: dict[str, AblationVariant] = {
             "iterative-solving": "no-knowledge-tools-iterative.md",
         },
         node_purposes={
-            "knowledge-to-tools": "本变体跳过 knowledge-to-tools 节点；不构建 reference feature extractor。",
             "iterative-solving": "保留直接 reference QA、候选、subagent、case review 和迭代机制，但不使用 reference feature extractor。",
         },
     ),
@@ -287,7 +265,6 @@ VARIANTS: dict[str, AblationVariant] = {
             "final-summary": "no-case-review-final.md",
         },
         node_purposes={
-            "knowledge-to-tools": "本变体跳过 knowledge-to-tools 节点；不构建 reference feature extractor。",
             "iterative-solving": "在去除 knowledge tools 的基础上同时去除 case review，只依据聚合验证指标、执行状态、成本和直接 reference QA 选择方案。",
         },
     ),
@@ -346,14 +323,12 @@ def variant_catalog_payload() -> dict[str, Any]:
         "default": DEFAULT_VARIANT_ID,
         "featureCodes": FEATURE_DESCRIPTIONS,
         "canonicalOrder": list(FEATURE_ORDER),
-        "legacyAliases": dict(LEGACY_ALIASES),
         "registeredProfiles": [
             {
                 "id": variant.id,
                 "name": variant.name,
                 "description": variant.description,
                 "features": sorted(variant.features, key=_feature_sort_key),
-                "legacyAliases": [alias for alias, target in LEGACY_ALIASES.items() if target == variant.id],
             }
             for variant in VARIANTS.values()
         ],
@@ -362,11 +337,10 @@ def variant_catalog_payload() -> dict[str, Any]:
 
 def variant_help_text() -> str:
     profiles = "\n".join(
-        f"  - {item['id']} ({', '.join(item['legacyAliases']) or 'no legacy alias'}): {item['name']}"
+        f"  - {item['id']}: {item['name']}"
         for item in variant_catalog_payload()["registeredProfiles"]
     )
     feature_codes = "\n".join(f"  - {code}: {description}" for code, description in FEATURE_DESCRIPTIONS.items())
-    aliases = ", ".join(f"{alias}->{target}" for alias, target in LEGACY_ALIASES.items())
     return "\n".join([
         "TS_HARNESS_VARIANT selects one startup-only ablation profile.",
         f"Default: {DEFAULT_VARIANT_ID}",
@@ -376,9 +350,6 @@ def variant_help_text() -> str:
         "",
         "Registered canonical profiles:",
         profiles,
-        "",
-        "Legacy aliases are accepted for compatibility only:",
-        f"  {aliases}",
         "",
         "Examples:",
         f"  TS_HARNESS_VARIANT={DEFAULT_VARIANT_ID} uv run ts-harness-server",

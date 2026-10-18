@@ -13,7 +13,6 @@ from harnessing_ts.runtime_base import prepare_runtime_base
 from harnessing_ts.schema import NODE_TYPES
 from harnessing_ts.server_setup import setup_server
 from harnessing_ts.settings.llm import build_sdk_invocation_config, mask_llm_config, mask_sdk_invocation_config, read_effective_llm_config
-from harnessing_ts.training.lightning import write_training_template
 from harnessing_ts.variants import variant_catalog_payload, variant_help_text
 
 
@@ -54,9 +53,6 @@ async def _main() -> None:
     finish.add_argument("--next-node", choices=[*NODE_TYPES, "none"])
     finish.add_argument("--loop-decision", choices=["continue", "exit", "none"])
     finish.add_argument("--output-path", nargs="*", default=None)
-
-    training = sub.add_parser("training-template")
-    training.add_argument("--output", default="examples/training/agent_lightning_template.py")
 
     args = parser.parse_args()
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else default_workspace_path()
@@ -125,9 +121,6 @@ async def _main() -> None:
             "outputPaths": list(args.output_path) if args.output_path else None,
         }))
         return
-    if command == "training-template":
-        path = write_training_template(workspace, Path(args.output))
-        print_json({"path": str(path)})
         return
     raise SystemExit(f"Unknown command: {command}")
 

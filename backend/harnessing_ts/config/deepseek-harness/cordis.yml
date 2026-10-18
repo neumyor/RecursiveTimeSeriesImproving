@@ -125,11 +125,6 @@
       TS_HARNESS_WORKSPACE: !!js process.env.TS_HARNESS_WORKSPACE
       TS_HARNESS_DSH_SESSION_ROLE: !!js process.env.TS_HARNESS_DSH_SESSION_ROLE
       TS_HARNESS_DSH_NODE_SESSION_ID: !!js process.env.TS_HARNESS_DSH_NODE_SESSION_ID ?? ''
-      TS_HARNESS_DSH_ALLOWED_TOOLS: !!js process.env.TS_HARNESS_DSH_ALLOWED_TOOLS ?? ''
-      TS_HARNESS_VARIANT: !!js process.env.TS_HARNESS_VARIANT ?? ''
-      TS_HARNESS_CONTROL_MODE: !!js process.env.TS_HARNESS_CONTROL_MODE ?? 'auto'
-      TS_HARNESS_DRY_RUN: !!js process.env.TS_HARNESS_DRY_RUN ?? 'false'
-      TS_HARNESS_SKIP_WORKSPACE_UV: !!js process.env.TS_HARNESS_SKIP_WORKSPACE_UV ?? ''
       # These values are deliberately DSH_* names. dsh-subprocess scrubs them
       # from shell-tool children; this explicit MCP config is their only
       # forwarding path into the bridge process.

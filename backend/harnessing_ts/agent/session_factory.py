@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from harnessing_ts.agent.sdk_runner import SdkRunner, SdkRunnerConfig
 from harnessing_ts.prompts.compose import (
@@ -22,11 +22,8 @@ def build_main_runner(
     workspace_path: Path,
     locale: str,
     log_path: Path,
-    enter_node: Callable[[dict[str, Any]], Any] | None,
-    query_knowledge: Callable[[dict[str, Any]], Any] | None,
-    extract_reference_features: Callable[[dict[str, Any]], Any] | None = None,
-    inspect_reference_feature_extractor: Callable[[dict[str, Any]], Any] | None = None,
-    validate_reference_feature_extractor: Callable[[dict[str, Any]], Any] | None = None,
+    knowledge_query_ready: bool,
+    reference_feature_extractor_ready: bool,
     variant: AblationVariant | None = None,
     on_part: Callable[[Part], None] | None = None,
     on_session_id: Callable[[str], None] | None = None,
@@ -40,8 +37,8 @@ def build_main_runner(
         system_prompt=build_main_system_prompt(ctx, variant),
         attachment_text=None,
         allowed_tools=build_main_allowed_tools(
-            knowledge_query_ready=query_knowledge is not None,
-            reference_feature_extractor_ready=extract_reference_features is not None,
+            knowledge_query_ready=knowledge_query_ready,
+            reference_feature_extractor_ready=reference_feature_extractor_ready,
             variant=variant,
         ),
         model=sdk_config.model,
@@ -62,14 +59,8 @@ def build_node_runner(
     locale: str,
     node: NodeSession,
     log_path: Path,
-    finish_node: Callable[[dict[str, Any]], Any],
-    query_knowledge: Callable[[dict[str, Any]], Any] | None,
-    extract_reference_features: Callable[[dict[str, Any]], Any] | None = None,
-    inspect_reference_feature_extractor: Callable[[dict[str, Any]], Any] | None = None,
-    validate_reference_feature_extractor: Callable[[dict[str, Any]], Any] | None = None,
-    record_artifact: Callable[[dict[str, Any]], Any],
-    record_run: Callable[[dict[str, Any]], Any],
-    get_runtime_settings: Callable[[], Any],
+    knowledge_query_ready: bool,
+    reference_feature_extractor_ready: bool,
     on_session_id: Callable[[str], None],
     on_part: Callable[[Part], None] | None = None,
     variant: AblationVariant | None = None,
@@ -85,8 +76,8 @@ def build_node_runner(
         attachment_text=build_node_attachment(node_type, node.get("inputSummary")),
         allowed_tools=build_node_allowed_tools(
             node_type,
-            knowledge_query_ready=query_knowledge is not None,
-            reference_feature_extractor_ready=extract_reference_features is not None,
+            knowledge_query_ready=knowledge_query_ready,
+            reference_feature_extractor_ready=reference_feature_extractor_ready,
             variant=variant,
         ),
         model=sdk_config.model,

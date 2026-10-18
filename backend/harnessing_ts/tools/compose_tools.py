@@ -41,14 +41,11 @@ NODE_POOL = ["mcp__ts_harness__finish_node", "mcp__ts_harness__get_runtime_setti
 def build_main_allowed_tools(
     *,
     knowledge_query_ready: bool = False,
-    knowledge_graph_ready: bool | None = None,
     reference_feature_extractor_ready: bool = False,
     variant: AblationVariant | None = None,
 ) -> list[str]:
     variant = variant or get_variant(DEFAULT_VARIANT_ID)
-    if knowledge_graph_ready is not None:
-        knowledge_query_ready = knowledge_graph_ready
-    elif variant.knowledge_query_source == "references":
+    if variant.knowledge_query_source == "references":
         knowledge_query_ready = True
     if variant.direct_main_tool_use:
         return sorted(set(_native_tools(include_subagents=variant.independent_subagents)))

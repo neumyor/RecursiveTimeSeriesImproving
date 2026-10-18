@@ -30,9 +30,8 @@ function isDelegatedAgent(agent) {
 
 export function apply(ctx) {
   const allowed = configuredTools()
-  // `agent/session-start` is the first supported injection point after the
-  // scoped agent context becomes active.  `agent/created` is too early for
-  // effect-backed tool restrictions in recent Cordis releases.
+  // `agent/session-start` is the first injection point where the scoped
+  // agent context and its effect-backed tool restrictions exist.
   ctx.on('agent/session-start', ({ agent }) => {
     const visible = agent.ctx.tools.schemas().map((schema) => schema.name)
     const delegated = isDelegatedAgent(agent)
