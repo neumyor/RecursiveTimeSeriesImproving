@@ -332,8 +332,8 @@ class _BootstrapRefitM0(m0.M0Adapter):
     intact rows, so unlike a row-resampled array no window ever straddles
     unrelated data.  The expected loss equals the plain refit's up to an
     O(1/n_windows) bootstrap bias, and mean_d is reported per draw so the
-    null's centring stays visible.  fit mirrors m0.M0Adapter.fit exactly
-    apart from the resample.
+    null's centring stays visible.  calibrations constructs the meta itself,
+    so fit goes straight to the resample and the shared ridge.
     """
 
     def __init__(self, *, boot_seed: int, lookback_len: int | None = None) -> None:
@@ -341,25 +341,12 @@ class _BootstrapRefitM0(m0.M0Adapter):
         self._boot_seed = int(boot_seed)
 
     def fit(self, train: np.ndarray, meta: dict) -> None:
-        missing = [key for key in m0._META_KEYS if key not in meta]
-        if missing:
-            raise ValueError(f"fit meta is missing required keys: {missing}")
         train = np.asarray(train, dtype=np.float64)
-        if train.ndim != 2:
-            raise ValueError(f"train must be a [T, C] array, got shape {train.shape}")
         L = int(meta["L"])
         H = int(meta["H"])
         C = int(meta["C"])
-        if min(L, H, C) < 1:
-            raise ValueError(f"meta L, H, C must be positive, got L={L}, H={H}, C={C}")
-        if train.shape[1] != C:
-            raise ValueError(f"train has {train.shape[1]} channels, but meta C={C}")
-        if self._lookback_len is not None and not 1 <= self._lookback_len <= L:
-            raise ValueError(f"lookback_len={self._lookback_len} must be in [1, L={L}]")
         K = L if self._lookback_len is None else self._lookback_len
         T = train.shape[0]
-        if T < K + H:
-            raise ValueError(f"train has {T} rows, need at least K+H={K + H} to build one window")
         origins = np.arange(K - 1, T - H, m0._FIT_STRIDE)
         rng = np.random.default_rng(self._boot_seed)
         origins = origins[rng.integers(0, origins.size, origins.size)]
