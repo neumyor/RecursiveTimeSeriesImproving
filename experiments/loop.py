@@ -547,17 +547,19 @@ class HeadroomLoop:
         ws/ copy could have been edited after validation; the heldout side is
         where the trusted version lives, and running it means a post-
         validation edit changes nothing until the probe is resubmitted under
-        a new id.
+        a new id.  A missing frozen copy costs the probe its row, not the
+        round (the library append and the freeze land together).
         """
         infra = self._probe_infra()
         artifacts = self._probe_artifacts()
         rows: list[dict[str, Any]] = []
         for entry in self._probe_library():
             frozen = self.heldout / "probe-sources" / entry["probeId"] / "probe.py"
-            source = frozen if frozen.is_file() else self.ws / "probes" / entry["probeId"] / "probe.py"
             row: dict[str, Any] = {"probeId": entry["probeId"], "measures": entry["measures"]}
             try:
-                row["output"] = infra.run_probe(source, artifacts)
+                if not frozen.is_file():
+                    raise FileNotFoundError(str(frozen))
+                row["output"] = infra.run_probe(frozen, artifacts)
             except Exception as exc:  # a broken probe loses its row, not the round
                 row["error"] = f"{type(exc).__name__}: {exc}"
             rows.append(row)
