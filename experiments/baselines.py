@@ -18,6 +18,7 @@ evaluate.py's Adapter contract and segment assembly; nothing here reimplements
 segment construction.
 """
 
+
 from pathlib import Path
 import sys
 from dataclasses import replace
@@ -450,7 +451,7 @@ def run_baselines(
     if task_name not in REGISTRY:
         raise ValueError(f"unknown task {task_name!r}; expected one of {sorted(REGISTRY)}")
     cfg = replace(cfg, seed=seed)  # the adapter meta seed follows the run seed
-    task = REGISTRY[task_name](seed=seed, sizes=sizes)
+    task = REGISTRY[task_name](seed=seed, sizes=sizes, cfg=cfg)
     results: dict[str, float] = {}
 
     m0g = one_shot_m0g(task, m0.create_adapter(), cfg, sizes)

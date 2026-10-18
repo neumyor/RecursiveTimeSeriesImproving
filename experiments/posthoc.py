@@ -223,7 +223,7 @@ class _Replay:
             if self.task_name not in REGISTRY:
                 raise _RunError(f"unknown synthetic task {self.task_name!r}")
             sizes = {key: int(value) for key, value in self.reference["sizes"].items()}
-            task = REGISTRY[self.task_name](seed=self.seed, sizes=sizes)
+            task = REGISTRY[self.task_name](seed=self.seed, sizes=sizes, cfg=self.cfg)
             self.oracle = task.oracle
         self.train_diag = task.train_diag
         self.diag_start = task.diag_start

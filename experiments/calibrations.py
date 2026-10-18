@@ -36,6 +36,7 @@ Usage:
     uv run --extra research python experiments/calibrations.py --only cal2
 """
 
+
 import argparse
 from pathlib import Path
 import sys
@@ -203,7 +204,7 @@ def _synthetic_gain_series(
     corrector is fitted on the FULL diag segment, and d is evaluated on cert.
     The test segment and oracle are never touched.
     """
-    task = REGISTRY[task_name](seed=seed, sizes=sizes)
+    task = REGISTRY[task_name](seed=seed, sizes=sizes, cfg=cfg)
     train = task.train_diag[: task.diag_start]
     channels = train.shape[1]
     adapter = m0.variant(model_id)
