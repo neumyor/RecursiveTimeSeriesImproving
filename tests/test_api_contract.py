@@ -28,7 +28,6 @@ def test_bootstrap_contract_includes_full_static_payload(tmp_path, monkeypatch) 
 
     WorkspaceStore(tmp_path).ensure_layout()
     monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("TS_HARNESS_SKIP_WORKSPACE_UV", "true")
 
     response = _get(create_app(), "/api/bootstrap")
 
@@ -66,19 +65,44 @@ def test_bootstrap_contract_includes_full_static_payload(tmp_path, monkeypatch) 
     assert payload["variant"]["features"] == ["NOD", "KGR", "KTL", "CRV", "SUB", "ADA"]
 
 
-def test_live_contract_is_incremental_subset(tmp_path, monkeypatch) -> None:
+def test_realtime_sse_endpoint_is_registered(tmp_path, monkeypatch) -> None:
     from harnessing_ts.server import create_app
 
     WorkspaceStore(tmp_path).ensure_layout()
     monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("TS_HARNESS_SKIP_WORKSPACE_UV", "true")
 
-    response = _get(create_app(), "/api/live")
+    app = create_app()
+    routes = {getattr(route, "path", "") for route in app.routes}
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert "nodeSpecs" not in payload
-    assert "fileTree" not in payload
+    assert "/api/events" in routes
+    assert "/api/execution/pause" in routes
+    assert "/api/execution/force-stop" in routes
+    assert "/api/workflow/reset" in routes
+    assert "/api/reference-features/status" in routes
+    assert "/api/reference-features/tool" in routes
+    assert "/api/reference-features/run" in routes
+
+
+def test_execution_control_rejects_invalid_phase_and_unconfirmed_force_stop(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.server import create_app
+
+    WorkspaceStore(tmp_path).ensure_layout()
+    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
+    app = create_app()
+
+    assert _post(app, "/api/execution/pause", {"reason": "test"}).status_code == 409
+    assert _post(app, "/api/execution/force-stop", {"confirm": False}).status_code == 400
+
+
+def test_live_payload_exposes_the_sse_snapshot_field_set(tmp_path) -> None:
+    from harnessing_ts.api.payloads import build_live_payload
+    from harnessing_ts.orchestrator import HarnessOrchestrator
+
+    orchestrator = HarnessOrchestrator(tmp_path, dry_run=True, mode="auto")
+    orchestrator.initialize()
+
+    payload = build_live_payload(orchestrator=orchestrator, task_running=lambda task: False)
+
     assert {
         "variant",
         "state",
@@ -100,44 +124,8 @@ def test_live_contract_is_incremental_subset(tmp_path, monkeypatch) -> None:
         "chainSummaryParts",
         "runtime",
         "execution",
-    }.issubset(payload)
-
-
-def test_realtime_sse_endpoint_is_registered(tmp_path, monkeypatch) -> None:
-    from harnessing_ts.server import create_app
-
-    WorkspaceStore(tmp_path).ensure_layout()
-    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("TS_HARNESS_SKIP_WORKSPACE_UV", "true")
-
-    app = create_app()
-    routes = {getattr(route, "path", "") for route in app.routes}
-
-    assert "/api/events" in routes
-    assert "/api/execution/pause" in routes
-    assert "/api/execution/force-stop" in routes
-    assert "/api/interrupt" not in routes
-    assert "/api/workflow/reset" in routes
-    assert "/api/reference-features/status" in routes
-    assert "/api/reference-features/tool" in routes
-    assert "/api/reference-features/run" in routes
-    # The standalone build/pause/llm-config endpoints are gone; the
-    # main session now builds the tool directly via the
-    # validate_reference_feature_extractor MCP tool.
-    assert "/api/reference-features/build" not in routes
-    assert "/api/reference-features/llm-config" not in routes
-
-
-def test_execution_control_rejects_invalid_phase_and_unconfirmed_force_stop(tmp_path, monkeypatch) -> None:
-    from harnessing_ts.server import create_app
-
-    WorkspaceStore(tmp_path).ensure_layout()
-    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("TS_HARNESS_SKIP_WORKSPACE_UV", "true")
-    app = create_app()
-
-    assert _post(app, "/api/execution/pause", {"reason": "test"}).status_code == 409
-    assert _post(app, "/api/execution/force-stop", {"confirm": False}).status_code == 400
+    } == set(payload)
+    assert {"running", "nodeRunning", "knowledgeGraphRunning", "chainSummaryRunning", "pipelineComplete", "workspaceUv"} == set(payload["runtime"])
 
 
 def test_send_rejects_failed_execution_before_starting_background_task(tmp_path, monkeypatch) -> None:
@@ -145,7 +133,6 @@ def test_send_rejects_failed_execution_before_starting_background_task(tmp_path,
 
     WorkspaceStore(tmp_path).ensure_layout()
     monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
-    monkeypatch.setenv("TS_HARNESS_SKIP_WORKSPACE_UV", "true")
     app = create_app()
     orchestrator = app.state.orchestrator
 

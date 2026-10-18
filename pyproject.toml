@@ -16,10 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-training = [
-  "agentlightning>=0.1.0",
-  "openai>=1.100.0",
-]
 research = [
   "numpy>=2.0",
   "scipy>=1.14",

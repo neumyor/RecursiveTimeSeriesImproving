@@ -6,7 +6,7 @@ import mimetypes
 import os
 import socket
 import sys
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import unquote
 
 import uvicorn
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from harnessing_ts.api.payloads import build_bootstrap_payload, build_live_payload, masked_llm_config
 from harnessing_ts.api.realtime import RealtimeEvent, RealtimeEventBroker
 from harnessing_ts.orchestrator import HarnessOrchestrator
-from harnessing_ts.paths import default_workspace_path, frontend_root
+from harnessing_ts.paths import control_mode_from_env, default_workspace_path, frontend_root
 from harnessing_ts.variants import resolve_variant, variant_help_text
 
 
@@ -66,10 +66,7 @@ class KnowledgeGraphLlmConfigRequest(BaseModel):
     model: str | None = None
     apiKey: str | None = None
     baseUrl: str | None = None
-
-
-class ReferenceFeatureBuildRequest(BaseModel):
-    trigger: str | None = "manual"
+    maxTokens: int | None = None
 
 
 class ReferenceFeatureRunRequest(BaseModel):
@@ -82,6 +79,7 @@ class MainLlmConfigRequest(BaseModel):
     model: str | None = None
     apiKey: str | None = None
     baseUrl: str | None = None
+    maxTokens: int | None = None
 
 
 class KnowledgeQueryRequest(BaseModel):
@@ -104,9 +102,7 @@ def create_app() -> FastAPI:
     workspace_path = default_workspace_path()
     dry_run = os.getenv("TS_HARNESS_DRY_RUN") == "true"
     debug_enabled = os.getenv("TS_HARNESS_DEBUG") == "true"
-    control_mode = os.getenv("TS_HARNESS_CONTROL_MODE", "auto").strip().lower()
-    if control_mode not in {"auto", "manual"}:
-        control_mode = "auto"
+    control_mode = control_mode_from_env()
     frontend = frontend_root()
     web_root = frontend / "dist" if (frontend / "dist").exists() else frontend
     orchestrator = HarnessOrchestrator(workspace_path, dry_run=dry_run, locale="zh", mode=control_mode)
@@ -162,10 +158,6 @@ def create_app() -> FastAPI:
     @app.get("/api/bootstrap")
     async def bootstrap() -> dict[str, Any]:
         return _bootstrap(orchestrator, workspace_path, dry_run, debug_enabled)
-
-    @app.get("/api/live")
-    async def live() -> dict[str, Any]:
-        return _live(orchestrator)
 
     @app.get("/api/events")
     async def events(request: Request) -> StreamingResponse:
@@ -236,7 +228,7 @@ def create_app() -> FastAPI:
         payload: DshMcpControlRequest,
     ) -> Any:
         client_host = request.client.host if request.client else ""
-        if client_host not in {"127.0.0.1", "::1", "testclient"}:
+        if client_host not in {"127.0.0.1", "::1"}:
             raise HTTPException(status_code=403, detail="DSH MCP control endpoint is loopback-only.")
         capability = request.headers.get("x-ts-harness-capability", "")
         if not capability:
@@ -278,18 +270,6 @@ def create_app() -> FastAPI:
 
     @app.post("/api/knowledge/query")
     async def query_knowledge(request: KnowledgeQueryRequest) -> dict[str, Any]:
-        if not request.question.strip():
-            raise HTTPException(status_code=400, detail="question required")
-        return await orchestrator.query_knowledge(
-            request.question,
-            request.domain,
-            request.context,
-            request.observations,
-            include_evidence=request.includeEvidence,
-        )
-
-    @app.post("/v1/knowledge/query")
-    async def v1_query_knowledge(request: KnowledgeQueryRequest) -> dict[str, Any]:
         if not request.question.strip():
             raise HTTPException(status_code=400, detail="question required")
         return await orchestrator.query_knowledge(
@@ -760,7 +740,7 @@ def main() -> None:
     try:
         host = _startup_host()
         port = _startup_port()
-        control_mode = _startup_control_mode()
+        control_mode = control_mode_from_env()
         variant = resolve_variant()
     except RuntimeError as exc:
         _print_startup_error(str(exc), include_variant_help=True)
@@ -795,16 +775,6 @@ def _startup_port() -> int:
     if not 1 <= port <= 65535:
         raise ValueError(f"Invalid PORT={raw!r}; expected a TCP port from 1 to 65535, for example PORT=4327.")
     return port
-
-
-def _startup_control_mode() -> str:
-    raw = os.getenv("TS_HARNESS_CONTROL_MODE", "auto").strip().lower()
-    if raw not in {"auto", "manual"}:
-        raise ValueError(
-            f"Invalid TS_HARNESS_CONTROL_MODE={raw!r}; expected 'auto' or 'manual'. "
-            "Use auto for automatic node transitions or manual for UI approval."
-        )
-    return raw
 
 
 def _print_startup_error(message: str, *, include_variant_help: bool = False) -> None:
