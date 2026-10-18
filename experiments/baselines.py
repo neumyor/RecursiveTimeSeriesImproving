@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Non-LLM baselines for the main experiment (final-plan §4).
 
 - one-shot m0+g: the greedy total linear corrector fitted once on the FULL
@@ -17,6 +15,8 @@ Everything reuses the headroom core (fit_greedy / FittedCorrector) and
 evaluate.py's Adapter contract and segment assembly; nothing here reimplements
 segment construction.
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 import sys

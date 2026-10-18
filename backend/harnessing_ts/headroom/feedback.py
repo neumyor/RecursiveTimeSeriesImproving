@@ -1,8 +1,6 @@
-from __future__ import annotations
+"""Markdown feedback rendering for the scalar / fixed / self-built / augmented / placebo arms.
 
-"""Markdown feedback rendering for the scalar / fixed / self-built / placebo arms.
-
-All four arms share one byte-identical scaffold and differ only in the
+All five arms share one byte-identical scaffold and differ only in the
 middle block, so any measured behavioural difference between arms is
 attributable to that block; see docs/headroom-contracts.md §9 and the
 coding plan §2.5/§3.2 (arm-neutral wording: no dataset or domain
@@ -12,8 +10,11 @@ vocabulary, no status language such as "certified").
 defect card (placebo = the same card with coordinate rows permuted);
 ``self-built`` renders the outputs of the agent's OWN validated probes —
 the backend never injects diagnostic content into that arm, it only runs
-and reports the agent's tools.
+and reports the agent's tools; ``augmented`` renders both the defect card
+and the agent's own validated probes.
 """
+
+from __future__ import annotations
 
 import json
 from typing import Any
@@ -76,7 +77,7 @@ def render_feedback(
     ``np.random.default_rng(cfg.seed).permutation(len(rows))``, i.e. fixed
     per (seed, row count) and independent of global RNG state.
 
-    Probe rows (self-built arm only) are dicts from the loop: ``probeId``,
+    Probe rows (self-built and augmented arms) are dicts from the loop: ``probeId``,
     ``measures``, ``output`` (JSON-serializable dict) or ``error``.  Rows
     arrive oldest-first and only the NEWEST ``_PROBE_MAX_ROWS`` render.  The
     static how-to-write-probes guide is NOT rendered here — the loop appends
@@ -135,11 +136,12 @@ def _cell(text: Any) -> str:
 def _probe_table(
     probe_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]]
 ) -> str:
-    """Self-built arm middle block: the agent's own tools' latest outputs.
+    """Probe-table middle block shared by the self-built and augmented arms.
 
     Only the agent's validated probes appear here — the fixed card's content
-    is never injected into this arm, so a measured win of self-built over
-    fixed is a win of agent-built tooling, not of extra backend hints.
+    is never injected into the self-built arm, so a measured win of
+    self-built over fixed is a win of agent-built tooling, not of extra
+    backend hints.
     """
     sections: list[str] = []
     if validation_rows:

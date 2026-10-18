@@ -1,10 +1,7 @@
-from __future__ import annotations
-import time
-
 """G0 certificate calibration: the seven gates of final-plan §5, no LLM involved.
 
 Usage:
-    uv run --extra research python experiments/stage0.py            # full run (v1 gates)
+    uv run --extra research python experiments/stage0.py            # full run (linear gates)
     uv run --extra research python experiments/stage0.py --smoke    # tiny sizes
     uv run --extra research python experiments/stage0.py --deep     # deep G0-3/4/6 recalibration
 
@@ -20,11 +17,14 @@ flaky under binomial noise at the achievable cell count, the pass bound is
 the conservative binomial quantile and the exact numbers are reported.
 """
 
+from __future__ import annotations
+
 import argparse
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -60,8 +60,7 @@ from harnessing_ts.headroom.timeidx import segment_origins
 # artifact); any smoke run writes beside it so concurrent tests can never
 # overwrite the calibration report.  The directory follows the smoke FLAG
 # the caller passes, never the process's sys.argv — a pytest process calling
-# run(smoke=True) directly must not clobber the full-size report (the exact
-# bug that erased the first fixed-level rerun).
+# run(smoke=True) directly must not clobber the full-size report.
 def _report_dir(smoke: bool) -> Path:
     return _REPO_ROOT / "experiments" / "runs" / ("stage0-smoke" if smoke else "stage0")
 

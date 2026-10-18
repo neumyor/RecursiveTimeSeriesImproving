@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Coordinates over the realized information set, their ridge correctors, and held-out gains."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

@@ -1,12 +1,10 @@
-from __future__ import annotations
-
 """Offline analysis: finished loop runs -> the paper's numbers (final plan §4).
 
 One run = one (task, arm, seed) cell produced by experiments/loop.py.  This
 script never talks to an LLM: it replays each run's incumbent chain offline
 (re-fit every accepted candidate on train, predict the held-out test
 segment), applies the uniform m+g postprocessing to every incumbent, and
-scores the pre-registered endpoints (experiments/specs/main.json):
+scores the pre-registered endpoints (experiments/specs/main-v2.json):
 
 - E1  normalized test optimality gap of the FINAL incumbent after the m+g
       postprocessing, ngap = gap(final)/gap(m0); real tasks (no oracle)
@@ -25,9 +23,10 @@ isolation — plus candidates whose diag card gain dwarfs their cert gain
 (ratio > 5), the overfit-to-diagnostic signature.
 
 Arm level: per-(task, arm) median+IQR of E1/E2 and the seed-blocked
-sign-flip permutation test for the three pre-registered contrasts
-(self-built vs fixed, fixed vs scalar, self-built vs scalar), exact up to
-8192 patterns and Monte Carlo (10k, fixed seed) beyond.
+sign-flip permutation test for the five pre-registered contrasts
+(self-built vs fixed, fixed vs scalar, self-built vs scalar, augmented vs
+self-built, augmented vs fixed), exact up to 8192 patterns and Monte Carlo
+(10k, fixed seed) beyond.
 
 Usage:
     uv run --extra research python experiments/posthoc.py \
@@ -41,6 +40,8 @@ from the held-out reference, so a mismatched config cannot silently
 mis-predict.  Real runs need --real-csv to map the run's task name to its
 CSV: the loop never stores the path anywhere the agent could see it.
 """
+
+from __future__ import annotations
 
 import argparse
 from dataclasses import replace
@@ -232,8 +233,7 @@ class _Replay:
         self.train = self.train_diag[: self.diag_start]
         # Integrity: the stored series must be the task the reference
         # regenerates, or every number below would describe a different
-        # dataset than the one the agent saw (the in-run sha check only
-        # covered the run's lifetime).
+        # dataset than the one the agent saw.
         series = self.ws / "data" / "series.npy"
         self.series_matches_task = (
             bool(np.array_equal(np.load(series), self.train_diag)) if series.is_file() else None
@@ -335,9 +335,9 @@ class _Replay:
         The stored card is the parent's own residual state at the time the
         agent saw it (written when the parent was still a candidate) — that
         is exactly the state the next round's proposal reacts to, so it is
-        preferred over a recomputation.  m0 was never a candidate and has no
-        stored card, so its card is rebuilt from the replayed segments —
-        cached, because every early round has m0 as its parent.
+        preferred over a recomputation.  m0 has no stored card, so its card
+        is rebuilt from the replayed segments — cached, because every early
+        round has m0 as its parent.
         """
         if cand_id in self._cards:
             return self._cards[cand_id]
@@ -533,8 +533,8 @@ def _analyze_run_inner(
                 off_target += 1
 
     # ---- cert-level total LCB vs true test gap (accepted incumbents) ------------------
-    # Fixed certification level (the alpha ledger is gone; the loop's
-    # certification log is a record, not a budget).
+    # Fixed certification level (the loop's certification log is a record,
+    # not a budget).
     cert_level = 1.0 - cfg.certify_alpha
     points: list[list[float]] = []
     for inc in incumbents[1:]:  # the spec's "accepted incumbents": m0 excluded
@@ -658,8 +658,8 @@ def _diagnostic_attribution(
 ) -> tuple[str, ...]:
     """Diagnostic-only direction attribution: the aspect whose remaining-
     improvement bound dropped the most.  The live mechanism is the LLM
-    judge; this single rule exists so postSwitchDiversity keeps its
-    pre-registered meaning as a measurement."""
+    judge; this rule is the deterministic attribution postSwitchDiversity
+    is measured against."""
     parent_lcb = _aspect_lcb(parent_card)
     child_lcb = _aspect_lcb(child_card)
     drops = {
@@ -831,7 +831,7 @@ def _perm_contrast(diffs: list[float]) -> dict[str, Any]:
 def _contrast(records: list[dict[str, Any]], arm_a: str, arm_b: str) -> dict[str, Any]:
     """Seed-blocked permutation contrast of E1 between two arms.
 
-    (task, seed) is the block: the three arms share one seed set per task,
+    (task, seed) is the block: the arms share one seed set per task,
     so sign-flipping within a block is the pre-registered randomization.
     Duplicate cells (if a grid was ever re-run) collapse to their mean E1
     first so no seed votes twice.

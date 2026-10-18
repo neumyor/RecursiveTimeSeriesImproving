@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Shared evaluation helpers for headroom experiments (stage0, baselines, loop).
 
 Bridges the m0/candidate Adapter contract to the headroom core: predictions
 at target-realized origins, paired oracle gaps, and segment assembly.
 """
+
+from __future__ import annotations
 
 from dataclasses import replace
 import importlib.util

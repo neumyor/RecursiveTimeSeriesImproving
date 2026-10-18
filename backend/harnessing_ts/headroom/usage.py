@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Token-usage accounting over append-only DSH session logs (zstd JSONL)."""
+
+from __future__ import annotations
 
 import io
 import json

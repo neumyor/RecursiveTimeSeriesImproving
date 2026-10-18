@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Parallel driver for the P2 main experiment matrix (final plan §3.6, §7).
 
 One cell = one (task, arm, seed); its run dir is <runs-root>/<task>-<arm>-<seed>.
@@ -35,6 +33,8 @@ Usage:
     uv run --extra research python experiments/batch.py \
         --spec experiments/specs/main-v3.json [--workers 8] [--only task=...,arm=...]
 """
+
+from __future__ import annotations
 
 import argparse
 from concurrent.futures import as_completed, ThreadPoolExecutor

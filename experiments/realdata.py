@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """De-identified real-task loader for the residual-headroom experiments.
 
 Loads an ETT-shaped hourly CSV (timestamp column first, then C numeric
@@ -37,6 +35,8 @@ Tests run without the network on a tiny synthetic CSV in tmp_path
 (tests/test_experiments_realdata.py); the real file lives untracked in
 experiments/data/ (see its .gitignore).
 """
+
+from __future__ import annotations
 
 import csv
 from dataclasses import dataclass

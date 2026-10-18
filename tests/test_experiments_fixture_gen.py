@@ -4,11 +4,9 @@ experiments/fixture_gen.py is the development-time trust mechanism behind
 experiments/probes.py's fixture families: an LLM flow proposes a family as a
 constrained DSL record and four deterministic gates measure it.  These tests
 pin (1) the DSL schema (bad injections rejected before any gate runs),
-(2) the frozen registry reproduces the pre-pipeline fixtures BITWISE — the
-migration of the four hand-designed families is provenance, not new numbers,
-(3) each gate does its own job (a nondeterministic witness, a
+(2) each gate does its own job (a nondeterministic witness, a
 mean-shifting injection and a periodicity design that the band-24 probe
-completes are all rejected, with numbers), and (4) a good proposal is
+completes are all rejected, with numbers), and (3) a good proposal is
 appended to the registry through the CLI's admit().
 
 The zero-noise side of the trust rule (a lag-13 noise probe completing no

@@ -298,9 +298,8 @@ class M0DeepAdapter:
         yw = train[origins[:, None] + np.arange(1, H + 1)[None, :]]  # [N, H, C]
 
         # Seed everything before model init and any sampling, so the same
-        # (train, meta) yields the same weights.  numpy is seeded too even
-        # though the loop below uses torch RNG only — any sampling added
-        # later must stay deterministic without a second thought.
+        # (train, meta) yields the same weights.  numpy is seeded alongside
+        # torch so any sampling stays deterministic without a second thought.
         torch.manual_seed(seed)
         np.random.seed(seed)
 
@@ -381,8 +380,8 @@ class M0DeepAdapter:
         torch.set_num_threads(1)
         model = self._model
         # Defensive eval(): no dropout or BatchNorm exists in this model, but
-        # forcing eval mode here makes the deterministic-eval-path contract
-        # hold even if one is ever added (tests assert this).
+        # forcing eval mode here keeps the deterministic-eval-path contract
+        # explicit (tests assert this).
         model.eval()
         xw = X[:, -self._L :, :]
         mean = xw.mean(axis=1)  # [B, C]

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Time-index conventions: origin semantics, chronological splits, windows.
 
 An origin ``o`` is the index of the LAST observation of the input window.
@@ -7,6 +5,8 @@ The input is ``values[o-L+1 .. o]`` and the targets are ``values[o+1 .. o+H]``.
 This is the convention every other headroom module relies on; see
 docs/headroom-contracts.md §1 and §3.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

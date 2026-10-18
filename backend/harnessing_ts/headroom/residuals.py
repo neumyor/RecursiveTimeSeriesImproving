@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Segment residual tensors: per-origin residuals plus the full realized e/r series."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 

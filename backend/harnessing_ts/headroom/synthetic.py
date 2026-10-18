@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Synthetic tasks whose full-information optimal forecasters are exactly computable (contract §8)."""
+
+from __future__ import annotations
 
 import collections
 import math
@@ -152,12 +152,13 @@ def _steady_filter_cov(
 ) -> np.ndarray:
     """Steady-state filtered covariance of the Riccati recursion (the innovation form).
 
-    Models whose process noise is zero in some direction (the noiseless
-    oscillators of lgssm_multiperiod) converge only algebraically — information
-    about a fixed amplitude accumulates like 1/t — so a geometric criterion
-    would never trigger; those models simply run the full budget, and the
-    resulting h-step MSE is accurate to < 1e-4 relative (measured on this
-    package's models), far below any experimental resolution.
+    Models whose process noise is zero in some direction (the companion-form
+    VAR of lgssm_xchannel, whose state is a stack of realized observations)
+    converge only algebraically — information about the exactly realized
+    history accumulates like 1/t — so a geometric criterion would never
+    trigger; those models simply run the full budget, and the resulting
+    h-step MSE is accurate to < 1e-4 relative (measured on this package's
+    models), far below any experimental resolution.
     """
     scale = max(float(np.linalg.norm(P0)), 1e-12)
     P = np.array(P0, dtype=np.float64)
@@ -782,8 +783,10 @@ def garch(
     A zero-mean martingale difference: the conditional mean is exactly zero at
     every horizon, so the oracle forecast is identically 0 — the mean-unpredictable
     negative control (the conditional *variance* is predictable, but that is not
-    the target).  Starting the recursion at the stationary variance makes the
-    simulation exactly stationary from the first row.
+    the target).  Starting the recursion at the stationary variance (h = 1)
+    puts the first row's conditional variance at omega + beta = 1 - alpha — the
+    zero innovation entering it leaves one alpha below — and the chain relaxes
+    to the stationary variance geometrically from there.
     """
     sizes = _merge_sizes(sizes)
     prefix = _fresh_prefix(_resolve_cfg(cfg))

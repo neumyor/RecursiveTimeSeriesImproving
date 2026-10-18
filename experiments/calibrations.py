@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Pre-P2-freeze calibrations for review C's risk register items #4/#5.
 
 Three calibrations, one JSON artifact each under experiments/runs/calibrations/
@@ -35,6 +33,8 @@ Usage:
     uv run --extra research python experiments/calibrations.py --all
     uv run --extra research python experiments/calibrations.py --only cal2
 """
+
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -358,7 +358,7 @@ class _BootstrapRefitM0(m0.M0Adapter):
     unrelated data.  The expected loss equals the plain refit's up to an
     O(1/n_windows) bootstrap bias, and mean_d is reported per draw so the
     null's centring stays visible.  fit mirrors m0.M0Adapter.fit exactly
-    apart from the resample (the template is frozen post-M2).
+    apart from the resample.
     """
 
     def __init__(self, *, boot_seed: int, lookback_len: int | None = None) -> None:

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """The standalone LLM candidate-improvement loop (final plan §3, rev. §12).
 
 One run = one (task, arm, seed) cell.  Each round opens a fresh DSH session
@@ -23,7 +21,7 @@ Beyond the candidate loop itself:
   archive and may recommend a different historical candidate as the round's
   starting point; every gate around its verdict is deterministic.
 
-Design notes from the M2 review (all load-bearing):
+Design notes:
 - the ledger tolerates a torn last line (a kill mid-append must not kill the
   resume), records the failure reason of every round, and never emits bare
   NaN (strict-JSON readers would choke);
@@ -39,6 +37,8 @@ Usage:
     uv run --extra research python experiments/loop.py \
         --run-dir experiments/runs/pilot --task hmm_ar_switch --arm fixed
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio

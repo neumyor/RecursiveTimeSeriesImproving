@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """HAC inference on per-origin loss differences: DM tests, CIs, bootstrap.
 
 All functions treat their input as the per-origin series
@@ -8,6 +6,8 @@ multi-step windows make ``d`` serially correlated, so every interval and
 p-value uses Newey--West HAC variances with the Harvey--Leybourne--Newbold
 small-sample correction; see docs/headroom-contracts.md §6.
 """
+
+from __future__ import annotations
 
 import numpy as np
 from scipy import stats

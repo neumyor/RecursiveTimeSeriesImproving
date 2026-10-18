@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Frozen experiment configuration for the residual-headroom system.
 
 The camelCase JSON mapping and the validation rules are binding; see
 docs/headroom-contracts.md §2.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, fields
 import json
