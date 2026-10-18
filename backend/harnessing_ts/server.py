@@ -472,7 +472,8 @@ def create_app() -> FastAPI:
             except TimeoutError:
                 raise HTTPException(status_code=409, detail="paused execution is still settling; retry shortly") from None
         phase = orchestrator.execution.snapshot()["phase"]
-        if phase not in {"ready", "paused"}:
+        # A failed attempt holds no lease; a new prompt starts a fresh attempt.
+        if phase not in {"ready", "paused", "failed"}:
             raise HTTPException(status_code=409, detail=f"execution is {phase}; it cannot accept a prompt")
         app.state.run_task = asyncio.create_task(_run_main_turn(orchestrator, text, realtime))
         setattr(orchestrator, "_server_run_task", app.state.run_task)
@@ -545,7 +546,12 @@ def create_app() -> FastAPI:
         if request.scope in {"chat", "all"}:
             if not request.confirmReset:
                 raise HTTPException(status_code=400, detail="reset confirmation required")
-            if _task_running(app.state.run_task) or _task_running(app.state.knowledge_graph_task) or _task_running(app.state.chain_summary_task):
+            if (
+                _task_running(app.state.run_task)
+                or _task_running(app.state.knowledge_graph_task)
+                or _task_running(app.state.chain_summary_task)
+                or orchestrator.is_active_node_task_running()
+            ):
                 raise HTTPException(status_code=409, detail="cannot reset workspace while a run is active")
         await orchestrator.clear_debug_logs(request.scope)
         return {"ok": True, "bootstrap": _bootstrap(orchestrator, workspace_path, dry_run, debug_enabled)}
@@ -635,6 +641,13 @@ def _start_knowledge_graph_build(
     trigger: str,
     uploaded_paths: list[str],
 ) -> bool:
+    if not orchestrator.variant.knowledge_graph:
+        # Raise before the background task exists: the response must report
+        # the error instead of accepting a build that can never run.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Knowledge graph building is disabled by ablation variant {orchestrator.variant.id}.",
+        )
     current = getattr(app.state, "knowledge_graph_task", None)
     if current is not None and not current.done():
         orchestrator.store.append_timeline({
@@ -662,7 +675,8 @@ async def _run_knowledge_graph_build(
     try:
         await orchestrator.build_knowledge_graph(trigger, uploaded_paths)
     except Exception:
-        # The orchestrator records failure status and timeline details.
+        # The orchestrator records the failure status and timeline event
+        # before re-raising; the response was already accepted.
         pass
     finally:
         setattr(orchestrator, "_server_knowledge_graph_task", None)
@@ -699,7 +713,8 @@ async def _run_chain_summary_build(
     try:
         await orchestrator.build_chain_summary(trigger)
     except Exception:
-        # The orchestrator records failure status and timeline details.
+        # The orchestrator records the failure status and timeline event
+        # before re-raising; the response was already accepted.
         pass
     finally:
         setattr(orchestrator, "_server_chain_summary_task", None)

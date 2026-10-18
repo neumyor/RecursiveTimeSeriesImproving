@@ -128,7 +128,52 @@ def test_live_payload_exposes_the_sse_snapshot_field_set(tmp_path) -> None:
     assert {"running", "nodeRunning", "knowledgeGraphRunning", "chainSummaryRunning", "pipelineComplete", "workspaceUv"} == set(payload["runtime"])
 
 
-def test_send_rejects_failed_execution_before_starting_background_task(tmp_path, monkeypatch) -> None:
+def test_clear_logs_rejects_reset_while_node_task_is_active(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.server import create_app
+
+    WorkspaceStore(tmp_path).ensure_layout()
+    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("TS_HARNESS_DEBUG", "true")
+    app = create_app()
+    orchestrator = app.state.orchestrator
+
+    async def request() -> httpx.Response:
+        release = asyncio.Event()
+
+        async def node_turn() -> None:
+            await release.wait()
+
+        orchestrator._active_node_task = asyncio.create_task(node_turn())
+        try:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                return await client.post("/api/debug/clear-logs", json={"scope": "chat", "confirmReset": True})
+        finally:
+            release.set()
+            await orchestrator._active_node_task
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 409
+    assert "run is active" in response.json()["detail"]
+
+
+def test_knowledge_graph_build_rejected_when_variant_disables_it(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.server import create_app
+
+    WorkspaceStore(tmp_path).ensure_layout()
+    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("TS_HARNESS_VARIANT", "NOD-FQA-KTL-CXR-SUB-ADA")
+    app = create_app()
+
+    response = _post(app, "/api/knowledge-graph/build", {"trigger": "manual"})
+
+    assert response.status_code == 400
+    assert "disabled by ablation variant" in response.json()["detail"]
+    assert app.state.knowledge_graph_task is None
+
+
+def test_send_after_failed_execution_starts_fresh_attempt(tmp_path, monkeypatch) -> None:
     from harnessing_ts.server import create_app
 
     WorkspaceStore(tmp_path).ensure_layout()
@@ -136,16 +181,36 @@ def test_send_rejects_failed_execution_before_starting_background_task(tmp_path,
     app = create_app()
     orchestrator = app.state.orchestrator
 
-    async def fail_execution() -> None:
+    class Runner:
+        session_id = "session-1"
+
+        async def send_with_user_echo(self, _text: str, context_text: str | None = None) -> list[dict]:
+            return []
+
+    orchestrator.main_runner = Runner()  # type: ignore[assignment]
+    orchestrator._main_runner_knowledge_graph_ready = False
+    orchestrator._main_runner_reference_feature_ready = False
+
+    async def fail_previous_turn() -> None:
         await orchestrator.execution.begin("main", "session-1")
         await orchestrator.execution.fail(RuntimeError("broken checkpoint"))
 
-    asyncio.run(fail_execution())
-    response = _post(app, "/api/send", {"text": "continue"})
+    asyncio.run(fail_previous_turn())
+    assert orchestrator.execution.snapshot()["phase"] == "failed"
 
-    assert response.status_code == 409
-    assert "execution is failed" in response.json()["detail"]
-    assert app.state.run_task is None
+    async def send_and_settle():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post("/api/send", json={"text": "try again"})
+            if app.state.run_task is not None:
+                await app.state.run_task
+            return response
+
+    response = asyncio.run(send_and_settle())
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    assert orchestrator.execution.snapshot()["phase"] == "ready"
 
 
 def test_pause_background_failure_publishes_failed_snapshot(tmp_path) -> None:

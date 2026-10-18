@@ -1104,28 +1104,28 @@ class HarnessOrchestrator:
 
     async def build_knowledge_graph(self, trigger: str = "manual", uploaded_paths: list[str] | None = None) -> dict[str, Any]:
         self._ensure_initialized()
-        if not self.variant.knowledge_graph:
-            raise RuntimeError(f"Knowledge graph building is disabled by ablation variant {self.variant.id}.")
         setattr(self, "_knowledge_graph_pause_requested", False)
-        if trigger == "rebuild":
-            self.store.clear_knowledge_graph()
-        status = self.store.write_knowledge_graph_build_status({
-            "running": True,
-            "status": "running",
-            "startedAt": now_iso(),
-            "finishedAt": None,
-            "trigger": trigger,
-            "message": "Knowledge graph build is running.",
-            "uploadedPaths": uploaded_paths or [],
-        })
-        self.store.append_timeline({
-            "type": "knowledge_graph_build_started",
-            "timestamp": status["startedAt"],
-            "message": trigger,
-            "payload": {"uploadedPaths": uploaded_paths or []},
-        })
-        self._emit_knowledge_graph_snapshot()
         try:
+            if not self.variant.knowledge_graph:
+                raise RuntimeError(f"Knowledge graph building is disabled by ablation variant {self.variant.id}.")
+            if trigger == "rebuild":
+                self.store.clear_knowledge_graph()
+            status = self.store.write_knowledge_graph_build_status({
+                "running": True,
+                "status": "running",
+                "startedAt": now_iso(),
+                "finishedAt": None,
+                "trigger": trigger,
+                "message": "Knowledge graph build is running.",
+                "uploadedPaths": uploaded_paths or [],
+            })
+            self.store.append_timeline({
+                "type": "knowledge_graph_build_started",
+                "timestamp": status["startedAt"],
+                "message": trigger,
+                "payload": {"uploadedPaths": uploaded_paths or []},
+            })
+            self._emit_knowledge_graph_snapshot()
             await build_knowledge_graph(
                 workspace_path=self.workspace_path,
                 store=self.store,
@@ -1198,21 +1198,21 @@ class HarnessOrchestrator:
     async def build_chain_summary(self, trigger: str = "manual") -> dict[str, Any]:
         self._ensure_initialized()
         setattr(self, "_chain_summary_pause_requested", False)
-        clear_file(self.store.chain_summary_log_path)
-        status = self.store.write_chain_summary_status({
-            "running": True,
-            "status": "running",
-            "startedAt": now_iso(),
-            "finishedAt": None,
-            "trigger": trigger,
-            "message": "Chain builder is running.",
-        })
-        self.store.append_timeline({
-            "type": "chain_summary_build_started",
-            "timestamp": status["startedAt"],
-            "message": trigger,
-        })
         try:
+            clear_file(self.store.chain_summary_log_path)
+            status = self.store.write_chain_summary_status({
+                "running": True,
+                "status": "running",
+                "startedAt": now_iso(),
+                "finishedAt": None,
+                "trigger": trigger,
+                "message": "Chain builder is running.",
+            })
+            self.store.append_timeline({
+                "type": "chain_summary_build_started",
+                "timestamp": status["startedAt"],
+                "message": trigger,
+            })
             summary = await build_chain_summary(
                 workspace_path=self.workspace_path,
                 store=self.store,
@@ -1497,7 +1497,7 @@ class HarnessOrchestrator:
             return
         if latest.get("status") in {"paused", "failed", "exited"}:
             return
-        await self._remind_or_fail_unfinished_node(node, latest)
+        await self._remind_or_fail_unfinished_node(node, latest, auto_advance=auto_advance)
 
     async def _fail_node_after_sdk_crash(
         self,
@@ -1573,11 +1573,19 @@ class HarnessOrchestrator:
         self,
         node: NodeSession,
         latest: NodeSession,
+        *,
+        auto_advance: bool = True,
     ) -> None:
         """Handle a node that returned without calling ``finish_node``
         and without an SDK crash. Re-prompt the same node session once
         with a reminder, then mark as ``failed`` if the reminder turn
-        also ends without a terminal status."""
+        also ends without a terminal status.
+
+        ``auto_advance`` is inherited from the caller: inside the
+        background node task it is False, because entering the next node
+        here would replace ``active_node_runner`` and fail against the
+        still-running task. The task's own post-turn flow advances
+        instead. A foreground (non-background) entry keeps True."""
         reminders_used = int(latest.get("protocolReminders", 0) or 0)
         if reminders_used >= self._NODE_PROTOCOL_MAX_REMINDERS:
             summary = (
@@ -1631,7 +1639,7 @@ class HarnessOrchestrator:
             # No live runner to re-prompt (dry-run mode or the runner
             # was already torn down). Treat the reminder as the final
             # turn and mark as failed so the lock is released.
-            await self._handle_node_runner_return(latest)
+            await self._handle_node_runner_return(latest, auto_advance=auto_advance)
             return
         try:
             await self._send_execution_turn(
@@ -1643,7 +1651,7 @@ class HarnessOrchestrator:
         except BaseException as exc:
             await self._handle_node_runner_return(latest, sdk_error=exc)
             return
-        await self._handle_node_runner_return(latest)
+        await self._handle_node_runner_return(latest, auto_advance=auto_advance)
 
     async def _close_runner(self, runner: SdkRunner, *, event_type: str, message: str, payload: dict[str, Any]) -> None:
         """Interrupt and close a DSH runner, then record the outcome in the

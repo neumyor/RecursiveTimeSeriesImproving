@@ -408,3 +408,98 @@ def test_recover_interrupted_execution_rejects_running_node_without_execution_st
     assert orchestrator.store.read_node_session(
         orchestrator.get_state()["activeNodeSessionId"]
     )["status"] == "running"
+
+
+class _ReminderFinishingRunner:
+    """Node runner that returns without ``finish_node`` on its first turn
+    and finishes the node from inside the reminder turn, the way a real
+    agent would. Runners for later nodes block until released and then
+    fail like a transport error so the test can settle them."""
+
+    def __init__(self, orchestrator: HarnessOrchestrator, node_id: str, *, unfinished_first_turn: bool) -> None:
+        self.orchestrator = orchestrator
+        self.node_id = node_id
+        self.unfinished_first_turn = unfinished_first_turn
+        self.release = asyncio.Event()
+        self.is_running = True
+        self.user_messages: list[str] = []
+        self._turn = 0
+
+    async def send_with_user_echo(self, text: str, context_text: str | None = None) -> list[dict]:
+        self.user_messages.append(text)
+        turn = self._turn
+        self._turn += 1
+        if self.unfinished_first_turn and turn == 0:
+            return []
+        if text.startswith("[Harness reminder]"):
+            await self.orchestrator.finish_node({
+                "success": True,
+                "summary": "finished on the reminder turn",
+                "goalMet": False,
+                "nextNode": "iterative-solving",
+                "outputPaths": ["user/problem-contract.md", "user/data-spec.md"],
+            })
+            return []
+        await self.release.wait()
+        raise RuntimeError("node transport died")
+
+    async def interrupt(self) -> None:
+        self.is_running = False
+        self.release.set()
+
+    async def close(self) -> None:
+        self.is_running = False
+        self.release.set()
+
+
+def test_reminder_turn_completion_does_not_auto_advance_inside_node_task(tmp_path, make_orchestrator) -> None:
+    """When the node finishes during the reminder turn, the background
+    task must not enter the next node from inside itself: that would
+    replace the active runner and fail against the still-running task,
+    leaving an orphaned running node. The next entry must happen exactly
+    once, after the task's own turn flow."""
+    async def scenario() -> None:
+        orchestrator = make_orchestrator(tmp_path, mode="auto", dry_run=False)
+        runners: list[_ReminderFinishingRunner] = []
+
+        def spawn(node: dict) -> None:
+            runner = _ReminderFinishingRunner(orchestrator, node["id"], unfinished_first_turn=not runners)
+            runners.append(runner)
+            orchestrator.active_node_runner = runner  # type: ignore[assignment]
+
+        orchestrator._spawn_node_runner = spawn  # type: ignore[method-assign]
+
+        await orchestrator.enter_node({
+            "nodeType": "problem-contract",
+            "rationale": "start",
+            "inputSummary": "task",
+        }, background=True)
+        node_task = orchestrator.active_node_task()
+        assert node_task is not None
+        await node_task
+
+        # The first task ended cleanly (no leaked "another node task is
+        # still active" error) and the successor was entered exactly once.
+        assert node_task.exception() is None
+        sessions = orchestrator.store.list_node_sessions()
+        assert [s["nodeType"] for s in sessions] == ["problem-contract", "iterative-solving"]
+        assert sessions[0]["status"] == "completed"
+        assert sessions[1]["status"] == "running"
+        auto_next = [e for e in orchestrator.store.read_timeline() if e["type"] == "auto_next"]
+        assert len(auto_next) == 1
+        assert auto_next[0]["payload"] == {"nextNode": "iterative-solving"}
+        # The reminder turn was issued and the successor is driven by its
+        # own task, not orphaned.
+        assert any(m.startswith("[Harness reminder]") for m in runners[0].user_messages)
+        assert orchestrator.is_active_node_task_running()
+        assert orchestrator.get_state()["activeNode"] == "iterative-solving"
+
+        # Settle the successor so the test leaves no pending work.
+        runners[1].release.set()
+        successor_task = orchestrator.active_node_task()
+        assert successor_task is not None
+        await successor_task
+        assert orchestrator.get_state()["activeNode"] is None
+        assert orchestrator.store.read_node_session(sessions[1]["id"])["status"] == "failed"
+
+    asyncio.run(scenario())
