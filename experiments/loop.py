@@ -27,9 +27,9 @@ Design notes from the M2 review (all load-bearing):
 - the ledger tolerates a torn last line (a kill mid-append must not kill the
   resume), records the failure reason of every round, and never emits bare
   NaN (strict-JSON readers would choke);
-- the acceptance transaction is idempotent under crashes: certification j is
-  derived from the certification log (append-only), and resume reconciles
-  models/incumbent against the ledger;
+- the acceptance transaction is ledger-first: heldout records follow the
+  rounds.jsonl line, and resume drops heldout records whose round never
+  reached the ledger; models/incumbent is reconciled against the ledger;
 - the placebo permutation is recomputed per round from (seed, row count) —
   the card's row count changes with the incumbent's period peaks;
 - accepted candidates are determinism-checked (subprocess vs in-process
@@ -262,16 +262,20 @@ class HeadroomLoop:
 
     def prepare(self) -> None:
         """Create the workspace, the m0 incumbent, and the heldout records."""
-        fresh = not self.rounds_path.is_file()
-        if fresh:
+        pointer = self.run_dir / "heldout.json"
+        if pointer.is_file():
+            # One run dir maps to exactly one heldout dir: the persisted
+            # pointer, not the ledger's presence, decides which side a
+            # (re)start writes to — a crash before the first ledger line
+            # must not fork a second heldout directory.
+            self.heldout = Path(json.loads(pointer.read_text(encoding="utf-8"))["path"])
+        else:
             # A random heldout subdir: re-running a cell must never append to
             # a previous run's certification log (that would corrupt the
             # post-hoc stop-point analysis).  The path is persisted so a
             # resume keeps writing to the same place.
             self.heldout = HELDOUT_ROOT / f"{uuid4().hex[:8]}-{self.run_dir.name}-{self.arm}-{self.seed}"
-            _write_json(self.run_dir / "heldout.json", {"path": str(self.heldout)})
-        else:
-            self.heldout = Path(json.loads((self.run_dir / "heldout.json").read_text(encoding="utf-8"))["path"])
+            _write_json(pointer, {"path": str(self.heldout)})
 
         if self.real_csv is not None:
             realdata = _load_module("rhg_realdata", _REPO_ROOT / "experiments" / "realdata.py")
@@ -317,8 +321,11 @@ class HeadroomLoop:
         if not incumbent.is_file():
             incumbent.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_REPO_ROOT / "experiments" / "templates" / self.m0_template, incumbent)
-            # The template NAME (not a digest) is the m0 provenance the
-            # post-hoc replay needs; it lives where the agent cannot edit it.
+        # The template NAME is the m0 provenance the post-hoc replay needs;
+        # it lives where the agent cannot edit it.  Written whenever missing:
+        # a crash after the incumbent copy but before this record must not
+        # leave the run unreplayable.
+        if not (self.heldout / "incumbent-reference.json").is_file():
             _write_json(self.heldout / "incumbent-reference.json", {"template": self.m0_template})
 
     # ------------------------------------------------------- incumbent state
@@ -714,6 +721,7 @@ class HeadroomLoop:
 
     def load_state(self) -> LoopState:
         rounds = _read_jsonl(self.rounds_path)
+        self._reconcile_heldout(rounds)
         accepted = [r for r in rounds if r.get("accepted")]
         incumbent_id = str(accepted[-1]["candidateId"]) if accepted else "m0"
         history = [
@@ -740,6 +748,28 @@ class HeadroomLoop:
             self._refresh_incumbent_segments()
             self._segments_incumbent_id = incumbent_id
         return LoopState(round_index=len(rounds) + 1, incumbent_id=incumbent_id, history=history)
+
+    def _reconcile_heldout(self, rounds: list[dict[str, Any]]) -> None:
+        """Drop heldout acceptances/certifications whose round has no ledger
+        line.
+
+        Heldout appends follow the rounds.jsonl line, so a record naming a
+        round the ledger never reached is debris from a crash between the
+        two writes; dropping it lets that round run again and append its own
+        records exactly once.
+        """
+        assert self.heldout is not None
+        done = {int(row["round"]) for row in rounds}
+        for name in ("acceptances.jsonl", "certification.jsonl"):
+            path = self.heldout / name
+            if not path.is_file():
+                continue
+            lines = _read_jsonl(path)
+            kept = [row for row in lines if int(row["round"]) in done]
+            if len(kept) != len(lines):
+                path.write_text(
+                    "".join(json.dumps(row) + "\n" for row in kept), encoding="utf-8"
+                )
 
     def _certify_incumbent(self, state: LoopState, incumbent_id: str) -> None:
         """Append one certification of the CURRENT incumbent (heldout only).
@@ -1138,10 +1168,15 @@ class HeadroomLoop:
             },
         )
         if accepted:
+            # Heldout records follow the ledger line: a crash between the
+            # two appends leaves the round re-runnable (the next load_state
+            # drops the heldout record with no ledger counterpart), never an
+            # orphan certification a completed round can never match.
             _append_jsonl(
                 self.heldout / "acceptances.jsonl",
                 {"round": state.round_index, "candidateId": candidate_id},
             )
+            self._certify_incumbent(state, candidate_id)
 
     def _collect_candidate(
         self, state: LoopState, round_seen: set[str]
@@ -1202,7 +1237,8 @@ class HeadroomLoop:
         source: Path,
         proposal: dict[str, Any],
     ) -> tuple[str, float | None, float | None, bool, str | None, dict[str, float]]:
-        """Subprocess evaluation + DM acceptance + (on accept) certification."""
+        """Subprocess evaluation + DM acceptance (the incumbent is replaced on
+        accept; the heldout certification follows the ledger line in _round)."""
         assert self.seg_diag is not None and self.train is not None and self.heldout is not None
         assert self.values is not None and self.cert_values is not None
         import tempfile
@@ -1287,7 +1323,6 @@ class HeadroomLoop:
         shutil.copyfile(source, self.ws / "models" / "incumbent" / "model.py")
         self._refresh_incumbent_segments(adapter=adapter, pred_diag=pred_inproc)
         self._segments_incumbent_id = candidate_id
-        self._certify_incumbent(state, candidate_id)
         return "evaluated", diag_mse, dm_p, True, None, candidate_seconds
 
 

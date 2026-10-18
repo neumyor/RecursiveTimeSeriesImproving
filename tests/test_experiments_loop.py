@@ -183,6 +183,87 @@ def test_loop_resume_continues_from_ledger(tmp_path: Path) -> None:
     assert len(_rounds(run_dir)) == 3
 
 
+def test_prepare_reuses_one_heldout_dir_across_a_crash(tmp_path: Path) -> None:
+    """A crash in the first round (ledger empty, incumbent reference not yet
+    written) must not fork a second heldout directory on the retry: one run
+    dir maps to exactly one heldout dir, and the missing reference lands."""
+    loop_module = _load_loop()
+    common = dict(
+        run_dir=tmp_path / "run-crash",
+        task_name="lgssm_xchannel",
+        arm="fixed",
+        seed=0,
+        cfg=_small_cfg(loop_module, budget=1),
+        m0_template="m0.py",
+        sizes=SMALL_SIZES,
+    )
+    first = loop_module.HeadroomLoop(**common)
+    first.prepare()
+    heldout = first.heldout
+    # The crash state: the pointer exists, the ledger does not, and the
+    # incumbent reference never landed.
+    assert not (first.rounds_path).is_file()
+    (heldout / "incumbent-reference.json").unlink()
+    second = loop_module.HeadroomLoop(**common)
+    second.prepare()
+    assert second.heldout == heldout
+    reference = json.loads((heldout / "incumbent-reference.json").read_text(encoding="utf-8"))
+    assert reference == {"template": "m0.py"}
+
+
+def test_resume_drops_heldout_records_without_a_ledger_line(tmp_path: Path) -> None:
+    """Heldout acceptances/certifications follow the rounds.jsonl line; a
+    crash between the two appends leaves records whose round has no ledger
+    counterpart, and the resumed run drops them and completes the round
+    exactly once."""
+    loop_module = _load_loop()
+    run_dir = tmp_path / "run-orphan"
+    factory = _make_factory([_better_candidate])
+    common = dict(
+        run_dir=run_dir,
+        task_name="lgssm_xchannel",
+        arm="fixed",
+        seed=0,
+        cfg=_small_cfg(loop_module, budget=1),
+        m0_template="m0.py",
+        sizes=SMALL_SIZES,
+        runner_factory=factory,
+    )
+    first = loop_module.HeadroomLoop(**common)
+    first.prepare()
+    heldout = first.heldout
+    # The crash debris: round-1 heldout records for a candidate whose ledger
+    # line was never appended.
+    (heldout / "acceptances.jsonl").write_text(
+        json.dumps({"round": 1, "candidateId": "c-ghost"}) + "\n", encoding="utf-8"
+    )
+    (heldout / "certification.jsonl").write_text(
+        json.dumps(
+            {"round": 1, "incumbentId": "c-ghost", "saturated": False, "level": 0.95, "failures": []}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    asyncio.run(loop_module.HeadroomLoop(**common).run())
+    rounds = _rounds(run_dir)
+    assert len(rounds) == 1  # the round ran exactly once
+    certs = [
+        json.loads(line)
+        for line in (heldout / "certification.jsonl").read_text().splitlines()
+    ]
+    accs = [
+        json.loads(line)
+        for line in (heldout / "acceptances.jsonl").read_text().splitlines()
+    ]
+    n_accepted = sum(1 for row in rounds if row["accepted"])
+    assert all(row["incumbentId"] != "c-ghost" for row in certs)
+    assert all(row["candidateId"] != "c-ghost" for row in accs)
+    # The initial m0 certification survives; each acceptance adds exactly one.
+    assert certs[0]["incumbentId"] == "m0"
+    assert len(certs) == n_accepted + 1
+    assert len(accs) == n_accepted
+
+
 def test_loop_repair_round_recovers_within_the_round(tmp_path: Path) -> None:
     """A round whose first send writes nothing recovers via a repair send.
 
