@@ -169,6 +169,7 @@ import ast
 import importlib.util
 import json
 import math
+import shutil
 import sys
 import tempfile
 import traceback
@@ -519,16 +520,16 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
         raise ValueError(f"probe source for {source_path.parent.name!r} does not exist")
     display_id = source_path.parent.name
 
-    def _scrub(text: str) -> str:
-        """Neutralize the frozen source's location: the probe runs from the
-        heldout side, and no message from there may carry that path."""
-        for form in (str(source_path), str(source_path.resolve())):
-            text = text.replace(form, f"<probe-source>/{source_path.name}")
-        return text
-
     with tempfile.TemporaryDirectory(prefix="headroom-probe-") as run_dir:
+        # The probe runs from a copy inside the temp dir: the source is
+        # agent-written and can echo its own __file__ (or any substring of
+        # it) into output or exceptions, so the running path must never be
+        # the heldout location.
+        run_source = Path(run_dir) / display_id / source_path.name
+        run_source.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, run_source)
         npz_in, json_out = Path(run_dir) / "probe-in.npz", Path(run_dir) / "probe-out.json"
-        _write_artifacts_npz(npz_in, artifacts, source_path)
+        _write_artifacts_npz(npz_in, artifacts, run_source)
         command = [sys.executable, "-c", _WORKER_BOOTSTRAP, str(_PROBES_SOURCE), str(npz_in), str(json_out)]
         code, tail = cand.run_isolated(
             command,
@@ -538,11 +539,11 @@ def _run_probe_subprocess(source_path: Path, artifacts: dict[str, Any], timeout:
         )
         if code == _WORKER_CONTRACT_EXIT:
             raise ProbeContractViolation(
-                f"probe {display_id!r} broke the probe contract inside the worker:\n{_scrub(tail)}"
+                f"probe {display_id!r} broke the probe contract inside the worker:\n{tail}"
             )
         if code != 0:
             raise ProbeCrash(
-                f"probe {display_id!r} crashed in the worker (exit code {code}):\n{_scrub(tail)}"
+                f"probe {display_id!r} crashed in the worker (exit code {code}):\n{tail}"
             )
         try:
             wrapper = json.loads(json_out.read_text(encoding="utf-8"))

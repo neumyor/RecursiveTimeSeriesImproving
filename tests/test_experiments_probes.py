@@ -585,29 +585,50 @@ def test_check_source_rejects_import_before_any_subprocess(
     assert "import of 'os'" in result["reason"]
 
 
-def test_probe_errors_never_carry_the_frozen_source_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A crashing probe's traceback names its source file; the message that
-    reaches the agent's feedback must show the neutral placeholder instead of
-    the heldout location."""
-    frozen = tmp_path / "probe-sources" / "p-path" / "probe.py"
-    frozen.parent.mkdir(parents=True)
-    frozen.write_text(GOOD_PROBE_SOURCE, encoding="utf-8")
+ECHO_SOURCE = '''import os
 
+
+def create_probe():
+    return EchoProbe()
+
+
+class EchoProbe:
+    def __init__(self):
+        self.probe_id = "echo-path"
+
+    def run(self, artifacts):
+        return {"file": __file__, "dir": os.path.dirname(__file__)}
+'''
+
+
+def test_probes_run_from_a_temp_copy_so_no_heldout_path_escapes(tmp_path: Path) -> None:
+    """An agent-written probe can echo its own __file__ (or raise it); the
+    running path is a temp copy, so neither the output rendered into the
+    agent's feedback nor a crash message can carry the heldout location."""
+    frozen = tmp_path / "probe-sources" / "echo-path" / "probe.py"
+    frozen.parent.mkdir(parents=True)
+    frozen.write_text(ECHO_SOURCE, encoding="utf-8")
     artifacts = registry_artifacts(
         "random_walk", seed=3, sizes={"train": 1500, "diag": 600, "cert": 40, "test": 40}
     )
 
-    def fake_run_isolated(command: Any, cwd: Any, timeout: Any, timeout_error: Any) -> Any:
-        return 1, f'Traceback (most recent call last):\n  File "{frozen}", line 5\nboom'
+    wrapper = P.run_probe(frozen, artifacts)
+    for value in wrapper.values():
+        assert str(tmp_path) not in value
+        assert "headroom-probe-" in value
 
-    monkeypatch.setattr(P.cand, "run_isolated", fake_run_isolated)
+    crash = tmp_path / "probe-sources" / "echo-crash" / "probe.py"
+    crash.parent.mkdir(parents=True)
+    crash.write_text(
+        ECHO_SOURCE.replace('return {"file": __file__, "dir": os.path.dirname(__file__)}',
+                             'raise RuntimeError("my dir is " + os.path.dirname(__file__))')
+        .replace('"echo-path"', '"echo-crash"'),
+        encoding="utf-8",
+    )
     with pytest.raises(P.ProbeCrash) as excinfo:
-        P._run_probe_subprocess(frozen, artifacts, 1.0)
-    message = str(excinfo.value)
-    assert str(frozen) not in message
-    assert "<probe-source>/probe.py" in message
+        P.run_probe(crash, artifacts)
+    assert str(tmp_path) not in str(excinfo.value)
+    assert "headroom-probe-" in str(excinfo.value)
 
 
 def test_run_probe_binds_probe_id_to_the_directory_name(tmp_path: Path) -> None:
