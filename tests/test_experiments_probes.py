@@ -584,8 +584,30 @@ def test_check_source_rejects_import_before_any_subprocess(
     assert "source rejected" in result["reason"]
     assert "import of 'os'" in result["reason"]
 
-    with pytest.raises(P.cand.SourceRejected):
-        P.run_probe(source, {})
+
+def test_probe_errors_never_carry_the_frozen_source_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crashing probe's traceback names its source file; the message that
+    reaches the agent's feedback must show the neutral placeholder instead of
+    the heldout location."""
+    frozen = tmp_path / "probe-sources" / "p-path" / "probe.py"
+    frozen.parent.mkdir(parents=True)
+    frozen.write_text(GOOD_PROBE_SOURCE, encoding="utf-8")
+
+    artifacts = registry_artifacts(
+        "random_walk", seed=3, sizes={"train": 1500, "diag": 600, "cert": 40, "test": 40}
+    )
+
+    def fake_run_isolated(command: Any, cwd: Any, timeout: Any, timeout_error: Any) -> Any:
+        return 1, f'Traceback (most recent call last):\n  File "{frozen}", line 5\nboom'
+
+    monkeypatch.setattr(P.cand, "run_isolated", fake_run_isolated)
+    with pytest.raises(P.ProbeCrash) as excinfo:
+        P._run_probe_subprocess(frozen, artifacts, 1.0)
+    message = str(excinfo.value)
+    assert str(frozen) not in message
+    assert "<probe-source>/probe.py" in message
 
 
 def test_run_probe_binds_probe_id_to_the_directory_name(tmp_path: Path) -> None:

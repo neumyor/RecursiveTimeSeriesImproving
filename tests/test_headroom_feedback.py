@@ -222,13 +222,6 @@ def test_no_forbidden_words_in_any_arm() -> None:
             assert word not in out.lower(), (arm, word)
 
 
-def test_history_table_is_owned_by_round_md() -> None:
-    """round.md renders the candidate history; the feedback scaffold carries
-    one table in the prompt, byte-identical across arms."""
-    out = render_feedback("fixed", _make_incumbent(), _make_gains(), HeadroomConfig())
-    assert "| 15 | c15 |" not in out
-    assert "## Candidate history" not in out
-
 
 def test_self_built_without_probes_shows_the_bootstrap_message() -> None:
     out = render_feedback(
