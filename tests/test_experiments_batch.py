@@ -346,3 +346,16 @@ def test_systemic_failure_cancels_queued_cells(tmp_path: Path) -> None:
     # sixth failure landed), and the rest were cancelled while queued
     assert 6 <= len(started) <= 7
     assert "hmm-scalar-3" not in started
+
+
+def test_main_v3_spec_loads_and_enumerates_the_same_matrix() -> None:
+    """The v3 spec passes load_spec (G0 artifact gate included) and freezes the
+    same 48-cell first-sweep matrix as v2."""
+    batch = _load_batch()
+    v2 = batch.load_spec(REPO_ROOT / "experiments" / "specs" / "main-v2.json")
+    v3 = batch.load_spec(REPO_ROOT / "experiments" / "specs" / "main-v3.json")
+    cells = batch.enumerate_cells(v3)
+    assert len(cells) == 48
+    assert [cell.cell_id for cell in cells] == [
+        cell.cell_id for cell in batch.enumerate_cells(v2)
+    ]

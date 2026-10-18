@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 2,
+  "registeredAt": "2026-10-18",
+  "name": "p2-main-v3",
+  "description": "Pre-registered main experiment after the 2026-10-16 author-directed revision (docs/residual-headroom-final-coding-plan.zh-CN.md §12): agent-built validated probes replace the bj arm, the incumbent is PatchTST-lite, and residual-signature evolution guidance runs in every arm. Supersedes main.json before any valid P2 run (the single v1 attempt was voided for account-balance reasons, not results). Frozen before any v2 run; changes after the first v2 run require a new spec version and disclosure in the paper. Revision 2026-10-16b (author-directed, before any v2 run): the alpha-spending ledger of the certification stop (uniform alpha/J_max across incumbent versions + Bonferroni amortization over the statistic family + the cumulative false-stop bound) is DELETED. The stop rule is now a fixed-level test: on every incumbent change, the incumbent is saturated iff every statistic's realized-gain 95% UCB < certifyEpsilon * its group MSE. False-stop behavior is measured empirically (G0-1/G0-5 re-run, g0-final-report-v3); the analytic guarantee (former Proposition 2) is not claimed. Revision 2026-10-16c (author-directed, before any v2 run): evolution guidance's mechanical attribution (residual signatures + disjoint-selection argmin) is replaced by an LLM diversity judge — a no-tool session reads the measurement archive (ledger + heldout posthoc cards) and returns one guarded suggestion. Deterministic: call timing (after each acceptance, after 3 rejected/failed rounds, once per new saturated certification), JSON contract, real-candidate-id guardrail, mechanical leak filter on the reason, one retry then greedy fallback. Judge sessions live in heldout (never under ws/), are arm-blind, and are logged per round (inspirationParent/judgeReason/judgeTokens/judgeFailed). Revision 2026-10-16d (author-directed, before any v2 run): a fourth arm, 'augmented', joins the matrix — the fixed defect card PLUS the agent's own validated probes each round, with a prompt instructing the agent to build probes beyond what the card already covers (no duplication). Matrix grows to 4 tasks x 4 arms x 8 seeds = 128 cells. Revision 2026-10-16e (author-directed, before any v2 run): the first sweep runs with 3 seeds (matrix 4 x 4 x 3 = 48 cells, 12 blocks per contrast) to validate the design; the 8-seed extension for the paper's final numbers is decided after these results. Revision 2026-10-18: correctness fixes to the measurement pipeline before any v3 run — the horizon-group MSE feedback sliced the wrong axis, greedy corrector selection lacked an intercept, probe output and history rendering are untruncated, and the judge streak trigger fires once per streak — protocol changes only; task list, arms, seeds and budget unchanged.",
+  "tasks": [
+    {
+      "name": "hmm_ar_switch",
+      "kind": "synthetic",
+      "rationale": "G0-6 qualified: nonlinear regime switching leaves 91% of the gap after one-shot m0+g"
+    },
+    {
+      "name": "nonlinear_xchannel",
+      "kind": "synthetic",
+      "rationale": "G0-6 qualified: tanh cross-channel coupling leaves 54%; linear realized-history correctors cannot cash it"
+    },
+    {
+      "name": "lgssm_xchannel",
+      "kind": "synthetic",
+      "rationale": "G0-6 qualified: cross-channel linear coupling at lags 3-7 leaves 46%"
+    },
+    {
+      "name": "real-ett",
+      "kind": "real",
+      "csv": "experiments/data/ETTh1.csv",
+      "rationale": "de-identified real task; endpoint is relative MSE (no oracle)"
+    }
+  ],
+  "arms": [
+    "scalar",
+    "fixed",
+    "self-built",
+    "augmented"
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "armSeedSharing": "the four arms share the same seed set within each task: (task, seed) is a natural block for the seed-blocked permutation test",
+  "budget": 25,
+  "sizes": {
+    "train": 20000,
+    "diag": 10000,
+    "cert": 30000,
+    "test": 52000,
+    "note": "synthetic tasks only; the real task splits ETTh1 by the config ratios (its 17,420 rows cannot carry these absolute sizes)"
+  },
+  "incumbent": {
+    "m0": "m0-patchtst (experiments/templates/m0_deep.py): patch 16/stride 8, d_model 64, 2 pre-norm blocks, channel-independent, per-window instance norm; fit ~4.5s on 20000x4 CPU (measured, <=240s calibration budget)",
+    "determinismGate": "in-process re-prediction vs subprocess at rtol 1e-5 (BLAS order), threads pinned; worker batch-invariance probe unchanged (atol 1e-9)"
+  },
+  "config": {
+    "inputLength": 96,
+    "horizon": 24,
+    "acceptanceAlpha": 0.05,
+    "certifyAlpha": 0.05,
+    "certifyEpsilon": 0.02,
+    "candidateTimeoutSeconds": 600,
+    "maxRepairs": 2,
+    "evolution": true
+  },
+  "selfBuiltArm": {
+    "probeContract": "probes/<id>/probe.py + probe_proposal.json; probe receives residuals {e, r, origins} and per-layer activations only (256 evenly spaced diag windows, activations[i] paired with r[meta.activationOrigins][i]); no windows/targets reach a probe",
+    "validation": "new probes are validated on planted-signal fixtures before touching real data: residual kind = 3 families x 2 pairs (period-24 sinusoid, cross-channel lag-3, nonlinear threshold coupling) each with 2 clean-only negative controls; activation kind = 1 family x 2 pairs (rank-1 residual-component injection at layer 2) with controls. Pass requires completing at least one family (per pair: declared direction vs the clean member and every control with >5% relative margin, plus a nonparametric gap-beyond-spread floor vs the control cluster), determinism (fresh-subprocess rerun, canonical JSON), and <=4KB output. A measured heavy-tailed near-zero probe retains ~1-7% per-validation false-pass under exchangeability (documented Monte Carlo floor); verdicts reach the agent in the next round's feedback Fixture families themselves come from a generative pipeline (revision 2026-10-16c): LLM proposals in a constrained DSL are admitted by four deterministic gates (witness probe completes the family under the current rule at seeds 0-4; unrelated registered witnesses cannot complete it — specificity; bounded amplitude perturbation of the clean marginals; bitwise seed reproducibility) into a frozen checked-in registry (experiments/specs/probe-fixture-registry.json, six families: four hand-designed seeds plus generated horizon-range and level-bias). The agent-facing probe contract is unchanged — the agent cannot tell who designed a family.",
+    "library": "validated probes re-run on every incumbent; outputs rendered (<=600 chars per probe, 8 newest rows); rejection never costs a candidate repair turn"
+  },
+  "evolutionGuidance": {
+    "mechanism": "measurement archive + LLM judge + deterministic guardrails: on ledger-rule triggers (each acceptance; 3 consecutive rejected/failed rounds; once per new saturated certification) a no-tool judge LLM reads the archive (ledger rows + heldout posthoc cards) and answers one JSON object {switch, parent, reason}",
+    "guardrails": "parent must be a real evaluated non-incumbent id or the verdict is discarded; the reason passes a mechanical leak filter (no digits, no forbidden vocabulary; candidate id and MSE are appended by the loop from the ledger); any failure (exception, empty turn, invalid verdict, filtered reason) costs one retry, then greedy continuation with judgeFailed recorded",
+    "isolation": "judge sessions and logs live inside the heldout directory (its prompt carries heldout cards; ws/ is agent-readable) — never under ws/; judge tokens counted from its own session tree into the ledger's judgeTokens field; the judge prompt carries no arm information and treatment is identical across arms; resume restores verdicts from the ledger and never re-asks",
+    "armFairness": "identical mechanism in every arm; the reason is leak-filtered prose, and the only figure in the switch paragraph is the inspiration candidate's ledger-visible diagnostic MSE",
+    "ablation": "cfg.evolution=false disables the judge entirely; a deterministic-rule (former signature mechanism) judge variant is a post-hoc ablation, not in this matrix"
+  },
+  "negativeControls": [
+    {
+      "name": "lgssm_multiperiod",
+      "role": "RQ1 certificate demonstration only (screened out of RQ2/RQ4: m0+g captures 80%)"
+    },
+    {
+      "name": "arfima",
+      "role": "boundary task: certificate reports ~0 at the resolution floor (screened: remaining gap unreachable within L=96)"
+    },
+    {
+      "name": "exchange-rate",
+      "role": "near-random-walk negative control: the fixed CARD must report no headroom (all LCB < 0, verified in calibrations/cal3); the certificate CONSERVATIVELY DECLINES to certify saturation at its 735-origin cert segment, consistent with the G0-1 power envelope (72% at 5k, 100% at 20k) — certification stopping claims are scoped to tasks with cert >= 2e4 usable origins (the synthetic tasks where RQ3 lives)"
+    }
+  ],
+  "primaryEndpoints": {
+    "E1": "normalized test optimality gap of the final incumbent after uniform m0+g postprocessing: ngap = gap(final)/gap(m0); real task: relative MSE ratio MSE(final)/MSE(m0) (both after postprocessing)",
+    "E2": "AUC of ngap over candidate index 1..budget (mean over the incumbent chain)",
+    "primaryContrast": "self-built vs fixed on E1 (the core question: can agent-built, fixture-validated tooling beat the backend-fixed diagnostic card)",
+    "secondaryContrasts": [
+      "fixed vs scalar",
+      "self-built vs scalar",
+      "augmented vs self-built (isolates the card on top of the agent's probes)",
+      "augmented vs fixed (isolates the agent's probes on top of the card)"
+    ],
+    "contrastDisclosure": "self-built vs fixed bundles two differences by design: WHO builds the diagnostic (agent vs backend) and WHAT the diagnostics can read (agent probes receive per-layer activations in addition to residuals; the fixed card is residual-only). The contrast measures the combined treatment 'agent-built, fixture-validated, activation-enabled tooling' vs 'backend residual card'; the activation channel alone is not isolated in this matrix (a post-hoc ablation with activations disabled can be run under cfg flags if reviewers ask)."
+  },
+  "statistics": {
+    "test": "seed-blocked sign-flip permutation within (task, seed) blocks across arms; two-sided, alpha=0.05; 10000 Monte Carlo permutations",
+    "center": "median over runs per (task, arm), IQR reported",
+    "preregistrationNote": "test re-fits each accepted incumbent on train offline and evaluates the test segment exactly once per incumbent; cert and oracle are never visible to the loop"
+  },
+  "diagnostics": {
+    "directedRate": "fraction of evaluated candidates whose proposal.targetAspect equals the parent incumbent's top posthoc card aspect",
+    "offTargetRate": "fraction of ACCEPTED candidates whose proposal.targetAspect differs from the parent's top card aspect",
+    "lcbGapCorrelation": "per run, correlation between accepted incumbents' cert-level total LCB and true test gap (null below 3 accepted)",
+    "stopPoint": "first saturated certification entry (round-0 included); post-stop gain reported as |ngap(stop)| - |ngap(final)|",
+    "switchCount": "per run, number of rounds with a non-null inspirationParent (diversity-switch firings)",
+    "postSwitchDiversity": "whether the first accepted candidate after a switch closes an aspect family disjoint from the pre-switch reference signature (null when no acceptance follows a switch)",
+    "probeAccounting": "per self-built run: probes written, validated, kept; per-round probe wall-clock and the fraction of rounds whose prompt carried >=1 probe output",
+    "audit": "out-of-workspace read paths in agent tool logs; diag-gain >> cert-gain candidates; per-arm token and wall-clock accounting",
+    "judgeAccounting": "per run: judge calls, judgeFailed count, judge token totals (judgeTokens per round), switchCount (rounds with non-null inspirationParent), postSwitchDiversity unchanged"
+  },
+  "acceptanceGateFromG1": {
+    "g1Pass": "unattended smoke of the NEW self-built prompt: failure rate < 30% over 10 candidates, >=1 probe validated and rendered, at least one judge call triggered with the guardrail path (retry/fallback or filtered verdict) exercised at least once, done.json within 24h",
+    "ifG1Fails": "prompt iteration is allowed until this spec's runs begin; after the first P2 v2 run, prompts are frozen"
+  },
+  "calibrationEvidence": {
+    "cal1-hac-bandwidth": "floor frozen at max_lag+H=359: coverage 1.0/1.0 at every tested floor (359/700/1200/2400), re-measured at the fixed 95% level (revision 2026-10-16b rerun)",
+    "cal2-etth1-acceptance": "null false-accept 0/20, planted detection 8/8 at the diag origins (DM acceptance is level-independent; re-confirmed in the 2026-10-16b rerun)",
+    "cal3-exchange-rate": "under the fixed 95% level the round-0 certificate still CONSERVATIVELY DECLINES to certify saturation on the near-random-walk control (saturated=false, 17 statistics above threshold) — the negative-control verdict survives the alpha-ledger removal; the power envelope remains the binding constraint at the small cert segment",
+    "g0-recalibration": "G0 must be measured under the fixed-level stop rule (revision 2026-10-16b): all seven gates with the linear incumbent (frozen as experiments/specs/g0-final-report-v3.json) and G0-3/4/6 with the deep incumbent (frozen as experiments/specs/g0-final-report-v3-deep.json) before any P2 v2 run; the earlier v1-rule artifacts (g0-final-report.json, g0-final-report-v2.json) are historical record"
+  }
+}

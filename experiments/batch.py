@@ -33,7 +33,7 @@ appended as attempts finish:
 
 Usage:
     uv run --extra research python experiments/batch.py \
-        --spec experiments/specs/main-v2.json [--workers 8] [--only task=...,arm=...]
+        --spec experiments/specs/main-v3.json [--workers 8] [--only task=...,arm=...]
 """
 
 import argparse
