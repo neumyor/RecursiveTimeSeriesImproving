@@ -244,7 +244,8 @@ def certification(
     """The certification statistic family: (certify report, gains, group MSEs).
 
     Gains are computed at the fixed level 1 - certify_alpha (a two-sided CI,
-    so each UCB is one-sided conservative); certify() enforces the match.
+    so each UCB is one-sided conservative); certify() derives the same level
+    from cfg.certify_alpha and records it in the report.
     """
     gains = all_gains(seg_diag, seg_cert, cfg, peaks, level=1.0 - cfg.certify_alpha)
     mse = mse_by_group(seg_cert, gains)

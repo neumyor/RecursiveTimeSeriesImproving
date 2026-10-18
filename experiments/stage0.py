@@ -12,9 +12,11 @@ writing experiments/runs/stage0-v2 (or stage0-v2-smoke with --smoke); the
 v1 report directory is never touched.  Confidence levels are wired end to
 end: card gains use correctors.card_level; certification gains use the fixed
 level 1 - certifyAlpha (a two-sided CI, so each UCB is one-sided
-conservative), and certify() enforces the match.  Thresholds follow final-plan §5; where a hard threshold would be
-flaky under binomial noise at the achievable cell count, the pass bound is
-the conservative binomial quantile and the exact numbers are reported.
+conservative), which certify() derives from cfg.certify_alpha and records
+in the report.  Thresholds follow final-plan §5; where a hard threshold
+would be flaky under binomial noise at the achievable cell count, the pass
+bound is the conservative binomial quantile and the exact numbers are
+reported.
 """
 
 from __future__ import annotations
