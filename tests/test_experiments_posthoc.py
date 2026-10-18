@@ -534,6 +534,36 @@ def _card(*aspects: tuple[str, float]) -> list[dict[str, Any]]:
     ]
 
 
+def test_run_tokens_include_the_judge_tokens(
+    synthetic_analysis: dict[str, Any], tmp_path: Path
+) -> None:
+    """The run's token totals cover both the candidate rounds and the judge
+    calls: a run's judgeTokens are part of its LLM cost."""
+    report = synthetic_analysis["report"]
+    src = synthetic_analysis["runs_dir"] / report["runs"][0]["run"]
+    dst = tmp_path / src.name
+    shutil.copytree(src, dst)
+    rounds = _rounds(dst)
+    judge = {"inputTokens": 7, "outputTokens": 1, "cacheReadTokens": 0, "reasoningTokens": 0}
+    for row in rounds:
+        row["judgeTokens"] = judge
+    (dst / "rounds.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rounds), encoding="utf-8"
+    )
+    patched = posthoc.analyze_runs(tmp_path, config=synthetic_analysis["config"])
+    assert [rec["run"] for rec in patched["runs"]] == [src.name]
+    rec = patched["runs"][0]
+    assert rec["error"] is None, rec["error"]
+    for key, expected_rounds in (
+        ("inputTokens", 7 * len(rounds)),
+        ("outputTokens", 1 * len(rounds)),
+        ("cacheReadTokens", 0),
+        ("reasoningTokens", 0),
+    ):
+        base = sum(int((row.get("tokens") or {}).get(key, 0)) for row in rounds)
+        assert rec["tokens"][key] == base + expected_rounds, key
+
+
 def test_evolution_accounting_post_switch_diversity() -> None:
     """postSwitchDiversity is the fraction of switches whose first acceptance
     closed a disjoint aspect family; null when no acceptance follows."""

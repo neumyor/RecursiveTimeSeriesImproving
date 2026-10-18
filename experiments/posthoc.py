@@ -508,6 +508,7 @@ def _analyze_run_inner(
     for row in rounds:
         for key in tokens:
             tokens[key] += int((row.get("tokens") or {}).get(key, 0))
+            tokens[key] += int((row.get("judgeTokens") or {}).get(key, 0))
         seconds += float(row.get("seconds", 0.0))
     types = {"numpy": 0, "torch": 0}
     for row in evaluated_rows:
