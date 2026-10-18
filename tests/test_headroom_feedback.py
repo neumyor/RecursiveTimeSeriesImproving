@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from harnessing_ts.headroom.config import HeadroomConfig
-from harnessing_ts.headroom.feedback import render_feedback
+from harnessing_ts.headroom.feedback import _PROBE_OUTPUT_CHARS, render_feedback
 
 HORIZON = 24
 ARMS = ("scalar", "fixed", "self-built", "augmented", "placebo")
@@ -285,7 +285,7 @@ def test_self_built_renders_probe_outputs_and_validation() -> None:
 
 
 def test_self_built_truncates_chatty_probe_output() -> None:
-    chatty = {"series": list(range(400))}
+    chatty = {"series": list(range(4_000))}
     out = render_feedback(
         "self-built",
         _make_incumbent(),
@@ -295,7 +295,59 @@ def test_self_built_truncates_chatty_probe_output() -> None:
         probe_rows=[{"probeId": "p", "measures": "m", "output": chatty}],
     )
     assert "… (truncated)" in out
-    assert len(out.split("| p | m | ", 1)[1].split(" |", 1)[0]) <= 620
+    assert len(out.split("| p | m | ", 1)[1].split(" |", 1)[0]) == _PROBE_OUTPUT_CHARS + len(
+        "… (truncated)"
+    )
+
+
+def test_probe_output_within_the_contract_cap_renders_uncut() -> None:
+    """One probe output is bounded at 4 KB by the probe contract; a
+    contract-legal output (pipes can double the rendered characters) must
+    reach the agent without truncation."""
+    payload = {"blob": "x" * 4_000 + "|" * 100}
+    out = render_feedback(
+        "self-built",
+        _make_incumbent(),
+        [],
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[{"probeId": "p", "measures": "m", "output": payload}],
+    )
+    assert "… (truncated)" not in out
+    assert out.count("\\|") == 100
+
+
+def test_probe_table_escapes_pipes_and_newlines() -> None:
+    """Probe ids, signals, outputs and validation details can contain pipes
+    and newlines; every table row must stay one markdown line."""
+    out = render_feedback(
+        "self-built",
+        _make_incumbent(),
+        [],
+        _make_history(1),
+        HeadroomConfig(),
+        probe_rows=[
+            {
+                "probeId": "p|1",
+                "measures": "mean|sd of e",
+                "output": {"note": "a|b", "lines": "one\ntwo"},
+            }
+        ],
+        validation_rows=[
+            {"probeId": "p|1", "ok": True, "detail": "validated\nwith pipe|detail"},
+            {"probeId": "p|2", "ok": False, "detail": "signalKey\nmissing"},
+        ],
+    )
+    assert "| p\\|1 | kept | validated with pipe\\|detail |" in out
+    assert "| p\\|2 | rejected | signalKey missing |" in out
+    assert "| p\\|1 | mean\\|sd of e |" in out
+    assert '"note": "a\\|b"' in out
+    # the raw characters never break a table row
+    for raw in ("| p|1 |", "mean|sd of e", "a|b", "with pipe|detail"):
+        assert raw not in out, raw
+    for line in out.splitlines():
+        if line.startswith("| p"):
+            assert line.count("|") >= 3 and line.endswith("|")
 
 
 def test_self_built_shows_the_newest_probe_rows() -> None:

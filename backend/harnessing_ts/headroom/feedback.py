@@ -23,10 +23,12 @@ import numpy as np
 from harnessing_ts.headroom.config import ARM_VALUES, HeadroomConfig
 from harnessing_ts.headroom.correctors import GainReport
 
-# Probe output rendering caps (the probe contract bounds one probe's output
-# at 4 KB; the table still caps the rendered fraction so a chatty probe
-# cannot crowd out the rest of the prompt).
-_PROBE_OUTPUT_CHARS = 600
+# Probe output rendering: the probe contract bounds one probe's serialized
+# output at 4 KB (experiments/probes.py OUTPUT_CAP_BYTES), and cell escaping
+# can at most double the rendered characters, so 8192 renders any
+# contract-legal output uncut.
+_PROBE_OUTPUT_CHARS = 8192
+# Rows shown, not content truncated: only the newest probes render.
 _PROBE_MAX_ROWS = 8
 
 
@@ -125,6 +127,11 @@ def _scaffold_groups(incumbent: dict[str, Any]) -> str:
 
 
 
+def _cell(text: Any) -> str:
+    """Markdown-table-safe cell text: pipes are escaped, newlines become spaces."""
+    return " ".join(str(text).replace("|", "\\|").splitlines())
+
+
 def _probe_table(
     probe_rows: list[dict[str, Any]], validation_rows: list[dict[str, Any]]
 ) -> str:
@@ -139,7 +146,9 @@ def _probe_table(
         lines = ["## Probe validation results", "", "| probe | verdict | detail |", "| --- | --- | --- |"]
         for row in validation_rows:
             verdict = "kept" if row.get("ok") else "rejected"
-            lines.append(f"| {row['probeId']} | {verdict} | {row.get('detail', '')} |")
+            lines.append(
+                f"| {_cell(row['probeId'])} | {verdict} | {_cell(row.get('detail', ''))} |"
+            )
         sections.append("\n".join(lines))
     lines = ["## Your probes on the incumbent", ""]
     if not probe_rows:
@@ -160,7 +169,7 @@ def _probe_table(
                 output = json.dumps(_probe_safe(row.get("output")), ensure_ascii=False)
                 if len(output) > _PROBE_OUTPUT_CHARS:
                     output = output[:_PROBE_OUTPUT_CHARS] + "… (truncated)"
-            lines.append(f"| {row['probeId']} | {row.get('measures', '')} | {output} |")
+            lines.append(f"| {_cell(row['probeId'])} | {_cell(row.get('measures', ''))} | {_cell(output)} |")
         if len(probe_rows) > _PROBE_MAX_ROWS:
             lines.append(f"({len(probe_rows) - _PROBE_MAX_ROWS} earlier probes not shown)")
     sections.append("\n".join(lines))
