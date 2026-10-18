@@ -399,8 +399,12 @@ def _check_candidate_id(candidate_id: str) -> None:
 
 
 def _tail(output: str) -> str:
-    """Last 16000 chars: a full traceback reaches the agent's repair turn uncut."""
-    return output[-_STDERR_TAIL_CHARS:] if output else "(no output captured)"
+    """The last _STDERR_TAIL_CHARS characters, with a marker when the head is cut."""
+    if not output:
+        return "(no output captured)"
+    if len(output) <= _STDERR_TAIL_CHARS:
+        return output
+    return "… (earlier output truncated)\n" + output[-_STDERR_TAIL_CHARS:]
 
 
 def _validate_result(npz_out: Path, npz_in: Path, cfg: HeadroomConfig, candidate_id: str) -> None:

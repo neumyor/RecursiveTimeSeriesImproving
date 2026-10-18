@@ -416,9 +416,8 @@ def test_stderr_tail_carries_a_long_traceback_in_full() -> None:
     ) + "\nRuntimeError: boom"
     assert len(traceback) > 1_200  # a shallow tail would cut the stack away
     assert _tail(traceback) == traceback
-    longer = "x" * (_STDERR_TAIL_CHARS + 10)
-    assert _tail(longer) == longer[-_STDERR_TAIL_CHARS:]
     assert _tail("") == "(no output captured)"
+
 
 
 def test_contract_violation_inside_worker(tmp_path: Path) -> None:
@@ -461,3 +460,16 @@ def test_incumbent_templates_pass_the_source_check() -> None:
     templates = Path(__file__).resolve().parents[1] / "experiments" / "templates"
     check_source((templates / "m0.py").read_text(encoding="utf-8"))
     check_source((templates / "m0_deep.py").read_text(encoding="utf-8"))
+
+
+def test_stderr_tail_marks_a_cut_head() -> None:
+    """A stderr longer than the cap renders its last cap characters with a
+    marker that the head was cut."""
+    from harnessing_ts.headroom.candidate import _STDERR_TAIL_CHARS, _tail
+
+    longer = "x" * (_STDERR_TAIL_CHARS + 10)
+    tail = _tail(longer)
+    assert tail.startswith("… (earlier output truncated)")
+    assert tail.endswith("x" * 100)
+    short = "Traceback (most recent call last): boom"
+    assert _tail(short) == short
