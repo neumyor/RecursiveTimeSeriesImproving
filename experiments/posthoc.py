@@ -866,10 +866,8 @@ def _contrast(records: list[dict[str, Any]], arm_a: str, arm_b: str) -> dict[str
 
 
 def _run_done(run_dir: Path) -> bool:
-    """True when the run finished: done.json in the run dir, or in the heldout
-    dir whose path run_dir/heldout.json records (where loop.py writes it)."""
-    if (run_dir / "done.json").is_file():
-        return True
+    """True when the run finished: done.json in the heldout directory whose
+    path run_dir/heldout.json records (where loop.py writes it)."""
     marker = run_dir / "heldout.json"
     if not marker.is_file():
         return False
