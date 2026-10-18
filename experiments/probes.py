@@ -61,9 +61,9 @@ fresh clean-only fixtures of the same family — an empirical null for the
 probe's signalKey.
 
 - residual kind, five families of two pairs each, in registry order:
-  period24, cross-lag3, nonlinear (the hand-designed "seed" families,
-  migrated verbatim) and horizon-range, level-bias (admitted through the
-  experiments/fixture_gen.py proposal pipeline).  A family is a frozen
+  period24, cross-lag3, nonlinear — the hand-designed "seed" families — and
+  horizon-range, level-bias, admitted through the experiments/fixture_gen.py
+  proposal pipeline.  A family is a frozen
   record in experiments/specs/probe-fixture-registry.json — its DSL
   parameters (constrained clean-process and injection constructors), its
   witness probe, its rationale and the gate evidence that admitted it; the
@@ -123,14 +123,13 @@ member AND every control, each with relative margin > 5%
 (|a-b| / max(|a|, |b|, tiny)), AND the planted value clears the whole clean
 cluster by more than the cluster's own width (gap > spread: planted -
 max(clean side) > max(clean side) - min(clean side), mirrored for "lower").
-The margin rule alone is what let a near-zero noise signalKey pass
-validation (planted 1.6e-5 vs clean 1.2e-5 is a 29% "margin"): the controls
-turn the clean side into an empirical null and gap > spread is the
-significance floor such noise cannot systematically clear — for
-exchangeable noise draws the pair rule holds only with ordering luck
-(Monte Carlo: 6% per pair for light-tailed noise, ~15% for heavy-tailed
-R^2-like noise, versus ~25% for the pre-review margin rule alone), and the
-two-pair family rule squares it again (~0.4-2% per family).  A FAMILY
+Margins alone do not reject near-zero noise (planted 1.6e-5 vs clean 1.2e-5
+is a 29% "margin"): the controls turn the clean side into an empirical null
+and gap > spread is the significance floor such noise cannot systematically
+clear — for exchangeable noise draws the pair rule holds only with ordering
+luck (Monte Carlo: 6% per pair for light-tailed noise, ~15% for
+heavy-tailed R^2-like noise, versus ~25% for the margin rule alone), and
+the two-pair family rule squares it again (~0.4-2% per family).  A FAMILY
 completes when every one of its pairs passes.
 A probe PASSES validation when at least one family completes (a periodicity
 probe completes period24, a lag probe cross-lag3, a nonlinear probe the
@@ -194,8 +193,8 @@ DEFAULT_TIMEOUT_SECONDS = 120.0
 # Validation rule: declared direction with relative margin above this floor.
 RELATIVE_MARGIN = 0.05
 # Per-pair negative controls: fresh clean-only fixtures of the same family.
-# 2 (not 1): the gap>spread significance floor needs a clean cluster wide
-# enough to estimate its own spread — with a single control the cluster is
+# Two of them: the gap>spread significance floor needs a clean cluster wide
+# enough to estimate its own spread; with a single control the cluster is
 # two points and near-zero noise passes far more often (false-pass analysis
 # in the module docstring).
 _N_CONTROLS = 2
@@ -232,9 +231,6 @@ def load_registry() -> dict[str, Any]:
         families = registry.get("families")
         if not isinstance(families, list) or not families:
             raise ValueError(f"fixture registry {_REGISTRY_PATH} carries no families")
-        ids = [entry["familyId"] for entry in families]
-        if len(ids) != len(set(ids)):
-            raise ValueError(f"fixture registry has duplicate family ids: {ids}")
         _REGISTRY = registry
     return _REGISTRY
 
@@ -362,7 +358,7 @@ def _jsonify_numpy(value: Any) -> float | int:
 def worker_main(argv: list[str]) -> int:
     """Subprocess entry, spawned via _WORKER_BOOTSTRAP; never run by hand."""
     if len(argv) != 2:
-        print("usage: probes.py worker <npz_in> <json_out>", file=sys.stderr)
+        print("usage: probes.py <npz_in> <json_out>", file=sys.stderr)
         return 1
     try:
         _worker_run(dict(np.load(Path(argv[0]), allow_pickle=False)), Path(argv[1]))
@@ -1060,7 +1056,7 @@ def _activation_net(
     One fixed net and one fixed injection direction per validation seed; the
     two pairs differ only in the data draw.  Built once per build_family_*
     call and shared by the pairs (and, in build_family_controls, by the
-    controls) — exactly the sharing the pre-registry code had.
+    controls).
     """
     import torch
 
@@ -1164,9 +1160,9 @@ def _seed_pool(
     in this pool; ``extra`` adds one not-yet-registered entry (a proposal the
     fixture_gen pipeline is gating) to the pool.  SeedSequence children are
     keyed by spawn position, so the first k children are identical whatever
-    the pool size: the seed families keep their historical 18 (residual)
-    resp. 8 (activation) slots and generated families append fresh ones
-    without disturbing a single historical fixture.
+    the pool size: the seed families occupy 18 (residual) resp. 8
+    (activation) slots and generated families append fresh ones without
+    disturbing the seed families' fixtures.
     """
     entries = list(_families_of_kind(kind))
     if extra is not None and not any(
@@ -1222,8 +1218,8 @@ def build_family_controls(entry: dict[str, Any], seed: int) -> list[list[dict[st
 
     Aligned with build_family_pairs' order (controls[i] belongs to pair i):
     fresh draws of the same clean generating process — the empirical null the
-    pair rule is judged against.  The activation kind keeps its historical
-    sharing: same fixed net and injection direction, clean variant, new data.
+    pair rule is judged against.  The activation kind shares the family's one
+    net and injection direction: clean variant, new data.
     """
     layout = entry["seedLayout"]
     children = _seed_pool(entry["kind"], seed, extra=entry)

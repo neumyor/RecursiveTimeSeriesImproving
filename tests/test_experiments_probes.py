@@ -6,10 +6,9 @@ probe_proposal.json, every run inside the killpg-protected subprocess.  The
 probe sources below are intentionally realistic agent output — numpy-only
 diagnostics under the candidate whitelist — so check_probe_source, the worker
 contract checks and the family/controls validation rule are all exercised
-end to end.  The trust-rule tests encode the M4 review requirements: honest
-probes complete exactly their own fixture family, a near-zero noise probe
-completes nothing (negative controls), and a linear probe cannot see the
-bilinear defect.
+end to end.  The trust-rule tests pin the contract: honest probes complete
+exactly their own fixture family, a near-zero noise probe completes nothing
+(negative controls), and a linear probe cannot see the bilinear defect.
 """
 
 from __future__ import annotations
@@ -143,7 +142,7 @@ class LinearLagProbe:
 '''
 
 # A NOISE probe: lag-13 cross-channel R^2 — nothing is planted at lag 13, so
-# the signalKey is pure near-zero noise (reviewer B's demonstrated hole).
+# the signalKey is pure near-zero noise.
 NOISE_PROBE_SOURCE = '''import numpy as np
 
 
@@ -445,9 +444,9 @@ def test_linear_probe_fails_the_nonlinear_family(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_negative_controls_kill_noise_probes(tmp_path: Path, seed: int) -> None:
-    """Reviewer B's demonstrated hole: a near-zero signalKey used to pass on
-    relative margins alone.  With the negative controls and the gap>spread
-    rule, pure noise must complete no family, at every seed."""
+    """A near-zero signalKey must complete no family: with the negative
+    controls and the gap>spread rule, pure noise cannot clear the clean
+    cluster's own width, at every seed."""
     source = write_probe(tmp_path, "noise-r2", NOISE_PROBE_SOURCE)
     result = P.validate_probe(source, make_proposal("noise-r2", "noiseR2"), "residual", seed=seed)
     assert result["ok"] is False
