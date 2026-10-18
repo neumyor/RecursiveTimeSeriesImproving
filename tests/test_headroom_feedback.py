@@ -94,18 +94,6 @@ def _make_incumbent() -> dict[str, Any]:
     }
 
 
-def _make_history(entries: int = 2) -> list[dict[str, Any]]:
-    return [
-        {
-            "round": i + 1,
-            "candidateId": f"c{i + 1:02d}",
-            "accepted": i % 2 == 0,
-            "diagMse": 0.4300 + 0.001 * i,
-        }
-        for i in range(entries)
-    ]
-
-
 def _card_rows(text: str) -> list[str]:
     """Data rows of the defect-card table, in rendered order."""
     section = text.split("## Remaining improvement by coordinate", 1)[1]
@@ -118,7 +106,7 @@ def _card_rows(text: str) -> list[str]:
 
 def test_scalar_is_exactly_the_scaffold() -> None:
     out = render_feedback(
-        "scalar", _make_incumbent(), _make_gains(), _make_history(2), HeadroomConfig()
+        "scalar", _make_incumbent(), _make_gains(), HeadroomConfig()
     )
     assert out.startswith("# Improvement round 3 — 17 candidates remaining\n\n")
     assert "Incumbent diagnostic MSE: 0.4123" in out
@@ -133,16 +121,15 @@ def test_scalar_is_exactly_the_scaffold() -> None:
 
 def test_all_arms_share_the_identical_scaffold() -> None:
     incumbent = _make_incumbent()
-    history = _make_history(3)
     gains = _make_gains()
-    scalar = render_feedback("scalar", incumbent, gains, history, HeadroomConfig())
+    scalar = render_feedback("scalar", incumbent, gains, HeadroomConfig())
     # The scaffold pieces, extracted from the scalar render: the header and
     # the horizon-group table must appear verbatim in every arm.
     head, sep, rest = scalar.partition("## MSE by horizon group")
     assert sep
     chunks = (head, "## MSE by horizon group" + rest)
     for arm in ARMS:
-        out = render_feedback(arm, incumbent, gains, history, HeadroomConfig())
+        out = render_feedback(arm, incumbent, gains, HeadroomConfig())
         for chunk in chunks:
             assert chunk in out, arm
         # scalar is the only arm whose output is the bare scaffold.
@@ -150,7 +137,7 @@ def test_all_arms_share_the_identical_scaffold() -> None:
 
 
 def test_fixed_orders_coordinates_by_lcb_descending() -> None:
-    out = render_feedback("fixed", _make_incumbent(), _make_gains(), _make_history(1), HeadroomConfig())
+    out = render_feedback("fixed", _make_incumbent(), _make_gains(), HeadroomConfig())
     section = out.split("## Remaining improvement by coordinate", 1)[1]
     expected = ["band(P=24)", "lag[0,23]", "beyond_l", "channel->3", "horizon"]
     positions = [section.index(f"| {label} |") for label in expected]
@@ -172,7 +159,6 @@ def test_fixed_never_renders_card_content_into_self_built() -> None:
         "self-built",
         _make_incumbent(),
         _make_gains(),
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[{"probeId": "p1", "measures": "dominant period", "output": {"period": 24.0}}],
     )
@@ -185,9 +171,8 @@ def test_placebo_renders_the_same_rows_in_a_permuted_order() -> None:
     cfg = HeadroomConfig()
     incumbent = _make_incumbent()
     gains = _make_gains()
-    history = _make_history(1)
-    fixed_rows = _card_rows(render_feedback("fixed", incumbent, gains, history, cfg))
-    placebo_rows = _card_rows(render_feedback("placebo", incumbent, gains, history, cfg))
+    fixed_rows = _card_rows(render_feedback("fixed", incumbent, gains, cfg))
+    placebo_rows = _card_rows(render_feedback("placebo", incumbent, gains, cfg))
     assert sorted(placebo_rows) == sorted(fixed_rows)  # same multiset of rows
     assert placebo_rows != fixed_rows  # seed-0 default permutation moves them
     assert placebo_rows[-2:] == fixed_rows[-2:]  # total and mu2 stay pinned at the end
@@ -197,11 +182,10 @@ def test_explicit_placebo_perm_is_honored() -> None:
     cfg = HeadroomConfig()
     incumbent = _make_incumbent()
     gains = _make_gains()
-    history = _make_history(1)
-    fixed_rows = _card_rows(render_feedback("fixed", incumbent, gains, history, cfg))
+    fixed_rows = _card_rows(render_feedback("fixed", incumbent, gains, cfg))
     perm = (4, 2, 0, 3, 1)
     placebo_rows = _card_rows(
-        render_feedback("placebo", incumbent, gains, history, cfg, placebo_perm=perm)
+        render_feedback("placebo", incumbent, gains, cfg, placebo_perm=perm)
     )
     assert placebo_rows[:-2] == [fixed_rows[i] for i in perm]
     assert placebo_rows[-2:] == fixed_rows[-2:]
@@ -210,29 +194,26 @@ def test_explicit_placebo_perm_is_honored() -> None:
 def test_invalid_placebo_perm_is_rejected() -> None:
     incumbent = _make_incumbent()
     gains = _make_gains()
-    history = _make_history(1)
     for bad in ((0, 0, 1, 2, 3), (0, 1, 2), (0, 1, 2, 3, 5)):
         with pytest.raises(ValueError, match="permutation"):
             render_feedback(
-                "placebo", incumbent, gains, history, HeadroomConfig(), placebo_perm=bad
+                "placebo", incumbent, gains, HeadroomConfig(), placebo_perm=bad
             )
 
 
 def test_unknown_arm_is_rejected() -> None:
     with pytest.raises(ValueError, match="arm"):
-        render_feedback("bogus", _make_incumbent(), [], _make_history(1), HeadroomConfig())
+        render_feedback("bogus", _make_incumbent(), [], HeadroomConfig())
 
 
 def test_no_forbidden_words_in_any_arm() -> None:
     incumbent = _make_incumbent()
     gains = _make_gains()
-    history = _make_history(2)
     for arm in ARMS:
         out = render_feedback(
             arm,
             incumbent,
             gains,
-            history,
             HeadroomConfig(),
             probe_rows=[{"probeId": "p1", "measures": "m", "output": {"x": 1.0}}],
             validation_rows=[{"probeId": "p1", "ok": True, "detail": "validated"}],
@@ -242,16 +223,16 @@ def test_no_forbidden_words_in_any_arm() -> None:
 
 
 def test_history_table_is_owned_by_round_md() -> None:
-    """round.md renders the candidate history; the feedback scaffold no longer
-    duplicates it (one table in the prompt, byte-identical across arms)."""
-    out = render_feedback("fixed", _make_incumbent(), _make_gains(), _make_history(15), HeadroomConfig())
+    """round.md renders the candidate history; the feedback scaffold carries
+    one table in the prompt, byte-identical across arms."""
+    out = render_feedback("fixed", _make_incumbent(), _make_gains(), HeadroomConfig())
     assert "| 15 | c15 |" not in out
     assert "## Candidate history" not in out
 
 
 def test_self_built_without_probes_shows_the_bootstrap_message() -> None:
     out = render_feedback(
-        "self-built", _make_incumbent(), [], _make_history(1), HeadroomConfig()
+        "self-built", _make_incumbent(), [], HeadroomConfig()
     )
     assert "## Your probes on the incumbent" in out
     assert "No validated probes yet" in out
@@ -262,7 +243,6 @@ def test_self_built_renders_probe_outputs_and_validation() -> None:
         "self-built",
         _make_incumbent(),
         [],
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[
             {"probeId": "p-period", "measures": "dominant residual period", "output": {"period": 24.0}},
@@ -290,7 +270,6 @@ def test_self_built_truncates_chatty_probe_output() -> None:
         "self-built",
         _make_incumbent(),
         [],
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[{"probeId": "p", "measures": "m", "output": chatty}],
     )
@@ -309,7 +288,6 @@ def test_probe_output_within_the_contract_cap_renders_uncut() -> None:
         "self-built",
         _make_incumbent(),
         [],
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[{"probeId": "p", "measures": "m", "output": payload}],
     )
@@ -324,7 +302,6 @@ def test_probe_table_escapes_pipes_and_newlines() -> None:
         "self-built",
         _make_incumbent(),
         [],
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[
             {
@@ -359,7 +336,7 @@ def test_self_built_shows_the_newest_probe_rows() -> None:
         {"probeId": f"p{i:02d}", "measures": "m", "output": {"i": i}} for i in range(10)
     ]
     out = render_feedback(
-        "self-built", _make_incumbent(), [], _make_history(1), HeadroomConfig(), probe_rows=rows
+        "self-built", _make_incumbent(), [], HeadroomConfig(), probe_rows=rows
     )
     assert "| p02 |" in out and "| p09 |" in out
     assert "| p00 |" not in out and "| p01 |" not in out
@@ -373,7 +350,6 @@ def test_augmented_renders_card_and_probe_outputs_together() -> None:
         "augmented",
         _make_incumbent(),
         _make_gains(),
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[
             {"probeId": "p-nonlin", "measures": "threshold coupling", "output": {"r2": 0.2}}
@@ -396,7 +372,6 @@ def test_probe_error_text_escapes_pipes_and_newlines() -> None:
         "self-built",
         _make_incumbent(),
         [],
-        _make_history(1),
         HeadroomConfig(),
         probe_rows=[
             {

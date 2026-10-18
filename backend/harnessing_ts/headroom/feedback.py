@@ -47,7 +47,6 @@ def render_feedback(
     arm: str,
     incumbent: dict[str, Any],
     gains: list[GainReport],
-    history: list[dict[str, Any]],  # unused: round.md owns the history table
     cfg: HeadroomConfig,
     placebo_perm: tuple[int, ...] | None = None,
     probe_rows: list[dict[str, Any]] | None = None,
