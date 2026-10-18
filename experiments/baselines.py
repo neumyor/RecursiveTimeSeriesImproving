@@ -31,12 +31,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from harnessing_ts.headroom.config import HeadroomConfig
-from harnessing_ts.headroom.correctors import (
-    FittedCorrector,
-    build_features,
-    fit_greedy,
-    select_period_peaks,
-)
+from harnessing_ts.headroom.correctors import fit_greedy
 from harnessing_ts.headroom.residuals import SegmentData
 from harnessing_ts.headroom.synthetic import REGISTRY, SyntheticTask
 from harnessing_ts.headroom.timeidx import Splits, segment_origins, windows
@@ -45,9 +40,8 @@ from harnessing_ts.headroom.timeidx import Splits, segment_origins, windows
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import common
+import evaluate as ev
 
-# evaluate.py holds the shared Adapter contract and segment/gap helpers.
-ev = common.load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
 # The m0 template is the ridge core every rule fix extends; experiments/ is
 # deliberately not on the repo pythonpath, so it is loaded by file path the
 # same way tests/test_experiments_m0.py loads it.
@@ -91,20 +85,17 @@ def _fit_predict_segments(
     segment).  diag is predicted even when only test is scored so every caller
     shares one code path (the extra einsums cost milliseconds).
     """
-    train = task.train_diag[: task.diag_start]
-    adapter.fit(train, ev.fit_meta(cfg, train.shape[1], seed))
-    diag_start, diag_stop = task.diag_start, task.train_diag.shape[0]
-    # Standalone cert/test arrays start one lookback in so every prediction
-    # window lies inside the array; the synthetic prefix covers the burn-in.
-    standalone_start = cfg.input_length - 1
-    pred_diag = ev.predict_adapter(adapter, task.train_diag, diag_start, diag_stop, cfg)
-    pred_test = ev.predict_adapter(adapter, task.test, standalone_start, task.test.shape[0], cfg)
-    seg_diag = ev.build_segment(task.train_diag, diag_start, diag_stop, pred_diag, cfg)
-    seg_test = ev.build_segment(task.test, standalone_start, task.test.shape[0], pred_test, cfg)
-    # pred rows are indexed over ALL realized origins; the segments keep only
-    # the usable ones, so align before any per-origin pairing.
-    pred_test_usable = pred_test[seg_test.origins - standalone_start]
-    return pred_test_usable, seg_diag, seg_test
+    segments, preds = ev.fit_predict_segments(
+        adapter,
+        task.train_diag[: task.diag_start],
+        cfg,
+        seed,
+        {
+            "diag": (task.train_diag, task.diag_start, task.train_diag.shape[0]),
+            "test": (task.test, cfg.input_length - 1, task.test.shape[0]),
+        },
+    )
+    return preds["test"], segments["diag"], segments["test"]
 
 
 def _mse_and_gap(
@@ -125,26 +116,6 @@ def _test_mse_and_gap(
     """Fit an adapter on train; (test MSE, paired oracle gap) on one pass."""
     pred, _, seg_test = _fit_predict_segments(task, adapter, cfg, seed)
     return _mse_and_gap(task, pred, seg_test, cfg)
-
-
-def _corrector_predictions(
-    fitted: FittedCorrector, seg: SegmentData, cfg: HeadroomConfig
-) -> np.ndarray:
-    """The fitted corrector's residual prediction at seg.origins, [B, H, C].
-
-    Mirrors corrector_gain's application exactly (same standardization and
-    intercept, including the intercept-only empty selection), so gains read
-    off these predictions match corrector_gain.
-    """
-    if fitted.coordinates:
-        x = np.concatenate(
-            [build_features(seg, coord, cfg)[0] for coord in fitted.coordinates], axis=1
-        )
-        y_hat = ((x - fitted.means) / fitted.stds) @ fitted.coef + fitted.intercept
-    else:
-        shape = (seg.origins.size, *seg.r.shape[1:])
-        y_hat = np.broadcast_to(fitted.intercept.reshape(1, *seg.r.shape[1:]), shape)
-    return np.asarray(y_hat, dtype=np.float64).reshape(seg.r.shape)
 
 
 # --- one-shot m0+g and the uniform m+g protocol ---------------------------------------
@@ -170,10 +141,9 @@ def one_shot_m0g(
             f"train={task.diag_start}, diag={n_diag} rows"
         )
     pred_test, seg_diag, seg_test = _fit_predict_segments(task, adapter, cfg, cfg.seed)
-    seg_a, _ = ev.split_ab(seg_diag, cfg)
-    peaks = select_period_peaks(seg_a.e_full, seg_a.origins, cfg)
+    peaks = ev.diag_a_peaks(seg_diag, cfg)
     fitted = fit_greedy(seg_diag, cfg, peaks)
-    g_test = _corrector_predictions(fitted, seg_test, cfg)
+    g_test = ev.corrector_predictions(fitted, seg_test, cfg)
     mse_m0, gap = _mse_and_gap(task, pred_test, seg_test, cfg)
     mse_m0g = float(np.mean(np.square(seg_test.r - g_test)))
     delta = mse_m0 - mse_m0g
@@ -209,7 +179,7 @@ def uniform_m0g_postprocess(
             f"pred must align with seg_apply.origins, shape {expected}, got {pred.shape}"
         )
     fitted = fit_greedy(seg_fit, cfg, peaks)
-    return pred + _corrector_predictions(fitted, seg_apply, cfg)
+    return pred + ev.corrector_predictions(fitted, seg_apply, cfg)
 
 
 # --- rule fixes ----------------------------------------------------------------------
@@ -218,17 +188,14 @@ def uniform_m0g_postprocess(
 def _m0_fit_windows(
     train: np.ndarray, lookback: int, horizon: int, stride: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """m0's fit windows: (win [N,K,C] oldest-first, z = win - x[o], y = x[o+h] - x[o]).
+    """m0's fit windows on its standard origin grid: (win, z, y).
 
-    Identical indexing to M0Adapter.fit (the ridge core being extended), kept
-    here so the rule fixes' designs are built from exactly m0's rows.
+    The rule fixes' designs are built from exactly m0's rows (the ridge core
+    being extended).
     """
     T = train.shape[0]
     origins = np.arange(lookback - 1, T - horizon, stride)
-    win = train[origins[:, None] + np.arange(-lookback + 1, 1)[None, :]]
-    last = train[origins][:, None, :]
-    y = train[origins[:, None] + np.arange(1, horizon + 1)[None, :]] - last
-    return win, win - last, y
+    return ev.m0_fit_windows(train, lookback, horizon, origins)
 
 
 class _WindowExtraM0(m0.M0Adapter):
@@ -248,13 +215,7 @@ class _WindowExtraM0(m0.M0Adapter):
         super().fit(train, meta)  # validation plus the plain-m0 weights as a byproduct
         win, z, y = _m0_fit_windows(train, self._K, self._H, m0._FIT_STRIDE)
         design = np.concatenate([z, self._extra(win)], axis=1)  # [N, K+F, C]
-        eye = np.eye(design.shape[1])
-        self._weights = np.empty((design.shape[1], self._H, self._C), dtype=np.float64)
-        for c in range(self._C):
-            d = design[:, :, c]
-            self._weights[:, :, c] = np.linalg.solve(
-                d.T @ d + m0._RIDGE_REG * eye, d.T @ y[:, :, c]
-            )
+        self._weights = ev.ridge_weights(design, y, m0._RIDGE_REG)
 
     def predict_batch(self, X: np.ndarray) -> np.ndarray:
         if self._weights is None:

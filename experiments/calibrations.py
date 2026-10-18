@@ -54,22 +54,20 @@ if _BACKEND not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import common
+import evaluate as ev
 
-ev = common.load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
 realdata = common.load_module("rhg_realdata", _REPO_ROOT / "experiments" / "realdata.py")
 m0 = common.load_module("rhg_m0_template", _REPO_ROOT / "experiments" / "templates" / "m0.py")
 
-from harnessing_ts.headroom.certify import certify
 from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.correctors import (
     _min_bandwidth,
     all_gains,
-    build_features,
     card_level,
     fit_greedy,
     select_period_peaks,
 )
-from harnessing_ts.headroom.inference import auto_bandwidth, dm_one_sided_p, hac_variance, mean_ci
+from harnessing_ts.headroom.inference import auto_bandwidth, hac_variance, mean_ci
 from harnessing_ts.headroom.synthetic import REGISTRY
 
 OUT_DIR = _REPO_ROOT / "experiments" / "runs" / "calibrations"
@@ -98,7 +96,6 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-_json_safe = common.json_safe
 _write_json = common.write_json
 
 
@@ -113,14 +110,7 @@ def _gain_series(fitted: Any, seg: Any, cfg: HeadroomConfig) -> np.ndarray:
     to inference.mean_ci at controlled bandwidths.  Mathematically this is
     restrict()-invariant: features at an origin read only rows at or before it.
     """
-    if fitted.coordinates:
-        x = np.concatenate([build_features(seg, coord, cfg)[0] for coord in fitted.coordinates], axis=1)
-        y_hat = ((x - fitted.means) / fitted.stds) @ fitted.coef + fitted.intercept
-        y_hat = y_hat.reshape(seg.r.shape)
-    else:
-        y_hat = np.broadcast_to(
-            fitted.intercept.reshape(1, *seg.r.shape[1:]), (seg.origins.size, *seg.r.shape[1:])
-        ).copy()
+    y_hat = ev.corrector_predictions(fitted, seg, cfg)
     gains = seg.r * seg.r - (seg.r - y_hat) ** 2
     return gains.mean(axis=(1, 2))
 
@@ -137,49 +127,36 @@ def _fit_predict_real(
     adapter: Any, pieces: dict[str, Any], cfg: HeadroomConfig, seed: int
 ) -> tuple[Any, Any]:
     """Fit on train, predict diag + cert; (seg_diag, seg_cert) in loop convention."""
-    channels = pieces["train"].shape[1]
-    adapter.fit(pieces["train"], ev.fit_meta(cfg, channels, seed))
-    pred_diag = ev.predict_adapter(
-        adapter, pieces["diag_values"], pieces["diag_start"], pieces["diag_stop"], cfg
-    )
-    pred_cert = ev.predict_adapter(
-        adapter, pieces["cert_values"], pieces["standalone_start"], pieces["cert_values"].shape[0], cfg
-    )
-    seg_diag = ev.build_segment(
-        pieces["diag_values"], pieces["diag_start"], pieces["diag_stop"], pred_diag, cfg
-    )
-    seg_cert = ev.build_segment(
-        pieces["cert_values"],
-        pieces["standalone_start"],
-        pieces["cert_values"].shape[0],
-        pred_cert,
+    segments, _ = ev.fit_predict_segments(
+        adapter,
+        pieces["train"],
         cfg,
+        seed,
+        {
+            "diag": (pieces["diag_values"], pieces["diag_start"], pieces["diag_stop"]),
+            "cert": (pieces["cert_values"], pieces["standalone_start"], pieces["cert_values"].shape[0]),
+        },
     )
-    return seg_diag, seg_cert
+    return segments["diag"], segments["cert"]
 
 
 def _dm_acceptance(seg_parent: Any, seg_candidate: Any, cfg: HeadroomConfig) -> dict[str, Any]:
-    """The loop's acceptance gate: one-sided DM (HAC + HLN) at acceptance_alpha."""
-    d = (np.square(seg_parent.r) - np.square(seg_candidate.r)).mean(axis=(1, 2))
-    bandwidth = int(auto_bandwidth(d, _min_bandwidth(cfg)))
-    dm_p = float(dm_one_sided_p(d, bandwidth))
+    """The loop's acceptance gate on two diagnostic segments (rounded for JSON)."""
+    gate = ev.dm_acceptance(seg_parent, seg_candidate, cfg)
     return {
-        "dmP": _r(dm_p, 12),
-        "accepted": bool(dm_p < cfg.acceptance_alpha),
-        "meanD": _r(d.mean()),
-        "bandwidth": bandwidth,
-        "nOrigins": int(d.size),
+        "dmP": _r(gate["dmP"], 12),
+        "accepted": gate["accepted"],
+        "meanD": _r(gate["meanD"]),
+        "bandwidth": gate["bandwidth"],
+        "nOrigins": gate["nOrigins"],
     }
 
 
 def _round0_certification(
-    seg_diag: Any, seg_cert: Any, cfg: HeadroomConfig, peaks: list[int], channels: int
+    seg_diag: Any, seg_cert: Any, cfg: HeadroomConfig, peaks: list[int]
 ) -> dict[str, Any]:
     """The loop's round-0 certification of the incumbent (fixed level)."""
-    level = 1.0 - cfg.certify_alpha
-    gains = all_gains(seg_diag, seg_cert, cfg, peaks, level=level)
-    mse = ev.mse_by_group(seg_cert, gains)
-    report = certify(gains, mse, cfg)
+    report, gains, mse = ev.certification(seg_diag, seg_cert, cfg, peaks)
     total = next(g for g in gains if g.coordinate.label == "total")
     threshold = cfg.certify_epsilon * mse["total"]
     return {
@@ -205,21 +182,19 @@ def _synthetic_gain_series(
     """
     task = REGISTRY[task_name](seed=seed, sizes=sizes, cfg=cfg)
     train = task.train_diag[: task.diag_start]
-    channels = train.shape[1]
     adapter = m0.variant(model_id)
-    adapter.fit(train, ev.fit_meta(cfg, channels, seed))
-    diag_start, diag_stop = task.diag_start, task.train_diag.shape[0]
-    standalone_start = cfg.input_length - 1
-    pred_diag = ev.predict_adapter(adapter, task.train_diag, diag_start, diag_stop, cfg)
-    pred_cert = ev.predict_adapter(
-        adapter, task.cert, standalone_start, task.cert.shape[0], cfg
+    segments, _ = ev.fit_predict_segments(
+        adapter,
+        train,
+        cfg,
+        seed,
+        {
+            "diag": (task.train_diag, task.diag_start, task.train_diag.shape[0]),
+            "cert": (task.cert, cfg.input_length - 1, task.cert.shape[0]),
+        },
     )
-    seg_diag = ev.build_segment(task.train_diag, diag_start, diag_stop, pred_diag, cfg)
-    seg_cert = ev.build_segment(
-        task.cert, standalone_start, task.cert.shape[0], pred_cert, cfg
-    )
-    seg_a, _ = ev.split_ab(seg_diag, cfg)
-    peaks = select_period_peaks(seg_a.e_full, seg_a.origins, cfg)
+    seg_diag, seg_cert = segments["diag"], segments["cert"]
+    peaks = ev.diag_a_peaks(seg_diag, cfg)
     fitted = fit_greedy(seg_diag, cfg, peaks)
     d = _gain_series(fitted, seg_cert, cfg)
     return seg_cert.origins, d, [c.label for c in fitted.coordinates], peaks
@@ -388,17 +363,8 @@ class _BootstrapRefitM0(m0.M0Adapter):
         origins = np.arange(K - 1, T - H, m0._FIT_STRIDE)
         rng = np.random.default_rng(self._boot_seed)
         origins = origins[rng.integers(0, origins.size, origins.size)]
-        z = train[origins[:, None] + np.arange(-K + 1, 1)[None, :]]  # [N, K, C]
-        z -= train[origins][:, None, :]  # residualize by x[o]
-        y = train[origins[:, None] + np.arange(1, H + 1)[None, :]]  # [N, H, C]
-        y -= train[origins][:, None, :]
-        eye = np.eye(K)
-        self._weights = np.empty((K, H, C), dtype=np.float64)
-        for c in range(C):
-            zc = z[:, :, c]
-            self._weights[:, :, c] = np.linalg.solve(
-                zc.T @ zc + m0._RIDGE_REG * eye, zc.T @ y[:, :, c]
-            )
+        _, z, y = ev.m0_fit_windows(train, K, H, origins)
+        self._weights = ev.ridge_weights(z, y, m0._RIDGE_REG)
         self._K = K
         self._H = H
         self._C = C
@@ -421,8 +387,7 @@ def cal2_etth1_acceptance(
     # Incumbent = the loop's round-0 parent: plain m0 fitted on train.
     parent = m0.variant("m0-linear")
     seg_parent, seg_cert = _fit_predict_real(parent, pieces, cfg, seed=0)
-    seg_a, _ = ev.split_ab(seg_parent, cfg)
-    peaks = select_period_peaks(seg_a.e_full, seg_a.origins, cfg)
+    peaks = ev.diag_a_peaks(seg_parent, cfg)
     parent_diag_mse = float(np.mean(np.square(seg_parent.r)))
 
     # (a) Null: bootstrap refits of the same model class.  The bootstrap makes
@@ -457,7 +422,7 @@ def cal2_etth1_acceptance(
     deterministic_pair = _dm_acceptance(seg_short, seg_parent, cfg)
 
     # (c) Round-0 certification of m0 on the real cert segment.
-    cert = _round0_certification(seg_parent, seg_cert, cfg, peaks, channels)
+    cert = _round0_certification(seg_parent, seg_cert, cfg, peaks)
     total_ucb = float(cert["total"].ucb)
     threshold = float(cert["threshold"])
 
@@ -531,7 +496,7 @@ def cal3_exchange_rate(
     seg_a, seg_b = ev.split_ab(seg_diag, cfg)
     peaks = select_period_peaks(seg_a.e_full, seg_a.origins, cfg)
 
-    cert = _round0_certification(seg_diag, seg_cert, cfg, peaks, channels)
+    cert = _round0_certification(seg_diag, seg_cert, cfg, peaks)
     total = cert["total"]
 
     # The loop's posthoc-card rows on diag (A fit, B evaluate, card level),

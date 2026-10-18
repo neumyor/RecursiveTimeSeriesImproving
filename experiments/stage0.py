@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from functools import partial
 import json
 from pathlib import Path
 import sys
@@ -38,8 +39,7 @@ if _BACKEND not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import common
-
-ev = common.load_module("rhg_evaluate", _REPO_ROOT / "experiments" / "evaluate.py")
+import evaluate as ev
 
 from harnessing_ts.headroom.certify import certify
 from harnessing_ts.headroom.config import HeadroomConfig
@@ -58,9 +58,9 @@ from harnessing_ts.headroom.timeidx import segment_origins
 
 # The full-size run owns experiments/runs/stage0 (the pre-registered
 # artifact); any smoke run writes beside it so concurrent tests can never
-# overwrite the calibration report.  The directory follows the smoke FLAG
-# the caller passes, never the process's sys.argv — a pytest process calling
-# run(smoke=True) directly must not clobber the full-size report.
+# overwrite the calibration report.  The directory follows the smoke flag the
+# caller passes, so a pytest process calling run(smoke=True) directly never
+# clobbers the full-size report.
 def _report_dir(smoke: bool) -> Path:
     return _REPO_ROOT / "experiments" / "runs" / ("stage0-smoke" if smoke else "stage0")
 
@@ -78,16 +78,15 @@ EXPECTED_ASPECTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("lgssm_multiperiod", "m0-linear"): ("periodicity", "long-range-beyond-window"),
     ("lgssm_multiperiod", "m0-short-lookback"): ("periodicity", "long-range-beyond-window"),
     # xchannel coupling lives at lags 3-7: it reaches every channel's own
-    # history, so the lag coordinate legitimately sees it first (review C).
+    # history, so the lag coordinate legitimately sees it first.
     ("lgssm_xchannel", "m0-linear"): ("cross-channel", "lag-structure"),
     ("lgssm_xchannel", "m0-short-lookback"): ("cross-channel", "lag-structure", "long-range-beyond-window"),
     ("arfima", "m0-linear"): ("lag-structure",),
     ("hmm_ar_switch", "m0-linear"): ("lag-structure", "periodicity"),
-}
-if "nonlinear_xchannel" in REGISTRY:
     # The h-step nonlinear coupling also shows up in same-horizon realized
     # residual chains, so the horizon coordinate can legitimately lead.
-    EXPECTED_ASPECTS[("nonlinear_xchannel", "m0-linear")] = ("cross-channel", "horizon-range")
+    ("nonlinear_xchannel", "m0-linear"): ("cross-channel", "horizon-range"),
+}
 # G0-2 calibration pairs (CI coverage against an independent long-segment
 # truth; arfima stresses HAC under long memory).
 CALIBRATION_PAIRS = ("lgssm_multiperiod", "arfima", "hmm_ar_switch")
@@ -130,17 +129,17 @@ DEEP_EXPECTED_ASPECTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("lgssm_multiperiod", "m0-patchtst-channelmix"): ("cross-channel", "lag-structure"),
     # lgssm_xchannel: the channel-independent backbone (design, not defect)
     # is blind to the lags-3..7 couplings for every variant; channel->i
-    # repairs directly and own-history lag sees the couplings indirectly
-    # (v1 review C).  channelmix additionally leaves the coupling-driven
-    # per-channel deviations in the residual.
+    # repairs directly and own-history lag sees the couplings indirectly.
+    # channelmix additionally leaves the coupling-driven per-channel
+    # deviations in the residual.
     ("lgssm_xchannel", "m0-patchtst"): ("cross-channel", "lag-structure"),
     ("lgssm_xchannel", "m0-patchtst-noattn"): ("cross-channel", "lag-structure"),
     ("lgssm_xchannel", "m0-patchtst-coarsepatch"): ("cross-channel", "lag-structure"),
     ("lgssm_xchannel", "m0-patchtst-channelmix"): ("cross-channel", "lag-structure"),
     # hmm_ar_switch: regime persistence leaves h-step errors autocorrelated
     # within regimes (lag-structure), and the band coordinate can track the
-    # slow inter-regime residual wander — v1's m0-linear tops were band peaks,
-    # so periodicity is registered as the calibrated co-leader.
+    # slow inter-regime residual wander, so periodicity is registered as the
+    # calibrated co-leader.
     ("hmm_ar_switch", "m0-patchtst"): ("lag-structure", "periodicity"),
     ("hmm_ar_switch", "m0-patchtst-noattn"): ("lag-structure", "periodicity"),
     ("hmm_ar_switch", "m0-patchtst-coarsepatch"): ("lag-structure", "periodicity"),
@@ -152,7 +151,7 @@ DEEP_EXPECTED_ASPECTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("arfima", "m0-patchtst-coarsepatch"): ("lag-structure", "long-range-beyond-window"),
     # nonlinear_xchannel: the channel-independent backbone is blind to the
     # lags-3..7 tanh couplings, and the same-horizon realized chains also
-    # carry them (v1's registered rationale, unchanged by the defects).
+    # carry them.
     ("nonlinear_xchannel", "m0-patchtst"): ("cross-channel", "horizon-range"),
     ("nonlinear_xchannel", "m0-patchtst-noattn"): ("cross-channel", "horizon-range"),
     ("nonlinear_xchannel", "m0-patchtst-coarsepatch"): ("cross-channel", "horizon-range"),
@@ -201,7 +200,6 @@ class Cell:
     model_id: str
     seg_diag: SegmentData
     seg_diag_a: SegmentData
-    seg_diag_b: SegmentData
     seg_cert: SegmentData
     seg_test: SegmentData
     period_peaks: list[int]
@@ -210,7 +208,6 @@ class Cell:
     cert_mse: dict[str, float] = field(default_factory=dict)
     test_gap: float = 0.0
     test_total_delta: float = 0.0
-    adapter: Any | None = None
     fit_seconds: float = 0.0
 
 
@@ -226,10 +223,6 @@ def _load_model(model_id: str) -> Any:
             _REPO_ROOT / "experiments" / "templates" / "m0_deep.py",
         ).variant(model_id)
     return _load_m0(model_id)
-
-
-def _total_coordinate(peaks: list[int]) -> Coordinate:
-    return Coordinate(kind="total", label="total", aspect="other", spec={"periods": peaks})
 
 
 def evaluate_cell(
@@ -251,23 +244,27 @@ def evaluate_cell(
     # Standalone cert/test arrays start one lookback in so every prediction
     # window lies inside the array; the synthetic prefix covers the burn-in.
     standalone_start = cfg.input_length - 1
+    segments = {
+        "diag": (task.train_diag, diag_start, diag_stop),
+        "cert": (task.cert, standalone_start, task.cert.shape[0]),
+        "test": (task.test, standalone_start, task.test.shape[0]),
+    }
 
+    fit_seconds = 0.0
     if oracle_as_model:
-        pred_diag = ev.predict_oracle(task, task.train_diag, diag_start, diag_stop, cfg)
-        pred_cert = ev.predict_oracle(task, task.cert, standalone_start, task.cert.shape[0], cfg)
-        pred_test = ev.predict_oracle(task, task.test, standalone_start, task.test.shape[0], cfg)
+        segs, preds = ev.predict_segments(partial(ev.predict_oracle, task, cfg=cfg), segments, cfg)
     else:
         adapter = _load_model(model_id)
         started = time.perf_counter()
         adapter.fit(train, ev.fit_meta(cfg, channels, seed))
         fit_seconds = time.perf_counter() - started
-        pred_diag = ev.predict_adapter(adapter, task.train_diag, diag_start, diag_stop, cfg, chunk=predict_chunk)
-        pred_cert = ev.predict_adapter(adapter, task.cert, standalone_start, task.cert.shape[0], cfg, chunk=predict_chunk)
-        pred_test = ev.predict_adapter(adapter, task.test, standalone_start, task.test.shape[0], cfg, chunk=predict_chunk)
+        segs, preds = ev.predict_segments(
+            partial(ev.predict_adapter, adapter, cfg=cfg, chunk=predict_chunk), segments, cfg
+        )
 
-    seg_diag = ev.build_segment(task.train_diag, diag_start, diag_stop, pred_diag, cfg)
-    seg_cert = ev.build_segment(task.cert, standalone_start, task.cert.shape[0], pred_cert, cfg)
-    seg_test = ev.build_segment(task.test, standalone_start, task.test.shape[0], pred_test, cfg)
+    seg_diag = segs["diag"]
+    seg_cert = segs["cert"]
+    seg_test = segs["test"]
     seg_a, seg_b = ev.split_ab(seg_diag, cfg)
     peaks = select_period_peaks(seg_a.e_full, seg_a.origins, cfg)
 
@@ -275,14 +272,12 @@ def evaluate_cell(
         task_name=task_name,
         seed=seed,
         model_id=model_id,
-        adapter=None if oracle_as_model else adapter,
         seg_diag=seg_diag,
         seg_diag_a=seg_a,
-        seg_diag_b=seg_b,
         seg_cert=seg_cert,
         seg_test=seg_test,
         period_peaks=peaks,
-        fit_seconds=0.0 if oracle_as_model else fit_seconds,
+        fit_seconds=fit_seconds,
     )
     if with_card:
         cell.card = [
@@ -290,17 +285,13 @@ def evaluate_cell(
             for g in all_gains(seg_a, seg_b, cfg, peaks, level=card_level(cfg, peaks, channels))
             if g.coordinate.kind not in {"total", "hgroup"}
         ]
-        cert_lvl = 1.0 - cfg.certify_alpha
-        cell.cert_gains = all_gains(seg_diag, seg_cert, cfg, peaks, level=cert_lvl)
-        cell.cert_mse = ev.mse_by_group(seg_cert, cell.cert_gains)
+        _, cell.cert_gains, cell.cert_mse = ev.certification(seg_diag, seg_cert, cfg, peaks)
 
     # Paired optimality gap and the total corrector's test-side truth on the
     # same usable origins (pred rows are indexed by origin offset).
     usable = segment_origins(standalone_start, task.test.shape[0], cfg)
     oracle_test = np.asarray(task.oracle.forecast(task.test, usable, cfg), dtype=np.float64)
-    cell.test_gap = ev.paired_gap(
-        task.test, usable, pred_test[usable - standalone_start], oracle_test, cfg
-    )
+    cell.test_gap = ev.paired_gap(task.test, usable, preds["test"], oracle_test, cfg)
     if with_card:
         fitted = fit_greedy(seg_diag, cfg, peaks)
         cell.test_total_delta = corrector_gain(
@@ -390,7 +381,7 @@ def gate_g02_calibration(cfg: HeadroomConfig, sizes: dict[str, int], reps: int) 
 
     The truth comes from a DIFFERENT seed's 1e5-step realization of the same
     process, so truth noise is an order of magnitude below the CI width and
-    independent of the cert sample (the M1-review flaw was adjacency).
+    independent of the cert sample.
     """
     per_pair: dict[str, dict[str, Any]] = {}
     for name in CALIBRATION_PAIRS:
@@ -774,9 +765,7 @@ def run_deep(smoke: bool = False, seeds: int = 3) -> dict[str, Any]:
     return report
 
 
-def write_report(report: dict[str, Any], report_dir: Path | None = None) -> None:
-    if report_dir is None:
-        report_dir = _report_dir("--smoke" in sys.argv)
+def write_report(report: dict[str, Any], report_dir: Path) -> None:
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     title = (

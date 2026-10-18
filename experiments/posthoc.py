@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+from functools import partial
 import itertools
 import json
 import math
@@ -72,7 +73,6 @@ from harnessing_ts.headroom.correctors import (
     card_level,
     corrector_gain,
     fit_greedy,
-    select_period_peaks,
 )
 from harnessing_ts.headroom.synthetic import REGISTRY
 from harnessing_ts.headroom.timeidx import segment_origins, windows
@@ -123,19 +123,6 @@ def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
             continue
         if isinstance(obj, dict):
             yield obj
-
-
-def _gain_row(gain: Any) -> dict[str, Any]:
-    """Serialize one GainReport exactly like the loop's heldout posthoc card."""
-    return {
-        "label": gain.coordinate.label,
-        "aspect": gain.coordinate.aspect,
-        "delta": gain.delta,
-        "lcb": gain.lcb,
-        "ucb": gain.ucb,
-        "mu2": gain.mu2,
-        "by_horizon": gain.by_horizon,
-    }
 
 
 def _top_aspect(rows: list[dict[str, Any]] | None) -> str | None:
@@ -198,12 +185,6 @@ class _Replay:
         self.cfg = replace(
             base_cfg, seed=self.seed, input_length=int(meta["L"]), horizon=int(meta["H"])
         )
-        self.meta_fit = {
-            "L": int(meta["L"]),
-            "H": int(meta["H"]),
-            "C": int(meta["C"]),
-            "seed": self.seed,
-        }
         self.is_real = meta.get("task") == "real-deidentified"
         self._load_task(real_csvs)
         self.m0_template = m0_template
@@ -271,26 +252,22 @@ class _Replay:
                 raise _RunError(f"source rejected by the candidate check: {exc}") from exc
             module = _load_module("rhg_posthoc_" + re.sub(r"\W+", "_", cand_id), source)
             adapter = module.create_adapter()
-            adapter.fit(self.train, self.meta_fit)
             start = self.cfg.input_length - 1  # standalone segments begin one lookback in
-            pred_diag = ev.predict_adapter(
-                adapter, self.train_diag, self.diag_start, self.train_diag.shape[0], self.cfg
+            segments, _ = ev.fit_predict_segments(
+                adapter,
+                self.train,
+                self.cfg,
+                self.seed,
+                {
+                    "diag": (self.train_diag, self.diag_start, self.train_diag.shape[0]),
+                    "cert": (self.cert_values, start, self.cert_values.shape[0]),
+                },
             )
-            seg_diag = ev.build_segment(
-                self.train_diag, self.diag_start, self.train_diag.shape[0], pred_diag, self.cfg
-            )
-            pred_cert = ev.predict_adapter(
-                adapter, self.cert_values, start, self.cert_values.shape[0], self.cfg
-            )
-            seg_cert = ev.build_segment(
-                self.cert_values, start, self.cert_values.shape[0], pred_cert, self.cfg
-            )
-            seg_a, _ = ev.split_ab(seg_diag, self.cfg)
             state = {
                 "source": text,
-                "seg_diag": seg_diag,
-                "seg_cert": seg_cert,
-                "peaks": select_period_peaks(seg_a.e_full, seg_a.origins, self.cfg),
+                "seg_diag": segments["diag"],
+                "seg_cert": segments["cert"],
+                "peaks": ev.diag_a_peaks(segments["diag"], self.cfg),
                 "adapter": adapter,
             }
         except Exception as exc:  # recorded per candidate; the run continues
@@ -305,14 +282,13 @@ class _Replay:
         if state is None or "seg_test" in state:
             return state
         start = self.cfg.input_length - 1
-        pred_test = ev.predict_adapter(
-            state["adapter"], self.test_values, start, self.test_values.shape[0], self.cfg
+        segments, preds = ev.predict_segments(
+            partial(ev.predict_adapter, state["adapter"], cfg=self.cfg),
+            {"test": (self.test_values, start, self.test_values.shape[0])},
+            self.cfg,
         )
-        seg_test = ev.build_segment(
-            self.test_values, start, self.test_values.shape[0], pred_test, self.cfg
-        )
-        state["seg_test"] = seg_test
-        state["pred_test"] = pred_test[seg_test.origins - start]
+        state["seg_test"] = segments["test"]
+        state["pred_test"] = preds["test"]
         state.pop("adapter")  # nothing re-predicts afterwards; free the memory
         return state
 
@@ -355,7 +331,7 @@ class _Replay:
                 channels = int(state["seg_diag"].values.shape[1])
                 level = card_level(self.cfg, state["peaks"], channels)
                 rows = [
-                    _gain_row(gain)
+                    ev.gain_row(gain)
                     for gain in all_gains(seg_a, seg_b, self.cfg, state["peaks"], level=level)
                 ]
         self._cards[cand_id] = rows
@@ -640,19 +616,6 @@ def _analyze_run_inner(
 
 
 
-def _aspect_lcb(card_rows: list[dict[str, Any]] | None) -> dict[str, float]:
-    """Per aspect, the strongest remaining-improvement bound in a posthoc card."""
-    strongest: dict[str, float] = {}
-    if not card_rows:
-        return strongest
-    for row in card_rows:
-        aspect = str(row.get("aspect"))
-        lcb = row.get("lcb")
-        value = float("-inf") if lcb is None else float(lcb)
-        strongest[aspect] = max(strongest.get(aspect, float("-inf")), value)
-    return strongest
-
-
 def _diagnostic_attribution(
     child_card: list[dict[str, Any]] | None, parent_card: list[dict[str, Any]] | None
 ) -> tuple[str, ...]:
@@ -660,8 +623,8 @@ def _diagnostic_attribution(
     improvement bound dropped the most.  The live mechanism is the LLM
     judge; this rule is the deterministic attribution postSwitchDiversity
     is measured against."""
-    parent_lcb = _aspect_lcb(parent_card)
-    child_lcb = _aspect_lcb(child_card)
+    parent_lcb = ev.aspect_lcb(parent_card)
+    child_lcb = ev.aspect_lcb(child_card)
     drops = {
         aspect: parent_lcb[aspect] - child_lcb.get(aspect, float("-inf"))
         for aspect, value in parent_lcb.items()

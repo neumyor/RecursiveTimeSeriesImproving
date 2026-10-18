@@ -61,16 +61,13 @@ import common
 import evaluate as ev
 from harnessing_ts.agent.sdk_runner import SdkRunner, SdkRunnerConfig
 from harnessing_ts.headroom import candidate as cand
-from harnessing_ts.headroom.certify import certify
 from harnessing_ts.headroom.config import HeadroomConfig
 from harnessing_ts.headroom.correctors import (
-    _min_bandwidth,
     all_gains,
     card_level,
     select_period_peaks,
 )
 from harnessing_ts.headroom.feedback import render_feedback
-from harnessing_ts.headroom.inference import auto_bandwidth, dm_one_sided_p
 from harnessing_ts.headroom.residuals import SegmentData
 from harnessing_ts.headroom.synthetic import REGISTRY
 from harnessing_ts.headroom.usage import workspace_usage
@@ -149,7 +146,6 @@ class LoopState:
     history: list[dict[str, Any]]
 
 
-_json_safe = common.json_safe
 _write_json = common.write_json
 _append_jsonl = common.append_jsonl
 _read_jsonl = common.read_jsonl
@@ -350,19 +346,21 @@ class HeadroomLoop:
             module = _load_module("rhg_incumbent", self.ws / "models" / "incumbent" / "model.py")
             adapter = module.create_adapter()
             _pin_torch_threads()  # after the factory: a candidate importing torch inside create_adapter escapes a pre-factory pin
-            adapter.fit(self.train, ev.fit_meta(self.cfg, self.values.shape[1], self.seed))
         self._incumbent_model_id = str(getattr(adapter, "model_id", "m0"))
-        if pred_diag is None:
-            pred_diag = ev.predict_adapter(adapter, self.values, self.diag_start, self.values.shape[0], self.cfg)
-        self.seg_diag = ev.build_segment(self.values, self.diag_start, self.values.shape[0], pred_diag, self.cfg)
-        pred_cert = ev.predict_adapter(
-            adapter, self.cert_values, self.cfg.input_length - 1, self.cert_values.shape[0], self.cfg
+        segments, _ = ev.fit_predict_segments(
+            adapter,
+            self.train,
+            self.cfg,
+            self.seed,
+            {
+                "diag": (self.values, self.diag_start, self.values.shape[0]),
+                "cert": (self.cert_values, self.cfg.input_length - 1, self.cert_values.shape[0]),
+            },
+            precomputed=None if pred_diag is None else {"diag": pred_diag},
         )
-        self.seg_cert = ev.build_segment(
-            self.cert_values, self.cfg.input_length - 1, self.cert_values.shape[0], pred_cert, self.cfg
-        )
-        seg_a, _ = ev.split_ab(self.seg_diag, self.cfg)
-        self.period_peaks = select_period_peaks(seg_a.e_full, seg_a.origins, self.cfg)
+        self.seg_diag = segments["diag"]
+        self.seg_cert = segments["cert"]
+        self.period_peaks = ev.diag_a_peaks(self.seg_diag, self.cfg)
         self._sample_incumbent_activations(adapter)
 
     def _sample_incumbent_activations(self, adapter: Any) -> None:
@@ -461,7 +459,6 @@ class HeadroomLoop:
                 self.arm,
                 incumbent,
                 gains,
-                state.history,
                 self.cfg,
                 probe_rows=probe_rows,
                 validation_rows=validation_rows,
@@ -482,7 +479,7 @@ class HeadroomLoop:
             # the arm the moment an accepted fix changes the peak count.
             rng = np.random.default_rng(self.seed * 100_003 + len(gains))
             placebo_perm = tuple(int(i) for i in rng.permutation(max(len(gains), 1)))
-        return render_feedback(self.arm, incumbent, gains, state.history, self.cfg, placebo_perm)
+        return render_feedback(self.arm, incumbent, gains, self.cfg, placebo_perm)
 
     # --------------------------------------------------- self-built probes
 
@@ -816,10 +813,7 @@ class HeadroomLoop:
         for the post-hoc stop-point analysis.
         """
         assert self.heldout is not None and self.seg_diag is not None and self.seg_cert is not None
-        level = 1.0 - self.cfg.certify_alpha
-        gains = all_gains(self.seg_diag, self.seg_cert, self.cfg, self.period_peaks, level=level)
-        mse = ev.mse_by_group(self.seg_cert, gains)
-        report = certify(gains, mse, self.cfg)
+        report, _, _ = ev.certification(self.seg_diag, self.seg_cert, self.cfg, self.period_peaks)
         _append_jsonl(
             self.heldout / "certification.jsonl",
             {
@@ -856,18 +850,7 @@ class HeadroomLoop:
                 "proposal": proposal,
                 "diagMse": diag_mse,
                 "dmP": dm_p,
-                "card": [
-                    {
-                        "label": g.coordinate.label,
-                        "aspect": g.coordinate.aspect,
-                        "delta": g.delta,
-                        "lcb": g.lcb,
-                        "ucb": g.ucb,
-                        "mu2": g.mu2,
-                        "by_horizon": g.by_horizon,
-                    }
-                    for g in posthoc
-                ],
+                "card": [ev.gain_row(g) for g in posthoc],
             },
         )
 
@@ -880,19 +863,6 @@ class HeadroomLoop:
         if not path.is_file():
             return None
         return json.loads(path.read_text(encoding="utf-8"))["card"]
-
-    @staticmethod
-    def _aspect_lcb(card: list[dict[str, Any]] | None) -> dict[str, float]:
-        """Per aspect, the strongest remaining-improvement bound in the card."""
-        strongest: dict[str, float] = {}
-        if not card:
-            return strongest
-        for row in card:
-            aspect = str(row["aspect"])
-            lcb = row.get("lcb")
-            value = -np.inf if lcb is None else float(lcb)
-            strongest[aspect] = max(strongest.get(aspect, -np.inf), value)
-        return strongest
 
     def _judge_ws(self) -> Path:
         """The judge's isolated workspace, inside heldout (never under ws/).
@@ -970,7 +940,7 @@ class HeadroomLoop:
                 lines.append(f"  claimed: {claimed}")
             card = self._posthoc_card(str(row["candidateId"]))
             if card:
-                strongest = self._aspect_lcb(card)
+                strongest = ev.aspect_lcb(card)
                 measured = ", ".join(
                     f"{aspect}: {value:.4f}" for aspect, value in sorted(strongest.items())
                 )
@@ -1326,9 +1296,9 @@ class HeadroomLoop:
         }
         seg_cand = ev.build_segment(self.values, self.diag_start, self.values.shape[0], pred_diag, self.cfg)
         diag_mse = float(np.mean(np.square(seg_cand.r)))
-        d = (np.square(self.seg_diag.r) - np.square(seg_cand.r)).mean(axis=(1, 2))
-        dm_p = float(dm_one_sided_p(d, auto_bandwidth(d, _min_bandwidth(self.cfg))))
-        accepted = bool(dm_p < self.cfg.acceptance_alpha)
+        gate = ev.dm_acceptance(self.seg_diag, seg_cand, self.cfg)
+        dm_p = gate["dmP"]
+        accepted = gate["accepted"]
 
         # Posthoc card for every candidate, every arm (heldout only).
         self._write_posthoc_card(candidate_id, state.round_index, proposal, seg_cand, diag_mse, dm_p)
