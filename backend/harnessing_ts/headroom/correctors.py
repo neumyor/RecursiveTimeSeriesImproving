@@ -207,7 +207,7 @@ def _channel_blocks(
     ``target=None`` (the total/hgroup union) keeps every channel: across all
     channel->i coordinates each channel appears as someone else's predictor.
     """
-    ks = np.arange(_CHANNEL_LAGS + 1)
+    ks = np.arange(_CHANNEL_LAGS)
     idx = origins[:, None] - ks[None, :]
     blocks = []
     for channel in range(seg.values.shape[1]):

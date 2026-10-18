@@ -393,3 +393,14 @@ def test_card_level_is_stricter_than_95pct() -> None:
     assert 0.95 < card < 1.0
     # (The certification level is the plain fixed 1 - certifyAlpha; only the
     # card keeps a Bonferroni level.)
+
+
+def test_channel_block_spans_lags_0_to_23() -> None:
+    """Contract §5: the channel coordinate reads k = 0..23 (24 lags), so with
+    one other channel its e and dx blocks together have 2 * 24 columns."""
+    cfg = small_cfg()
+    rng = np.random.default_rng(9)
+    seg = zero_model_segment(rng.normal(size=(T_LEN, N_CHANNELS)), cfg)
+    coord = Coordinate("channel", "channel->0", "cross-channel", {"target_channel": 0})
+    x, _ = build_features(seg, coord, cfg)
+    assert x.shape[1] == 2 * 24
