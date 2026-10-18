@@ -8,9 +8,9 @@ moves on, so one bad cell never costs the night's run; every failed cell gets
 exactly one retry at the end for transient (LLM tunnel, network) causes.
 
 Resume rules
-- done.json in the run dir marks a cell finished and it is never re-invoked.
-  loop.py actually writes done.json into the heldout dir whose path
-  run_dir/heldout.json records, so that location counts too.
+- done.json marks a cell finished and it is never re-invoked.  loop.py
+  writes it into the heldout dir whose path run_dir/heldout.json records,
+  so that is the location cell_done checks.
 - A cell with rounds.jsonl but no done.json is simply re-invoked: loop.py
   resumes mid-run at the next round (its own per-round checkpointing).
 - Killing this batch is safe: children run in their own process groups and are
@@ -204,15 +204,11 @@ def enumerate_cells(spec: Spec) -> list[Cell]:
 def cell_done(cell: Cell, runs_root: Path) -> bool:
     """True when the cell never needs to run again.
 
-    done.json in the run dir is the plan's stated contract; loop.py also
-    writes done.json into the heldout dir recorded in run_dir/heldout.json,
-    so both locations count.  Anything unreadable counts as unfinished: the
-    re-invocation is loop.py's own cheap no-op resume.
+    loop.py writes done.json into the heldout dir whose path
+    run_dir/heldout.json records.  Anything unreadable counts as unfinished:
+    the re-invocation is loop.py's own cheap no-op resume.
     """
-    run_dir = cell.run_dir(runs_root)
-    if (run_dir / "done.json").is_file():
-        return True
-    marker = run_dir / "heldout.json"
+    marker = cell.run_dir(runs_root) / "heldout.json"
     if not marker.is_file():
         return False
     try:

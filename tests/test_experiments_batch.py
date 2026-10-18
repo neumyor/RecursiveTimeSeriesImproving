@@ -5,9 +5,10 @@ from __future__ import annotations
 Everything runs against a FAKE loop command (the --loop-cmd seam): a tiny
 script in tmp_path that mirrors loop.py's CLI surface, records every
 invocation so tests can count attempts, creates the resume sentinels
-(rounds.jsonl, done.json) and exits 0 -- with seed-parameterized failure
-modes so crash containment, the single retry, and secret scrubbing are
-exercised without the real loop, any LLM, or any task simulation.
+(rounds.jsonl, done.json inside the heldout dir that heldout.json points
+to, exactly where loop.py writes it) and exits 0 -- with seed-parameterized
+failure modes so crash containment, the single retry, and secret scrubbing
+are exercised without the real loop, any LLM, or any task simulation.
 """
 
 import importlib.util
@@ -28,7 +29,7 @@ FAKE_SECRET = "sk-fake-batch-test-SECRET-value"
 # every time.  It also prints its API key like a chatty crash dump would, so
 # the driver's scrubbing has something real to scrub.
 FAKE_LOOP_SOURCE = """\
-import argparse, os, sys
+import argparse, json, os, sys
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -53,7 +54,10 @@ if args.seed in fail_once and not (run_dir / "rounds.jsonl").exists():
 if args.seed in fail_always:
     sys.exit(2)
 (run_dir / "rounds.jsonl").write_text("{}\\n", encoding="utf-8")
-(run_dir / "done.json").write_text("{}\\n", encoding="utf-8")
+heldout = run_dir / "heldout"
+heldout.mkdir(parents=True, exist_ok=True)
+(heldout / "done.json").write_text("{}\\n", encoding="utf-8")
+(run_dir / "heldout.json").write_text(json.dumps({"path": str(heldout)}) + "\\n", encoding="utf-8")
 """
 
 _batch_module = None
@@ -167,14 +171,17 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
         seeds=[0, 1, 2, 3],
     )
     # One cell is already finished: the loop command must never run for it.
-    pre_done = runs / "hmm-scalar-0"
-    pre_done.mkdir(parents=True)
-    (pre_done / "done.json").write_text("{}\n", encoding="utf-8")
+    pre_done_heldout = runs / "hmm-scalar-0" / "heldout"
+    pre_done_heldout.mkdir(parents=True)
+    (pre_done_heldout / "done.json").write_text("{}\n", encoding="utf-8")
+    (runs / "hmm-scalar-0" / "heldout.json").write_text(
+        json.dumps({"path": str(pre_done_heldout)}), encoding="utf-8"
+    )
 
     code = _main(batch, fake_loop, spec, runs)
 
     assert code == 1  # the four seed-3 cells fail even after the retry
-    assert not (pre_done / "invocations").exists()  # done.json cell was skipped
+    assert not (runs / "hmm-scalar-0" / "invocations").exists()  # done cell was skipped
 
     expected = {
         f"{task}-{arm}-{seed}"
@@ -191,7 +198,7 @@ def test_batch_runs_matrix_with_skip_retry_records_and_redaction(
         assert int(budget) == 3
         # The command carried the real csv exactly for real-task cells.
         assert (csv == str(tmp_path / "ett.csv")) == (task == "real-ett")
-        done = (runs / cell_id / "done.json").is_file()
+        done = (runs / cell_id / "heldout" / "done.json").is_file()
         assert done == (not cell_id.endswith("-3"))
 
     counts = _invocation_counts(runs)
