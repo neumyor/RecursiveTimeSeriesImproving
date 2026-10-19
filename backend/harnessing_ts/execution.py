@@ -70,8 +70,7 @@ class ExecutionController:
         async with self._lock:
             state = self.ensure_actor(actor_id, session_id)
             # A failed attempt holds no lease (fail() cleared it), so a new
-            # prompt starts a fresh attempt in a new epoch instead of locking
-            # the session out forever.
+            # prompt starts a fresh attempt in a new epoch.
             if state["phase"] not in {"ready", "paused", "failed"}:
                 raise RuntimeError(f"execution is {state['phase']}; it cannot accept a prompt")
             state.update({
