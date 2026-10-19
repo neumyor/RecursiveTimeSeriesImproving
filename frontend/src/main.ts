@@ -594,7 +594,7 @@ const experiments = createExperiments({
   escapeHtml,
   hydrateIcons,
   renderStable,
-  runAction,
+  runAction: runQuietAction,
   showDetail,
   emptyState,
   messageHtml,
