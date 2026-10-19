@@ -353,7 +353,10 @@ def spawn_cell(cmd: list[str], run_dir: Path, log_path: Path, attempt: int) -> t
             return None, redact(f"could not start the loop process: {exc}")
         with _LIVE_LOCK:
             if _STOPPING.is_set():
-                os.killpg(proc.pid, signal.SIGKILL)
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
                 proc.wait()
                 return None, "batch is stopping; this cell was not started"
             _LIVE_PROCS.append(proc)

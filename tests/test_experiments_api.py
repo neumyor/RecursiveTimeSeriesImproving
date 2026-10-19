@@ -115,7 +115,7 @@ def _kill_children() -> None:
     for pid in list(api._children):
         try:
             os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         api._children[pid].wait()
     api._children.clear()
@@ -435,8 +435,8 @@ def test_stop_and_resume_run_the_real_batch(real_batch) -> None:
     assert client.post(f"{base}/start", json={"spec": "tiny.json", "workers": 2}).status_code == 200
     _wait_stopped(client, base)
     assert set(_states(client, base).values()) == {"done"}
-    # Completed cells were not invoked again; the interrupted one was resumed once.  (batch may start
-    # one more queued cell between its SIGTERM and the pool shutdown, so the order is not asserted.)
+    # Completed cells were not invoked again; the interrupted one was resumed once.  (The restart runs
+    # two workers, so the order in which the remaining cells start is not asserted.)
     calls = _calls(work)
     assert {cell: calls.count(cell) for cell in set(calls)} == {
         "t1-fixed-0": 1, SLOW_CELL: 2, "t2-fixed-0": 1, "t2-self-built-0": 1,
@@ -658,13 +658,17 @@ def test_analysis_passes_real_task_csvs_from_the_runs_spec(env, monkeypatch) -> 
     seen: list = []
     _fake_analysis(monkeypatch, "pass", seen)
     assert client.post("/api/experiments/runs/r1/analysis").status_code == 200
-    assert seen[0][1] == {"real-ett": api.REPO_ROOT / "experiments/data/ETTh1.csv"}
+    assert seen[0][1] == {
+        "real-ett": api.REPO_ROOT / "experiments/data/ETTh1.csv",
+        "bad name": api.REPO_ROOT / "x.csv",
+    }
 
 
 def test_analysis_command_runs_posthoc_with_the_run_as_input_and_output(tmp_path) -> None:
     command = api._analysis_command(tmp_path / "r", {"real-ett": Path("/d/ETTh1.csv")})
     assert command == [
-        sys.executable, str(api.REPO_ROOT / "experiments" / "posthoc.py"),
+        "uv", "run", "--extra", "research", "python",
+        str(api.REPO_ROOT / "experiments" / "posthoc.py"),
         "--runs", str(tmp_path / "r"), "--out", str(tmp_path / "r" / "analysis.json"),
         "--real-csv", "real-ett=/d/ETTh1.csv",
     ]

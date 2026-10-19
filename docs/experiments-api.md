@@ -20,7 +20,7 @@ heldout 数据只给操作者看，页面显示它不会泄露给智能体（智
 
 ## 路由
 
-所有路由前缀 `/api/experiments`。运行名称、规格名称与单元格名称必须整串匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`（首字符为字母或数字，与 `batch.py` 的名称规则一致；末尾换行等也不允许）。
+所有路由前缀 `/api/experiments`。运行名称、规格名称与单元格名称必须整串匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`（首字符为字母或数字，与 `batch.py` 的名称规则一致）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -69,19 +69,17 @@ RoundDetail      { round, proposal: object, posthoc: [{label, aspect, delta, lcb
 
 `start` 请求体：`{ "spec": "<规格文件名>", "workers": int (默认 4, 1-16), "only": str (默认 "") }`。成功响应 `{ "process": ProcessStatus }`。同一个运行名称已有进程时返回 409。运行名称对应的目录不存在时创建。
 
-`stop` 向进程组发送 SIGTERM；响应 `{ "process": ProcessStatus }`。没有进程时返回 409。
-
 `start` 的补充规则：运行目录里已有 `batch-process.json` 且其 `specPath` 的文件名与请求的 `spec` 不同，则返回 409（一个运行目录对应一份实验协议，换规格请换运行名称），与进程是否存活无关。
 
-`stop` 向进程组发送 SIGTERM（batch 收到后会终止所有单元格子进程，宽限 5 秒），并等待进程退出最多 8 秒；响应里的 `process.state` 仍可能是 `running`（超时未退出）。
+`stop` 向进程组发送 SIGTERM（batch 收到后会终止所有单元格子进程，宽限 5 秒），并等待进程退出最多 8 秒；响应 `{ "process": ProcessStatus }`，其中 `process.state` 仍可能是 `running`（超时未退出）。没有进程时返回 409。
 
 `GET /runs/{name}/analysis` 返回 `AnalysisStatus`。`process.state` 为 `running` / `stopped` / `none`（从未启动过分析）。`analysis` 是 `analysis.json` 原样的解析结果（`endpointTable`、`contrasts`、`runs`、`incomplete`、`audit` 等，字段以 posthoc 输出为准，API 不改写）；半写入或损坏的文件得到 `null`，不会报 500。
 
-`POST /runs/{name}/analysis` 无请求体，成功响应 `{ "process": ProcessStatus }`。API 在后台子进程（独立会话）里运行 `sys.executable experiments/posthoc.py --runs <运行目录> --out <运行目录>/analysis.json`，输出写入 `<运行目录>/analysis-run.log`（每次启动覆盖），pid 记入 `analysis-process.json`，请求线程内不导入也不调用 posthoc。同一次运行同时只允许一个分析进程，已有存活进程返回 409。真实任务需要 CSV：如果 `batch-process.json` 记录了 `specPath`，则对该规格里每个 `kind` 为 `real` 的任务追加 `--real-csv <任务名>=<仓库根目录>/<该任务的 csv>`；没有记录规格时不追加。服务端的 Python 环境必须已安装 posthoc 的研究依赖（`research` extra）；分析失败时原因在 `logTail` 里。
+`POST /runs/{name}/analysis` 无请求体，成功响应 `{ "process": ProcessStatus }`。API 在后台子进程（独立会话）里运行 `uv run --extra research python experiments/posthoc.py --runs <运行目录> --out <运行目录>/analysis.json`，输出写入 `<运行目录>/analysis-run.log`（每次启动覆盖），pid 记入 `analysis-process.json`，请求线程内不导入也不调用 posthoc。同一次运行同时只允许一个分析进程，已有存活进程返回 409。真实任务需要 CSV：如果 `batch-process.json` 记录了 `specPath`，则对该规格里每个 `kind` 为 `real` 的任务追加 `--real-csv <任务名>=<仓库根目录>/<该任务的 csv>`；没有记录规格时不追加。分析失败时 `process.state` 为 `stopped` 且 `analysis` 为 `null`，原因在 `logTail` 里；每次启动分析前先删除旧的 `analysis.json`，所以旧结果不会被当作新结果。
 
-增量模型曲线与摘要：`incumbentCurve` 每个轮次下标一个点，从第 0 轮到 `rounds.jsonl` 里最后一轮。第 0 轮是初始模型 m0，`mse` 为 `<heldout>/posthoc/m0.json` 的 `diagMse`（文件不存在时为 `null`），`accepted` 恒为 `false`。之后每一轮的 `mse` 是该轮结束后当前 incumbent 的诊断 MSE：该轮被接受则是候选自己的 `diagMse`，否则沿用上一点的值；`accepted` 为 `true` 表示该轮 incumbent 发生了变化。`rounds` 字段不变，仍是每个候选自己的 `diagMse`。`CellSummary.incumbentMse` 等于曲线最后一点的 `mse`（最后一次被接受候选的 `diagMse`，没有则 m0 的 `diagMse`，再没有则 `null`）；`lastDiagMse` 是最后一个有数值的候选 `diagMse`。
+增量模型曲线与摘要：`incumbentCurve` 每个轮次下标一个点，从第 0 轮到 `rounds.jsonl` 里最后一轮。第 0 轮是初始模型 m0，`mse` 为 `<heldout>/posthoc/m0.json` 的 `diagMse`（文件不存在时为 `null`），`accepted` 恒为 `false`。之后每一轮的 `mse` 是该轮结束后当前 incumbent 的诊断 MSE：该轮被接受则是候选自己的 `diagMse`，否则沿用上一点的值；`accepted` 为 `true` 表示该轮 incumbent 发生了变化。`rounds` 每行的 `diagMse` 是该候选自己的诊断 MSE。`CellSummary.incumbentMse` 等于曲线最后一点的 `mse`（最后一次被接受候选的 `diagMse`，没有则 m0 的 `diagMse`，再没有则 `null`）；`lastDiagMse` 是最后一个有数值的候选 `diagMse`。
 
-状态判定：进程是否存活由 `batch-process.json` 中的 pid 检查：本服务启动的子进程看其退出状态；服务重启后，pid 必须存在、有权限访问且是自己进程组的组长（启动时使用新会话，所以 pid 等于 pgid；这排除了 pid 被其他进程复用的情况）。单元格状态按下列顺序判定：
+状态判定：进程是否存活由 `batch-process.json` 中的 pid 检查：本服务启动的子进程看其退出状态；服务重启后，pid 必须存在、有权限访问且是自己进程组的组长（启动时使用新会话，所以 pid 等于 pgid；这排除了大部分 pid 被复用的情况，但排除不了复用者恰好也是进程组组长的情形）。单元格状态按下列顺序判定：
 
 1. `done`：heldout 目录下有 `done.json`（与 `batch.py` 的 `cell_done` 一致）。
 2. `running`：batch 进程存活，并且 `logs/<cell>.log` 的修改时间不早于进程的 `startedAt`，也晚于该单元格最后一条 `batch-status.jsonl` 事件的时间（事件时间只精确到秒，所以比较的是日志修改时间取整到秒）。

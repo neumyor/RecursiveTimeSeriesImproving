@@ -77,6 +77,7 @@ def _load_batch():
         sys.modules["rhg_batch"] = module  # register before exec: dataclasses need it
         spec.loader.exec_module(module)
         _batch_module = module
+    _batch_module._STOPPING.clear()  # a stop in an earlier test must not carry over
     return _batch_module
 
 

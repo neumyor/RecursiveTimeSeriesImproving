@@ -172,8 +172,9 @@ def list_specs() -> list[dict[str, Any]]:
 
 def _pid_alive(pid: int) -> bool:
     """A child of this server is alive until it exits; any other pid must be a
-    process-group leader (children start in their own session, so pid == pgid),
-    which rules out an unrelated process that reused the pid."""
+    process-group leader (children start in their own session, so pid == pgid).
+    The leader check rules out most reused pids but not one that happens to
+    lead its own group."""
     child = _children.get(pid)
     if child is not None:
         return child.poll() is None
@@ -297,15 +298,15 @@ def _real_csvs(run_dir: Path) -> dict[str, Path]:
     tasks = raw.get("tasks") if isinstance(raw, dict) else None
     csvs: dict[str, Path] = {}
     for task in tasks if isinstance(tasks, list) else []:
-        if isinstance(task, dict) and task.get("kind") == "real" and _valid_name(task.get("name")) \
-                and isinstance(task.get("csv"), str):
+        if isinstance(task, dict) and task.get("kind") == "real" and isinstance(task.get("csv"), str):
             csvs[task["name"]] = REPO_ROOT / task["csv"]
     return csvs
 
 
 def _analysis_command(run_dir: Path, real_csvs: dict[str, Path]) -> list[str]:
     command = [
-        sys.executable, str(REPO_ROOT / "experiments" / "posthoc.py"),
+        "uv", "run", "--extra", "research", "python",
+        str(REPO_ROOT / "experiments" / "posthoc.py"),
         "--runs", str(run_dir), "--out", str(run_dir / _ANALYSIS_FILE),
     ]
     for task, csv in real_csvs.items():
@@ -320,6 +321,7 @@ def start_analysis(name: str) -> dict[str, Any]:
         record = _process_record(run_dir, _ANALYSIS_PROCESS_FILE)
         if record is not None and _pid_alive(record["pid"]):
             raise HTTPException(status_code=409, detail=f"run {name} already has a running analysis")
+        (run_dir / _ANALYSIS_FILE).unlink(missing_ok=True)
         record = _launch(
             run_dir, _analysis_command(run_dir, _real_csvs(run_dir)), _ANALYSIS_LOG, "wb",
             _ANALYSIS_PROCESS_FILE, {},
