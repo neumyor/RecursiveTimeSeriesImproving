@@ -67,7 +67,7 @@ RoundDetail      { round, proposal: object, posthoc: [{label, aspect, delta, lcb
                    parts: [Part] }             # Part = 公开部件，与对话页相同
 ```
 
-`start` 请求体：`{ "spec": "<规格文件名>", "workers": int (默认 4, 1-16), "only": str (默认 "") }`。成功响应 `{ "process": ProcessStatus }`。同一个运行名称已有进程时返回 409。运行名称对应的目录不存在时创建。
+`start` 请求体：`{ "spec": "<规格文件名>", "workers": int (默认 4, 1-16), "only": str (默认 "") }`。成功响应 `{ "process": ProcessStatus }`。同一个运行名称已有进程时返回 409。运行名称对应的目录不存在时创建。`only` 直接传给 `experiments/batch.py`，其中 `cell=<值>` 按单元格名子串匹配；需要精确匹配时用完整 cell id。
 
 `start` 的补充规则：运行目录里已有 `batch-process.json` 且其 `specPath` 的文件名与请求的 `spec` 不同，则返回 409（一个运行目录对应一份实验协议，换规格请换运行名称），与进程是否存活无关。
 

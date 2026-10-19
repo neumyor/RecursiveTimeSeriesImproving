@@ -342,11 +342,18 @@ class _Replay:
 
 
 def _offending_paths(text: str, allowed: list[Path]) -> set[str]:
-    """Absolute filesystem paths in ``text`` outside every allowed root."""
+    """Absolute filesystem paths in ``text`` outside every allowed root.
+
+    A path counts as absolute only when the leading slash starts a token, so
+    the slash inside a workspace-relative path such as ``models/candidates/x``
+    or a glob such as ``models/*/model.py`` is not read as the root directory.
+    """
     found: set[str] = set()
     text = re.sub(r"https?://\S+", " ", text)  # URL path segments are not filesystem paths
-    for match in re.findall(r"/[A-Za-z0-9_][A-Za-z0-9_.\-/]*", text):
-        raw = match.rstrip(".,;:)]}\"'")
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_.\-~*/?\[\]{}])/[A-Za-z0-9_][A-Za-z0-9_.\-/]*", text
+    ):
+        raw = match.group().rstrip(".,;:)]}\"'")
         resolved = Path(raw).resolve()
         if all(resolved != root and root not in resolved.parents for root in allowed):
             found.add(raw)

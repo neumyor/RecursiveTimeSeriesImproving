@@ -738,14 +738,21 @@ export function createExperiments(deps: ExperimentsDeps) {
     const data = s.analysis;
     const analysis: Analysis | null = data?.analysis ?? null;
     const running = s.analysisBusy || data?.process.state === 'running';
+    const failed = !running && !analysis && data?.process.state === 'stopped';
     const chip = running
       ? '<span class="mini-pill active"><span data-icon="Loader2"></span>生成中</span>'
+      : failed ? '<span class="mini-pill failed">失败</span>'
       : analysis ? '<span class="mini-pill ready">已生成</span>' : '<span class="mini-pill idle">未生成</span>';
     const names = (list: string[] | undefined) => (list ?? []).map(esc).join('、');
     const parts: string[] = [];
     if (s.analysisError) parts.push(`<div class="exp-hint error">读取分析失败：${esc(s.analysisError)}</div>`);
     if (!analysis) {
-      parts.push(emptyState(running ? '正在生成分析…' : '尚未生成。点击“生成分析”，对本运行中已完成的单元格做 posthoc 分析。', running ? 'Loader2' : 'Info'));
+      parts.push(emptyState(
+        running ? '正在生成分析…'
+          : failed ? '分析进程已结束但没有写出 analysis.json，原因见下方日志。'
+          : '尚未生成。点击“生成分析”，对本运行中已完成的单元格做 posthoc 分析。',
+        running ? 'Loader2' : failed ? 'AlertTriangle' : 'Info',
+      ));
     } else {
       const records = analysis.runs ?? [];
       const broken = records.filter((record) => record.error);
@@ -787,7 +794,9 @@ export function createExperiments(deps: ExperimentsDeps) {
       if (audit?.pathViolationRuns?.length) parts.push(`<div class="exp-hint error">审计：路径违规的运行 ${names(audit.pathViolationRuns)}</div>`);
       if (audit?.gainRatioFlagRuns?.length) parts.push(`<div class="exp-hint error">审计：增益比标记的运行 ${names(audit.gainRatioFlagRuns)}</div>`);
     }
-    if (data?.logTail) parts.push(`<details class="exp-keep exp-sublog"><summary>分析日志尾部</summary><pre class="exp-pre">${esc(data.logTail)}</pre></details>`);
+    if (data?.logTail) {
+      parts.push(`<details class="exp-keep exp-sublog"${failed ? ' open' : ''}><summary>分析日志尾部</summary><pre class="exp-pre">${esc(data.logTail)}</pre></details>`);
+    }
     target.innerHTML = `
       <div class="exp-head-row exp-analysis-head">
         <div class="exp-head-title panel-heading"><span data-icon="Gauge"></span><span>posthoc 分析</span>${chip}</div>

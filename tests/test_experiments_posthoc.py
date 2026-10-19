@@ -383,6 +383,10 @@ def test_audit_flags_planted_out_of_ws_paths(
         # planted violations: an out-of-ws read and a heldout-path glob
         {"type": "tool_call", "name": "grep", "input": {"path": "/etc/passwd"}},
         {"type": "tool_call", "name": "glob", "input": {"pattern": str(heldout_dir / "**")}},
+        # a workspace-relative path whose slash separates directories is not absolute
+        {"type": "tool_call", "name": "read", "input": {"path": "models/candidates/x/model.py"}},
+        # nor is the slash after a glob wildcard
+        {"type": "tool_call", "name": "glob", "input": {"pattern": "models/*/model.py"}},
     ]
     (logs / "round-1.jsonl").write_text(
         "\n".join(json.dumps(part) for part in parts) + "\n", encoding="utf-8"
@@ -416,6 +420,7 @@ def test_audit_flags_planted_out_of_ws_paths(
     assert any(str(heldout_dir) in item for item in violations)
     assert not any("series.npy" in item for item in violations)
     assert not any("backend" in item for item in violations)
+    assert not any(item.startswith("/candidates") for item in violations)
     assert report["audit"]["pathViolationRuns"] == [rec["run"]]
 
 
