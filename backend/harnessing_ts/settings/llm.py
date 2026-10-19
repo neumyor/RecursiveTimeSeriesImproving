@@ -88,11 +88,16 @@ def mask_llm_config(cfg: LlmConfig) -> dict[str, Any]:
 
 
 def _read_llm_config_file(workspace_path: Path) -> LlmConfig:
-    for path in (
+    # The server exports this path to every experiment child; the settings
+    # page writes the file, while a cell's own ws is not the server workspace.
+    configured = os.getenv("TS_HARNESS_LLM_CONFIG_FILE", "").strip()
+    candidates = [Path(configured).expanduser()] if configured else []
+    candidates += [
         workspace_path / "config.llm.json",
         Path.cwd() / "config.llm.json",
         project_root() / "config.llm.json",
-    ):
+    ]
+    for path in candidates:
         if path.exists():
             return sanitize_llm_config(json.loads(path.read_text(encoding="utf-8")))
     return LlmConfig()

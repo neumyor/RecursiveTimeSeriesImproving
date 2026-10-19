@@ -289,6 +289,10 @@ class WorkspaceStore:
         sanitized = asdict(config)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, sanitized)
+        try:
+            path.chmod(0o600)  # the file may carry an API key
+        except OSError:
+            pass
         self.append_timeline({
             "type": timeline_type,
             "timestamp": now_iso(),

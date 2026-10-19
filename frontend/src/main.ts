@@ -42,7 +42,6 @@ const state = {
   renderSignatures: new Map<string, string>(),
   settings: {
     mainAuthMode: 'manual',
-    mainProtocol: '',
     mainModel: '',
     mainBaseUrl: '',
     mainApiKey: '',
@@ -70,7 +69,7 @@ app.innerHTML = `
         <div class="settings-header-text">
           <div class="settings-eyebrow"><span data-icon="SlidersHorizontal"></span><span>工作区</span></div>
           <h1 class="settings-title">设置</h1>
-          <p class="settings-subtitle">运行参数和主模型配置。保存后对之后启动的实验生效。</p>
+          <p class="settings-subtitle">工作区信息和主模型配置。模型设置对之后启动的实验生效。</p>
         </div>
         <div class="settings-header-actions">
           <button id="settingsDoneBtn" type="button" class="settings-done-btn"><span data-icon="ChevronLeft"></span><span>返回实验</span></button>
@@ -210,7 +209,6 @@ function applyBootstrapSnapshot(data: Bootstrap) {
 function syncSettingsFromBootstrap(data: Bootstrap) {
   const main = data.llmConfig?.config || {};
   state.settings.mainAuthMode = main.authMode || 'manual';
-  state.settings.mainProtocol = main.protocol || '';
   state.settings.mainModel = main.model || '';
   state.settings.mainBaseUrl = main.baseUrl || '';
   // apiKey is masked (e.g. "****1234"); the editor starts empty on each seed.
@@ -236,15 +234,13 @@ function renderSettings() {
   }
   renderStable(
     'settings-workspace',
-    [data.variant, data.state, data.dryRun, data.debugEnabled, data.runtime?.workspaceUv],
+    [data.state, data.dryRun, data.debugEnabled, data.runtime?.workspaceUv?.workspace],
     () => renderSettingsWorkspace(data),
   );
 }
 
 function renderSettingsWorkspace(data: Bootstrap) {
   const workspaceRows = [
-    { label: '流程版本', value: variantPill(data.variant) },
-    { label: '运行环境', value: runtimePill(data.runtime?.workspaceUv) },
     {
       label: '工作区路径',
       value: `<span class="settings-readout-mono">${escapeHtml(data.runtime?.workspaceUv?.workspace || '')}</span>`,
@@ -270,7 +266,7 @@ function renderSettingsWorkspace(data: Bootstrap) {
           </div>
         </div>
       </div>
-      <p class="settings-section-foot">这些项目由服务启动参数决定，例如 <code>TS_HARNESS_VARIANT</code> 和 <code>TS_HARNESS_CONTROL_MODE</code>。如需修改，请重启服务。</p>
+      <p class="settings-section-foot">工作区路径由服务启动参数 <code>TS_HARNESS_WORKSPACE</code> 决定。如需修改，请重启服务。</p>
     </div>
   `;
   bindSettingsWorkspaceHandlers(els.settingsWorkspaceSection);
@@ -289,11 +285,6 @@ function renderMainLlmSection(): string {
     { value: 'manual', label: '手动配置' },
     { value: 'sdk-default', label: 'SDK 默认' },
   ];
-  const protocolOptions = [
-    { value: '', label: '自动' },
-    { value: 'deepseek', label: 'deepseek' },
-    { value: 'openai-compat', label: 'openai-compat' },
-  ];
   return `
     <div class="settings-section">
       <div class="settings-section-header">主模型</div>
@@ -301,10 +292,6 @@ function renderMainLlmSection(): string {
         <div class="settings-row">
           <div class="settings-row-label">认证方式</div>
           <div class="settings-row-control">${segmentedHtml('mainAuthMode', authOptions.map((o) => o.value), s.mainAuthMode, authOptions.map((o) => o.label))}</div>
-        </div>
-        <div class="settings-row">
-          <div class="settings-row-label">接口协议</div>
-          <div class="settings-row-control">${segmentedHtml('mainProtocol', protocolOptions.map((o) => o.value), s.mainProtocol, protocolOptions.map((o) => o.label))}</div>
         </div>
         <div class="settings-row">
           <div class="settings-row-label">模型</div>
@@ -324,7 +311,7 @@ function renderMainLlmSection(): string {
           <span class="settings-save-status" id="mainSaveStatus"></span>
         </div>
       </div>
-      <p class="settings-section-foot">供实验智能体使用。保存到 <code>&lt;workspace&gt;/config.llm.json</code>，通常在下一次启动的实验单元格生效。</p>
+      <p class="settings-section-foot">供实验智能体使用。保存到 <code>&lt;workspace&gt;/config.llm.json</code>，新启动的实验单元格会读取它；环境变量 <code>TS_HARNESS_LLM_*</code> 优先。</p>
     </div>
   `;
 }
@@ -351,7 +338,6 @@ function bindSettingsFormHandlers(root: HTMLElement) {
           sibling.classList.toggle('selected', sibling === item);
         }
         if (name === 'mainAuthMode') state.settings.mainAuthMode = value;
-        else if (name === 'mainProtocol') state.settings.mainProtocol = value;
       });
     }
   }
@@ -402,7 +388,6 @@ async function saveLlmConfig() {
   const s = state.settings;
   const body: JsonMap = {
     authMode: s.mainAuthMode,
-    protocol: s.mainProtocol,
     model: s.mainModel,
     apiKey: s.mainApiKey || undefined,
     baseUrl: s.mainBaseUrl,
@@ -426,11 +411,10 @@ async function saveLlmConfig() {
 }
 
 async function resetMainLlmConfig() {
-  if (!confirm('是否将主模型恢复为文件默认值？这会清空保存在 <workspace>/config.llm.json 中的模型、接口地址和协议设置；API 密钥会保留。')) return;
+  if (!confirm('是否将主模型恢复为文件默认值？这会清空保存在 <workspace>/config.llm.json 中的模型和接口地址设置；API 密钥会保留。')) return;
   try {
     const result = await postJson('/api/llm-config', {
       authMode: 'sdk-default',
-      protocol: '',
       model: '',
       baseUrl: '',
     });
@@ -633,37 +617,6 @@ function statusLabel(status: any) {
 }
 
 // ------------------------------------------------------------ shared helpers
-
-function variantPill(variant: JsonMap | null | undefined) {
-  if (!variant?.id) return '<span class="mini-pill pending">-</span>';
-  const id = String(variant.id).toUpperCase();
-  const label = `${id} · ${variantNameLabel(variant)}`;
-  const isDefault = id === 'NOD-KGR-KTL-CRV-SUB-ADA';
-  const features = Array.isArray(variant.features) ? `功能：${variant.features.join(', ')}` : '';
-  const title = [variant.description || label, features].filter(Boolean).join('\n');
-  return `<span class="mini-pill variant-pill ${isDefault ? 'variant-default' : 'variant-ablation'}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
-}
-
-function variantNameLabel(variant: JsonMap) {
-  const id = String(variant.id || '').toUpperCase();
-  if (id === 'NOD-KGR-KTL-CRV-SUB-ADA') return '完整流程';
-  return String(variant.name || '未命名流程');
-}
-
-function formatRuntimeUv(runtimeUv: JsonMap | null | undefined) {
-  if (!runtimeUv) return '-';
-  const runtimeState = runtimeUv.state || 'unknown';
-  if (runtimeState === 'ready') return `就绪 · Python ${runtimeUv.pythonVersion || ''}`.trim();
-  if (runtimeState === 'skipped') return '已跳过';
-  if (runtimeState === 'failed') return '失败';
-  return runtimeState;
-}
-
-function runtimePill(runtimeUv: JsonMap | null | undefined) {
-  const text = formatRuntimeUv(runtimeUv);
-  const tone = text.startsWith('就绪') ? 'ready' : text === '失败' ? 'failed' : 'pending';
-  return `<span class="mini-pill ${tone}">${escapeHtml(text)}</span>`;
-}
 
 function emptyState(text: string, icon = 'Info') {
   return `<div class="empty"><span data-icon="${icon}"></span><span>${escapeHtml(text)}</span></div>`;

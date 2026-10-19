@@ -40,6 +40,13 @@ def test_write_main_llm_config_persists_and_merges(tmp_path) -> None:
     assert raw["apiKey"] == "sk-abcdef1234"
 
 
+def test_write_main_llm_config_restricts_the_file_mode(tmp_path) -> None:
+    store = _build_workspace(tmp_path)
+    store.write_main_llm_config({"model": "m", "apiKey": "secret-value"})
+
+    assert (tmp_path / "config.llm.json").stat().st_mode & 0o777 == 0o600
+
+
 def test_write_main_llm_config_drops_empty_or_masked_secrets(tmp_path) -> None:
     store = _build_workspace(tmp_path)
     store.write_main_llm_config({"model": "m1", "apiKey": "first-secret"})

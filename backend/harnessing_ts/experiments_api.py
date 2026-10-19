@@ -24,6 +24,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from harnessing_ts.agent.translate import collapse_tool_parts, filter_display_parts
+from harnessing_ts.paths import default_workspace_path
 from harnessing_ts.state.jsonl import read_jsonl
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -205,15 +206,29 @@ def _process_status(record: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _llm_config_env() -> dict[str, str]:
+    """The server workspace's LLM config, inherited by every experiment child.
+
+    The settings page writes <workspace>/config.llm.json, but loop.py runs
+    with its cell's ws as its workspace; an explicit path is the only way
+    the saved file reaches the run.
+    """
+    configured = os.getenv("TS_HARNESS_LLM_CONFIG_FILE", "").strip()
+    path = Path(configured).expanduser() if configured else default_workspace_path() / "config.llm.json"
+    return {"TS_HARNESS_LLM_CONFIG_FILE": str(path)}
+
+
 def _launch(
-    run_dir: Path, command: list[str], log_file: str, log_mode: str, record_file: str, extra: dict[str, Any],
+    run_dir: Path, command: list[str], log_file: str, log_mode: str, record_file: str,
+    extra: dict[str, Any], extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Start command in its own session, output to run_dir/log_file; remember its pid."""
+    env = {**os.environ, **extra_env} if extra_env is not None else None
     with (run_dir / log_file).open(log_mode) as log:
         try:
             proc = subprocess.Popen(
                 command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                cwd=REPO_ROOT, start_new_session=True,
+                cwd=REPO_ROOT, start_new_session=True, env=env,
             )
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"could not start process: {exc}") from None
@@ -267,6 +282,7 @@ def start_run(name: str, body: StartRequest) -> dict[str, Any]:
         record = _launch(
             run_dir, _batch_command(spec_path, run_dir, body.workers, body.only), _BATCH_LOG, "ab", _PROCESS_FILE,
             {"specPath": str(spec_path), "workers": body.workers, "only": body.only},
+            extra_env=_llm_config_env(),
         )
     return {"process": _process_status(record)}
 

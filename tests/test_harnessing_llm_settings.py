@@ -51,3 +51,17 @@ def test_env_var_overrides_the_file_for_max_tokens(tmp_path: Path, monkeypatch) 
     assert read_effective_llm_config(tmp_path).maxTokens == 8192
     monkeypatch.setenv("TS_HARNESS_LLM_MAX_TOKENS", "not-a-number")
     assert read_effective_llm_config(tmp_path).maxTokens == 16384
+
+
+def test_explicit_config_file_wins_over_workspace_discovery(tmp_path: Path, monkeypatch) -> None:
+    server_config = tmp_path / "server-config.json"
+    server_config.write_text(
+        json.dumps({"authMode": "manual", "model": "server-model", "apiKey": "sk-server"}),
+        encoding="utf-8",
+    )
+    cell_ws = tmp_path / "cell-ws"
+    cell_ws.mkdir()
+    _write_config(cell_ws, {"authMode": "manual", "model": "cell-model", "apiKey": "sk-cell"})
+    monkeypatch.setenv("TS_HARNESS_LLM_CONFIG_FILE", str(server_config))
+
+    assert read_effective_llm_config(cell_ws).model == "server-model"

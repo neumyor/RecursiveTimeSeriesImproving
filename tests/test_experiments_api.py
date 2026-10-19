@@ -740,3 +740,24 @@ def test_create_app_serves_the_experiment_routes(env, tmp_path, monkeypatch) -> 
     response = TestClient(create_app()).get("/api/experiments/specs")
     assert response.status_code == 200
     assert response.json()[0]["file"] == "tiny.json"
+
+
+def test_experiment_children_receive_the_server_llm_config_path(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(workspace))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    output = tmp_path / "env.txt"
+    command = [
+        sys.executable, "-c",
+        f"import os, pathlib; pathlib.Path({str(output)!r}).write_text("
+        "os.environ.get('TS_HARNESS_LLM_CONFIG_FILE', ''))",
+    ]
+
+    record = api._launch(
+        run_dir, command, "process.log", "wb", "process.json", {},
+        extra_env=api._llm_config_env(),
+    )
+    api._children.pop(record["pid"]).wait(timeout=10)
+
+    assert output.read_text() == str(workspace / "config.llm.json")
