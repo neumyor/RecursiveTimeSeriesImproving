@@ -1,8 +1,10 @@
-// Experiment-run pages: start a batch from a spec, watch cells and rounds, read final metrics.
-// Backed by the routes in docs/experiments-api.md. One module-level poll timer (5 s) runs only
-// while the view is open; all rendering is plain HTML strings plus click delegation on the root.
+// Experiment-run pages: start a batch from a spec, watch cells and rounds, read the posthoc analysis.
+// Backed by the routes in docs/experiments-api.md. One poll timer (5 s) runs only while the view
+// is open; all rendering is plain HTML strings plus click delegation on the root.
 import { fetchJson, postJson } from './api';
 import type {
+  Analysis,
+  AnalysisResponse,
   BatchEvent,
   CellDetail,
   CellState,
@@ -19,8 +21,7 @@ import type {
 
 const API = '/api/experiments';
 const POLL_MS = 5000;
-const CTA_POLL_MS = 30000;
-const NAME_RE = /^[A-Za-z0-9._-]+$/;
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/; // same rule as the server's fullmatch
 
 export type ExperimentsDeps = {
   root: HTMLElement;
@@ -29,7 +30,6 @@ export type ExperimentsDeps = {
   hydrateIcons: (root: ParentNode) => void;
   renderStable: (key: string, value: any, renderFn: () => void) => void;
   runAction: (fn: () => Promise<void>) => Promise<void>;
-  showDetail: (title: string, value: any) => void;
   emptyState: (text: string, icon?: string) => string;
   messageHtml: (part: JsonMap) => string;
   normalizeChatParts: (parts: JsonMap[]) => JsonMap[];
@@ -39,6 +39,15 @@ export type ExperimentsDeps = {
 
 type Route = { run: string | null; cell: string | null; round: number | null };
 
+const safeDecode = (part: string) => {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
+};
+const errText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
 export function createExperiments(deps: ExperimentsDeps) {
   const { root, escapeHtml: esc, hydrateIcons, renderStable, emptyState } = deps;
 
@@ -47,19 +56,28 @@ export function createExperiments(deps: ExperimentsDeps) {
     shellBuilt: false,
     route: { run: null, cell: null, round: null } as Route,
     pageKey: '',
-    skeleton: 0,
+    gen: 0, // bumped whenever the page skeleton is rebuilt, so every card redraws once
     specs: null as SpecSummary[] | null,
+    specsError: '',
     runs: null as RunSummary[] | null,
+    runsError: '',
     run: null as RunSnapshot | null,
     cell: null as CellDetail | null,
     cellRun: '',
     round: null as RoundDetail | null,
     roundKey: '',
+    analysis: null as AnalysisResponse | null,
+    analysisRun: '',
+    analysisError: '',
+    analysisBusy: false,
+    analysisForce: false,
     error: '',
     updatedAt: '',
     timer: null as number | null,
     flight: null as Promise<void> | null,
-    form: { spec: '', name: '', workers: 4, only: '', nameTouched: false },
+    starting: false,
+    startError: '',
+    form: { spec: '', name: '', workers: 4, only: '', nameTouched: false }, // spec = SpecSummary.file
   };
 
   // ------------------------------------------------------------ routing
@@ -73,7 +91,7 @@ export function createExperiments(deps: ExperimentsDeps) {
   }
 
   function parseRoute(): Route {
-    const parts = window.location.pathname.split('/').filter(Boolean).slice(1).map(decodeURIComponent);
+    const parts = window.location.pathname.split('/').filter(Boolean).slice(1).map(safeDecode);
     const run = parts[0] || null;
     const cell = run ? parts[1] || null : null;
     const round = cell && parts[2] !== undefined && /^\d+$/.test(parts[2]) ? Number(parts[2]) : null;
@@ -92,6 +110,11 @@ export function createExperiments(deps: ExperimentsDeps) {
     if (s.cell && (s.cellRun !== s.route.run || s.cell.cell !== s.route.cell)) s.cell = null;
     const roundKey = `${s.route.run}/${s.route.cell}/${s.route.round}`;
     if (s.round && s.roundKey !== roundKey) s.round = null;
+    if (s.analysisRun !== (s.route.run ?? '')) {
+      s.analysis = null;
+      s.analysisError = '';
+      s.analysisRun = s.route.run ?? '';
+    }
     renderPage();
     requestTick();
   }
@@ -121,44 +144,18 @@ export function createExperiments(deps: ExperimentsDeps) {
   // Timer ticks skip while the tab is hidden; route changes and manual refreshes always load.
   async function tick(force: boolean) {
     if (!s.active || s.flight || (document.hidden && !force)) return;
-    const route = s.route;
-    const key = pathFor(route);
+    const { run, cell, round } = s.route;
+    const key = pathFor(s.route);
     const work = (async () => {
+      let error = '';
       try {
-        if (!route.run) {
-          const [runs, specs] = await Promise.all([
-            fetchJson<RunSummary[]>(`${API}/runs`),
-            s.specs ? Promise.resolve(s.specs) : fetchJson<SpecSummary[]>(`${API}/specs`),
-          ]);
-          if (!stillHere(key)) return;
-          s.runs = runs;
-          s.specs = specs;
-          applyCta(runs);
-        } else if (!route.cell) {
-          const run = await fetchJson<RunSnapshot>(`${API}/runs/${encodeURIComponent(route.run)}`);
-          if (!stillHere(key)) return;
-          s.run = run;
-        } else {
-          const base = `${API}/runs/${encodeURIComponent(route.run)}/cells/${encodeURIComponent(route.cell)}`;
-          const needCell = route.round === null || !s.cell;
-          const [cell, round] = await Promise.all([
-            needCell ? fetchJson<CellDetail>(base) : Promise.resolve(s.cell as CellDetail),
-            route.round !== null ? fetchJson<RoundDetail>(`${base}/rounds/${route.round}`) : Promise.resolve(null),
-          ]);
-          if (!stillHere(key)) return;
-          s.cell = cell;
-          s.cellRun = route.run;
-          if (round) {
-            s.round = round;
-            s.roundKey = `${route.run}/${route.cell}/${route.round}`;
-          }
-        }
-        s.error = '';
-        s.updatedAt = new Date().toLocaleTimeString();
-      } catch (error) {
-        if (!stillHere(key)) return;
-        s.error = error instanceof Error ? error.message : String(error);
+        error = !run ? await loadList(key) : !cell ? await loadRun(run, key) : await loadCell(run, cell, round, key);
+      } catch (caught) {
+        error = errText(caught);
       }
+      if (!stillHere(key)) return;
+      s.error = error;
+      if (!error) s.updatedAt = new Date().toLocaleTimeString();
       renderPage();
     })();
     s.flight = work.finally(() => {
@@ -169,6 +166,72 @@ export function createExperiments(deps: ExperimentsDeps) {
 
   function stillHere(key: string) {
     return s.active && pathFor(s.route) === key;
+  }
+
+  // Each loader returns the error text to show in the status line ('' when everything loaded).
+  async function loadList(key: string): Promise<string> {
+    const [runs, specs] = await Promise.allSettled([
+      fetchJson<RunSummary[]>(`${API}/runs`),
+      s.specs ? Promise.resolve(s.specs) : fetchJson<SpecSummary[]>(`${API}/specs`),
+    ]);
+    if (!stillHere(key)) return '';
+    if (runs.status === 'fulfilled') {
+      s.runs = runs.value;
+      s.runsError = '';
+      applyCta(runs.value);
+    } else {
+      s.runsError = errText(runs.reason);
+    }
+    if (specs.status === 'fulfilled') {
+      s.specs = specs.value;
+      s.specsError = '';
+    } else {
+      s.specsError = errText(specs.reason);
+    }
+    return [s.runsError && `运行列表：${s.runsError}`, s.specsError && `规格：${s.specsError}`].filter(Boolean).join('；');
+  }
+
+  async function loadRun(name: string, key: string): Promise<string> {
+    const base = `${API}/runs/${encodeURIComponent(name)}`;
+    // The analysis is only re-read while it is unknown, being generated, or just requested.
+    const wantAnalysis = !s.analysis || s.analysisForce || s.analysis.process.state === 'running';
+    const analysisReq = wantAnalysis
+      ? fetchJson<AnalysisResponse>(`${base}/analysis`).then((value) => ({ value }), (reason) => ({ reason }))
+      : null;
+    const run = await fetchJson<RunSnapshot>(base);
+    const analysis = analysisReq && (await analysisReq);
+    if (!stillHere(key)) return '';
+    s.run = run;
+    if (analysis) {
+      s.analysisForce = false;
+      if ('value' in analysis) {
+        s.analysis = analysis.value;
+        s.analysisError = '';
+      } else {
+        s.analysisError = errText(analysis.reason);
+      }
+    }
+    return '';
+  }
+
+  async function loadCell(run: string, cell: string, round: number | null, key: string): Promise<string> {
+    const base = `${API}/runs/${encodeURIComponent(run)}/cells/${encodeURIComponent(cell)}`;
+    // Round detail is static: fetched once per route change. The run snapshot only feeds the
+    // cell page's "run this cell alone" button, so a failure there is not an error.
+    const [detail, roundDetail, snapshot] = await Promise.all([
+      round === null || !s.cell ? fetchJson<CellDetail>(base) : s.cell,
+      round !== null && !s.round ? fetchJson<RoundDetail>(`${base}/rounds/${round}`) : null,
+      round === null ? fetchJson<RunSnapshot>(`${API}/runs/${encodeURIComponent(run)}`).catch(() => s.run) : null,
+    ]);
+    if (!stillHere(key)) return '';
+    s.cell = detail;
+    s.cellRun = run;
+    if (roundDetail) {
+      s.round = roundDetail;
+      s.roundKey = `${run}/${cell}/${round}`;
+    }
+    if (snapshot) s.run = snapshot;
+    return '';
   }
 
   async function refreshNow() {
@@ -192,17 +255,15 @@ export function createExperiments(deps: ExperimentsDeps) {
       : '尚无运行';
   }
 
+  // The card is only a hint: read once at load and when leaving the view; no background polling.
   async function refreshCta() {
     try {
       applyCta(await fetchJson<RunSummary[]>(`${API}/runs`));
     } catch {
-      // The CTA is only a hint; the page itself reports errors.
+      // The page itself reports errors.
     }
   }
 
-  window.setInterval(() => {
-    if (!s.active && !document.hidden) void refreshCta();
-  }, CTA_POLL_MS);
   void refreshCta();
 
   // ------------------------------------------------------------ shell and skeletons
@@ -245,8 +306,8 @@ export function createExperiments(deps: ExperimentsDeps) {
       </details>`;
     if (kind === 'run') {
       return `<section id="expRunHead" class="exp-card"></section>
-        <section id="expFinal" class="exp-card" hidden></section>
         <section id="expMatrix" class="exp-card"></section>
+        <section id="expAnalysis" class="exp-card"></section>
         ${log('batch 日志与最近事件')}`;
     }
     if (kind === 'cell') {
@@ -262,6 +323,24 @@ export function createExperiments(deps: ExperimentsDeps) {
       <section id="expSession" class="exp-card"></section>`;
   }
 
+  // Redraw a block while keeping what the operator set in the old DOM: each log's scroll
+  // position (pinned to the bottom if it was there) and which <details class="exp-keep"> are open.
+  function keepUi(target: HTMLElement, redraw: () => void) {
+    const logs = [...target.querySelectorAll<HTMLElement>('.exp-pre')].map((pre) => ({
+      top: pre.scrollTop,
+      bottom: pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4,
+    }));
+    const opens = [...target.querySelectorAll<HTMLDetailsElement>('details.exp-keep')].map((details) => details.open);
+    redraw();
+    target.querySelectorAll<HTMLDetailsElement>('details.exp-keep').forEach((details, index) => {
+      details.open = Boolean(opens[index]);
+    });
+    target.querySelectorAll<HTMLElement>('.exp-pre').forEach((pre, index) => {
+      const before = logs[index];
+      pre.scrollTop = !before || before.bottom ? pre.scrollHeight : before.top;
+    });
+  }
+
   function renderPage() {
     if (!s.active) return;
     const page = el('expPage');
@@ -270,42 +349,43 @@ export function createExperiments(deps: ExperimentsDeps) {
     const key = pathFor(s.route);
     if (s.pageKey !== key) {
       s.pageKey = key;
-      s.skeleton += 1;
+      s.gen += 1;
       page.innerHTML = buildSkeleton(kind);
       hydrateIcons(page);
     }
-    const stable = (name: string, value: any, fn: (target: HTMLElement) => void) => {
+    // Fixed keys; the skeleton generation rides inside the value so a rebuilt page redraws once.
+    const stable = (name: string, value: any, fn: (target: HTMLElement) => void, error = s.error) => {
       const target = el(name);
       if (!target) return;
-      renderStable(`exp-${name}-${s.skeleton}`, { value, error: value ? '' : s.error }, () => {
-        fn(target);
+      renderStable(`exp-${name}`, { gen: s.gen, value, error }, () => {
+        keepUi(target, () => fn(target));
         hydrateIcons(target);
       });
     };
-    renderStable(`exp-crumbs-${s.skeleton}`, s.route, renderCrumbs);
+    renderStable('exp-crumbs', s.route, renderCrumbs);
     renderStatus();
     renderRail();
 
     if (kind === 'list') {
-      stable('expStart', s.specs, renderStart);
-      stable('expRuns', s.runs, renderRuns);
+      stable('expStart', s.specs, renderStart, s.specsError);
+      stable('expRuns', s.runs, renderRuns, s.runsError);
       updateStartHint();
     } else if (kind === 'run') {
       const run = s.run;
       stable('expRunHead', run && { name: run.name, process: run.process, spec: run.spec, states: run.cells.map((c) => c.state) }, renderRunHead);
-      stable('expFinal', run && run.cells.map((c) => [c.task, c.arm, c.state, c.bestDiagMse, c.accepted, c.saturated]), renderFinal);
       stable('expMatrix', run && { spec: run.spec, cells: run.cells }, renderMatrix);
+      stable('expAnalysis', { analysis: s.analysis, busy: s.analysisBusy }, renderAnalysis, s.analysisError);
       stable('expLogBody', run && { log: run.batchLogTail, events: run.batchEvents }, renderRunLog);
     } else if (kind === 'cell') {
       const cell = s.cell;
-      stable('expCellHead', cell, renderCellHead);
-      stable('expChart', cell && [cell.rounds, cell.certifications, cell.budget], renderChart);
+      const process = s.run && s.run.name === s.route.run ? s.run.process : null;
+      stable('expCellHead', cell && { cell, process }, renderCellHead);
+      stable('expChart', cell && [cell.incumbentCurve, cell.certifications, cell.budget, cell.rounds.map((r) => r.candidateId)], renderChart);
       stable('expRounds', cell && cell.rounds, renderRounds);
       stable('expCerts', cell && cell.certifications, renderCerts);
       stable('expLogBody', cell && cell.logTail, renderCellLog);
     } else {
-      const row = roundRow();
-      stable('expRoundHead', { row, cell: s.cell && s.cell.rounds.map((r) => r.round), n: s.route.round }, renderRoundHead);
+      stable('expRoundHead', { row: roundRow(), cell: s.cell && s.cell.rounds.map((r) => r.round), n: s.route.round }, renderRoundHead);
       stable('expProposal', s.round && s.round.proposal, renderProposal);
       stable('expPosthoc', s.round && { posthoc: s.round.posthoc }, renderPosthoc);
       stable('expSession', s.round && s.round.parts, renderSession);
@@ -320,7 +400,7 @@ export function createExperiments(deps: ExperimentsDeps) {
     if (run) items.push({ label: run, route: { run, cell: null, round: null } });
     if (run && cell) items.push({ label: cell, route: { run, cell, round: null } });
     if (run && cell && round !== null) items.push({ label: `第 ${round} 轮`, route: null });
-    if (items.length > 0) items[items.length - 1].route = null;
+    items[items.length - 1].route = null;
     nav.innerHTML = items
       .map((item, index) => {
         const sep = index ? '<span class="exp-crumb-sep">/</span>' : '';
@@ -339,7 +419,7 @@ export function createExperiments(deps: ExperimentsDeps) {
     renderStable('exp-rail', { route: s.route, run: run && [run.name, run.process, run.cells.map((c) => c.state)], runs }, () => {
       if (!s.route.run) {
         const running = runs?.filter((item) => item.process.state === 'running').length ?? 0;
-        rail.innerHTML = `<div class="meta">${runs ? `共 ${runs.length} 个运行，${running} 个运行中。` : '加载中…'}</div>`;
+        rail.innerHTML = `<div class="meta">${runs ? `共 ${esc(runs.length)} 个运行，${esc(running)} 个运行中。` : '加载中…'}</div>`;
       } else if (!run) {
         rail.innerHTML = `<div class="meta">${esc(s.route.run)}</div>`;
       } else {
@@ -348,7 +428,7 @@ export function createExperiments(deps: ExperimentsDeps) {
           <dt>运行</dt><dd>${esc(run.name)}</dd>
           <dt>进程</dt><dd>${processChip(run.process)}</dd>
           <dt>规格</dt><dd>${esc(run.spec?.name || run.process.specFile || '—')}</dd>
-          <dt>进度</dt><dd>${totals.done}/${totals.total} 格${totals.failed ? ` · ${totals.failed} 失败` : ''}</dd>
+          <dt>进度</dt><dd>${esc(totals.done)}/${esc(totals.total)} 格${totals.failed ? ` · ${esc(totals.failed)} 失败` : ''}</dd>
         </dl>${progressBar(totals.done, totals.total)}`;
       }
       hydrateIcons(rail);
@@ -377,12 +457,8 @@ export function createExperiments(deps: ExperimentsDeps) {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
-  const median = (values: number[]) => {
-    if (!values.length) return null;
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = sorted.length >> 1;
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  };
+  // Loading placeholder that turns into the failure text once a load has failed.
+  const pending = () => (s.error ? emptyState(`无法读取：${s.error}`, 'AlertTriangle') : emptyState('正在读取…', 'Loader2'));
 
   function processChip(process: ProcessStatus) {
     if (process.state === 'running') return '<span class="mini-pill active"><span data-icon="Loader2"></span>运行中</span>';
@@ -398,7 +474,7 @@ export function createExperiments(deps: ExperimentsDeps) {
   };
 
   function cellChip(state: CellState) {
-    const { label, tone } = CELL_STATE[state] || { label: String(state), tone: 'idle' };
+    const { label, tone } = CELL_STATE[state];
     return `<span class="mini-pill ${tone}">${esc(label)}</span>`;
   }
 
@@ -407,32 +483,45 @@ export function createExperiments(deps: ExperimentsDeps) {
     return `<div class="exp-progress ${extra}"><div class="exp-progress-bar" style="width:${percent}%"></div></div>`;
   }
 
+  // ------------------------------------------------------------ the cell matrix table (preview and live)
+
+  // One table shape for the start-panel preview and the run page: tasks as rows, arms as columns.
+  function matrixTable(tasks: string[], arms: string[], tiles: (task: string, arm: string) => string) {
+    return `<div class="exp-table-scroll"><table class="exp-matrix"><thead><tr><th>任务 \\ arm</th>${arms.map((arm) => `<th>${esc(arm)}</th>`).join('')}</tr></thead>
+      <tbody>${tasks.map((task) => `<tr><th>${esc(task)}</th>${arms.map((arm) => `<td><div class="exp-tiles">${tiles(task, arm) || '<span class="meta">—</span>'}</div></td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  }
+
   // ------------------------------------------------------------ page 1: start panel and run list
+
+  const defaultRunName = (spec: SpecSummary) => spec.name.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'run';
 
   function renderStart(target: HTMLElement) {
     const specs = s.specs;
     const heading = '<div class="panel-heading"><span data-icon="Play"></span><span>启动实验</span></div>';
     if (!specs) {
-      target.innerHTML = `${heading}${emptyState('正在读取规格…', 'Loader2')}`;
+      target.innerHTML = s.specsError
+        ? `${heading}${emptyState(`无法读取规格：${s.specsError}`, 'AlertTriangle')}`
+        : `${heading}${emptyState('正在读取规格…', 'Loader2')}`;
       return;
     }
     if (!specs.length) {
       target.innerHTML = `${heading}${emptyState('experiments/specs 下没有带 tasks 字段的规格。', 'Info')}`;
       return;
     }
-    if (!specs.some((spec) => spec.name === s.form.spec)) pickSpec(specs[0]);
-    const spec = specs.find((item) => item.name === s.form.spec) as SpecSummary;
+    if (!specs.some((spec) => spec.file === s.form.spec)) pickSpec(specs[0]);
+    const spec = specs.find((item) => item.file === s.form.spec) as SpecSummary;
     const label = (item: SpecSummary) =>
       `${item.name} · ${item.cellCount} 格 · ${item.tasks.length} 任务 × ${item.arms.length} arm × ${item.seeds.length} 种子`;
+    const previewTile = (task: string, arm: string) =>
+      spec.seeds.map((seed) => `<span class="exp-tile preview" title="${esc(`${task}-${arm}-${seed} · 待执行 · 0/${spec.budget} 轮`)}"><span class="exp-tile-seed">s${esc(seed)}</span></span>`).join('');
     target.innerHTML = `
       ${heading}
       <label class="exp-field"><span>规格</span>
-        <select id="expSpec">${specs.map((item) => `<option value="${esc(item.name)}"${item.name === spec.name ? ' selected' : ''}>${esc(label(item))}</option>`).join('')}</select>
+        <select id="expSpec">${specs.map((item) => `<option value="${esc(item.file)}"${item.file === spec.file ? ' selected' : ''}>${esc(label(item))}</option>`).join('')}</select>
       </label>
       <div class="exp-spec-info">
-        <div class="exp-chip-row"><b>任务</b>${spec.tasks.map((t) => `<span class="exp-tag">${esc(t)}</span>`).join('')}</div>
-        <div class="exp-chip-row"><b>arm</b>${spec.arms.map((t) => `<span class="exp-tag">${esc(t)}</span>`).join('')}</div>
-        <div class="exp-chip-row"><b>种子</b>${spec.seeds.map((t) => `<span class="exp-tag">${esc(t)}</span>`).join('')}<b class="exp-gap">每格</b><span class="exp-tag">${esc(spec.budget)} 轮</span></div>
+        <div class="detail-section-title">矩阵预览：${esc(spec.tasks.length)} 任务 × ${esc(spec.arms.length)} arm × ${esc(spec.seeds.length)} 种子 = ${esc(spec.cellCount)} 格，每格 ${esc(spec.budget)} 轮（全部待执行）</div>
+        ${matrixTable(spec.tasks, spec.arms, previewTile)}
         ${spec.description ? `<details class="exp-desc"><summary>规格说明</summary><p>${esc(spec.description)}</p></details>` : ''}
       </div>
       <label class="exp-field"><span>运行名称</span><input id="expName" type="text" autocomplete="off" spellcheck="false" value="${esc(s.form.name)}" /></label>
@@ -442,24 +531,28 @@ export function createExperiments(deps: ExperimentsDeps) {
         <label class="exp-field"><span>只跑（--only，可选）</span><input id="expOnly" type="text" autocomplete="off" spellcheck="false" placeholder="如 task=real-ett,arm=fixed" value="${esc(s.form.only)}" /></label>
       </div>
       <p class="exp-hint">留空则跑全部 ${esc(spec.cellCount)} 格；多个条件取并集，裸词按单元格名子串匹配。</p>
+      <div id="expStartError" class="exp-hint error"></div>
       <button id="expStartBtn" type="button" class="exp-start-btn" data-exp-action="start"><span data-icon="Play"></span><span>启动</span></button>
     `;
   }
 
   function pickSpec(spec: SpecSummary) {
-    s.form.spec = spec.name;
-    if (!s.form.nameTouched) s.form.name = spec.name;
+    s.form.spec = spec.file;
+    if (!s.form.nameTouched) s.form.name = defaultRunName(spec);
   }
 
   function nameProblem(): { text: string; blocking: boolean } {
     const name = s.form.name.trim();
     if (!name) return { text: '请填写运行名称。', blocking: true };
-    if (!NAME_RE.test(name)) return { text: '名称只允许字母、数字、点、下划线和连字符。', blocking: true };
-    const existing = s.runs?.find((run) => run.name === name);
+    if (!NAME_RE.test(name)) return { text: '名称只允许字母、数字、点、下划线和连字符，且必须以字母或数字开头。', blocking: true };
+    if (!s.runs) return { text: '运行列表尚未读取，无法检查同名运行。', blocking: false };
+    const existing = s.runs.find((run) => run.name === name);
     if (existing?.process.state === 'running') return { text: '该运行正在运行，请换一个名称或先停止它。', blocking: true };
-    if (existing) return { text: `同名运行已存在（${existing.cellsDone}/${existing.cellsTotal ?? '?'} 格已完成）：启动将续跑，已完成的单元格自动跳过。`, blocking: false };
+    if (existing) return { text: `同名运行已存在（${existing.cellsDone}/${existing.cellsTotal ?? '?'} 格已完成）：启动将续跑，已完成的单元格自动跳过；一个运行目录只对应一个协议，规格不同会被拒绝。`, blocking: false };
     return { text: '将创建新的运行目录。', blocking: false };
   }
+
+  const validWorkers = (value: number) => Number.isInteger(value) && value >= 1 && value <= 16;
 
   function updateStartHint() {
     const hint = el('expNameHint');
@@ -468,22 +561,31 @@ export function createExperiments(deps: ExperimentsDeps) {
     const problem = nameProblem();
     hint.textContent = problem.text;
     hint.classList.toggle('error', problem.blocking);
-    const workers = s.form.workers;
-    button.disabled = problem.blocking || !(Number.isInteger(workers) && workers >= 1 && workers <= 16);
+    const startError = el('expStartError');
+    if (startError) startError.textContent = s.startError;
+    button.disabled = problem.blocking || s.starting || !validWorkers(s.form.workers);
   }
 
   async function startRun() {
-    const spec = s.specs?.find((item) => item.name === s.form.spec);
+    const spec = s.specs?.find((item) => item.file === s.form.spec);
     if (!spec) return;
     const name = s.form.name.trim();
-    await deps.runAction(async () => {
+    s.starting = true;
+    s.startError = '';
+    updateStartHint();
+    try {
       await postJson(`${API}/runs/${encodeURIComponent(name)}/start`, {
         spec: spec.file,
         workers: s.form.workers,
         only: s.form.only.trim(),
       });
+      s.starting = false;
       navigate(pathFor({ run: name, cell: null, round: null }));
-    });
+    } catch (caught) {
+      s.starting = false;
+      s.startError = errText(caught);
+      updateStartHint();
+    }
   }
 
   async function stopRun() {
@@ -496,11 +598,37 @@ export function createExperiments(deps: ExperimentsDeps) {
     await refreshNow();
   }
 
+  // Restart the run's own spec: all cells ("续跑") or one cell ("单独运行此单元格").
+  async function restartRun(only: string, workers: number) {
+    const name = s.route.run;
+    const specFile = s.run?.process.specFile;
+    if (!name || !specFile) return;
+    await deps.runAction(async () => {
+      await postJson(`${API}/runs/${encodeURIComponent(name)}/start`, { spec: specFile, workers, only });
+    });
+    await refreshNow();
+  }
+
+  async function generateAnalysis() {
+    const name = s.route.run;
+    if (!name) return;
+    s.analysisBusy = true;
+    renderPage();
+    await deps.runAction(async () => {
+      await postJson(`${API}/runs/${encodeURIComponent(name)}/analysis`, {});
+    });
+    s.analysisBusy = false;
+    s.analysisForce = true;
+    await refreshNow();
+  }
+
   function renderRuns(target: HTMLElement) {
     const heading = '<div class="panel-heading"><span data-icon="GitBranch"></span><span>已有运行</span></div>';
     const runs = s.runs;
     if (!runs) {
-      target.innerHTML = `${heading}${emptyState('正在读取运行列表…', 'Loader2')}`;
+      target.innerHTML = s.runsError
+        ? `${heading}${emptyState(`无法读取运行列表：${s.runsError}`, 'AlertTriangle')}`
+        : `${heading}${emptyState('正在读取运行列表…', 'Loader2')}`;
       return;
     }
     if (!runs.length) {
@@ -518,11 +646,11 @@ export function createExperiments(deps: ExperimentsDeps) {
         </span>
         <span class="exp-run-progress">
           ${progressBar(run.cellsDone, run.cellsTotal)}
-          <span class="meta">${run.cellsDone}/${run.cellsTotal ?? '?'} 格</span>
+          <span class="meta">${esc(run.cellsDone)}/${esc(run.cellsTotal ?? '?')} 格</span>
         </span>
         ${processChip(run.process)}
         <span data-icon="ChevronRight"></span>
-      </button>`).join('')}</div>`;
+      </button>`).join('')}</div>${s.runsError ? `<p class="exp-hint error">刷新运行列表失败：${esc(s.runsError)}</p>` : ''}`;
   }
 
   // ------------------------------------------------------------ page 2: run view
@@ -540,11 +668,12 @@ export function createExperiments(deps: ExperimentsDeps) {
   function renderRunHead(target: HTMLElement) {
     const run = s.run;
     if (!run) {
-      target.innerHTML = emptyState(s.error ? '无法读取该运行。' : '正在读取运行…', s.error ? 'AlertTriangle' : 'Loader2');
+      target.innerHTML = pending();
       return;
     }
     const totals = runTotals(run);
     const process = run.process;
+    const canResume = process.state !== 'running' && Boolean(process.specFile) && totals.done < totals.total;
     target.innerHTML = `
       <div class="exp-head-row">
         <div class="exp-head-title">
@@ -552,16 +681,17 @@ export function createExperiments(deps: ExperimentsDeps) {
           ${processChip(process)}
         </div>
         ${process.state === 'running' ? '<button type="button" class="danger ghost" data-exp-action="stop"><span data-icon="Square"></span><span>停止</span></button>' : ''}
+        ${canResume ? '<button type="button" class="secondary" data-exp-action="resume"><span data-icon="Play"></span><span>续跑</span></button>' : ''}
       </div>
       <div class="meta exp-head-meta">
-        ${run.spec ? `规格 ${esc(run.spec.name)} · ` : ''}${process.specFile ? `${esc(process.specFile)} · ` : ''}${process.pid ? `pid ${process.pid} · ` : ''}启动于 ${esc(fmtDateTime(process.startedAt))}
+        ${run.spec ? `规格 ${esc(run.spec.name)} · ` : ''}${process.specFile ? `${esc(process.specFile)} · ` : ''}${process.pid ? `pid ${esc(process.pid)} · ` : ''}启动于 ${esc(fmtDateTime(process.startedAt))}
       </div>
       ${progressBar(totals.done, totals.total, 'large')}
       <div class="exp-counts">
-        <span><strong>${totals.done}</strong><small>已完成 / ${totals.total}</small></span>
-        <span><strong>${totals.running}</strong><small>运行中</small></span>
-        <span><strong>${totals.failed}</strong><small>失败</small></span>
-        <span><strong>${Math.max(0, totals.total - totals.done - totals.running - totals.failed)}</strong><small>待执行</small></span>
+        <span><strong>${esc(totals.done)}</strong><small>已完成 / ${esc(totals.total)}</small></span>
+        <span><strong>${esc(totals.running)}</strong><small>运行中</small></span>
+        <span><strong>${esc(totals.failed)}</strong><small>失败</small></span>
+        <span><strong>${esc(Math.max(0, totals.total - totals.done - totals.running - totals.failed))}</strong><small>待执行</small></span>
       </div>`;
   }
 
@@ -588,52 +718,82 @@ export function createExperiments(deps: ExperimentsDeps) {
     const tile = (cell: CellSummary) => {
       const pct = cell.budget ? Math.min(100, Math.round((cell.roundsDone / cell.budget) * 100)) : 0;
       const sat = cell.saturated === null ? '' : `<span class="exp-sat ${cell.saturated ? 'yes' : 'no'}" title="${cell.saturated ? '已饱和（认证通过）' : '未饱和'}"></span>`;
-      const tip = `${cell.cell}\n${CELL_STATE[cell.state]?.label || cell.state} · ${cell.roundsDone}/${cell.budget ?? '?'} 轮 · 接受 ${cell.accepted} · incumbent ${cell.incumbent}\n最优 diag MSE ${fmtMse(cell.bestDiagMse)}`;
+      const tip = `${cell.cell}\n${CELL_STATE[cell.state].label} · ${cell.roundsDone}/${cell.budget ?? '?'} 轮 · 接受 ${cell.accepted}\n当前 incumbent ${cell.incumbent}\n当前 incumbent MSE ${fmtMse(cell.incumbentMse)}`;
+      const incumbent = cell.incumbent ? `<span class="exp-tile-inc" title="当前 incumbent ${esc(cell.incumbent)}">${esc(cell.incumbent)}</span>` : '';
       return `<button type="button" class="exp-tile ${cell.state}" style="--p:${pct}%" title="${esc(tip)}" data-exp-go="${esc(pathFor({ run: run.name, cell: cell.cell, round: null }))}">
-        ${sat}<span class="exp-tile-seed">s${esc(cell.seed)}</span><span class="exp-tile-rounds">${cell.roundsDone}/${cell.budget ?? '?'}</span><span class="exp-tile-acc">✓${cell.accepted}</span></button>`;
+        ${sat}<span class="exp-tile-seed">s${esc(cell.seed)}</span><span class="exp-tile-rounds">${esc(cell.roundsDone)}/${esc(cell.budget ?? '?')} · ✓${esc(cell.accepted)}</span>${incumbent}</button>`;
     };
     target.innerHTML = `${heading}
-      <div class="exp-table-scroll"><table class="exp-matrix"><thead><tr><th>任务 \\ arm</th>${arms.map((arm) => `<th>${esc(arm)}</th>`).join('')}</tr></thead>
-      <tbody>${tasks.map((task) => `<tr><th>${esc(task)}</th>${arms.map((arm) => {
-        const cells = run.cells.filter((cell) => cell.task === task && cell.arm === arm).sort((a, b) => a.seed - b.seed);
-        return `<td><div class="exp-tiles">${cells.map(tile).join('') || '<span class="meta">—</span>'}</div></td>`;
-      }).join('')}</tr>`).join('')}</tbody></table></div>
+      ${matrixTable(tasks, arms, (task, arm) => run.cells.filter((cell) => cell.task === task && cell.arm === arm).sort((a, b) => a.seed - b.seed).map(tile).join(''))}
       <div class="exp-legend">
         <span><i class="exp-swatch pending"></i>待执行</span><span><i class="exp-swatch running"></i>运行中</span>
         <span><i class="exp-swatch done"></i>已完成</span><span><i class="exp-swatch failed"></i>失败</span>
         <span><i class="exp-sat yes inline"></i>已饱和</span><span><i class="exp-sat no inline"></i>未饱和</span>
-        <span class="meta">格内：种子 · 已跑轮数/预算 · ✓接受数</span>
+        <span class="meta">格内：种子 · 已跑轮数/预算 · ✓接受数 · 当前 incumbent（悬停看当前 incumbent MSE）</span>
       </div>`;
   }
 
-  function renderFinal(target: HTMLElement) {
-    const run = s.run;
-    const doneCells = run ? run.cells.filter((cell) => cell.state === 'done') : [];
-    target.hidden = !doneCells.length;
-    if (!run || !doneCells.length) return;
-    const { tasks, arms } = orderedAxes(run);
-    const rows: string[] = [];
-    for (const task of tasks) {
-      const group = arms.map((arm) => {
-        const all = run.cells.filter((cell) => cell.task === task && cell.arm === arm);
-        const done = all.filter((cell) => cell.state === 'done');
-        const mses = done.map((cell) => cell.bestDiagMse ?? cell.lastDiagMse).filter(isNum);
-        return { arm, all: all.length, done: done.length, mse: median(mses), accepted: median(done.map((cell) => cell.accepted)), saturated: done.filter((cell) => cell.saturated === true).length };
-      }).filter((row) => row.done > 0);
-      const best = Math.min(...group.map((row) => row.mse).filter(isNum));
-      group.forEach((row, index) => {
-        rows.push(`<tr class="${row.mse === best && group.length > 1 ? 'best' : ''}">
-          ${index === 0 ? `<th rowspan="${group.length}">${esc(task)}</th>` : ''}
-          <td>${esc(row.arm)}</td><td>${row.done}/${row.all}</td><td class="num">${fmtMse(row.mse)}</td>
-          <td class="num">${row.accepted === null ? '—' : esc(row.accepted)}</td><td class="num">${row.saturated}/${row.done}</td></tr>`);
+  // posthoc analysis (experiments/posthoc.py analysis.json), rendered as the server returns it.
+  function renderAnalysis(target: HTMLElement) {
+    const data = s.analysis;
+    const analysis: Analysis | null = data?.analysis ?? null;
+    const running = s.analysisBusy || data?.process.state === 'running';
+    const chip = running
+      ? '<span class="mini-pill active"><span data-icon="Loader2"></span>生成中</span>'
+      : analysis ? '<span class="mini-pill ready">已生成</span>' : '<span class="mini-pill idle">未生成</span>';
+    const names = (list: string[] | undefined) => (list ?? []).map(esc).join('、');
+    const parts: string[] = [];
+    if (s.analysisError) parts.push(`<div class="exp-hint error">读取分析失败：${esc(s.analysisError)}</div>`);
+    if (!analysis) {
+      parts.push(emptyState(running ? '正在生成分析…' : '尚未生成。点击“生成分析”，对本运行中已完成的单元格做 posthoc 分析。', running ? 'Loader2' : 'Info'));
+    } else {
+      const records = analysis.runs ?? [];
+      const broken = records.filter((record) => record.error);
+      const kinds = [...new Set(records.map((record) => record.e1Kind).filter(Boolean))];
+      const stat = (value: { median?: number | null; iqr?: number | null; q25?: number | null; q75?: number | null; n?: number } | undefined) => ({
+        median: fmtMse(value?.median),
+        iqr: fmtMse(value?.iqr),
+        range: `Q25 ${fmtMse(value?.q25)} · Q75 ${fmtMse(value?.q75)}`,
+        n: value?.n ?? '—',
       });
+      const rows = analysis.endpointTable ?? [];
+      const contrasts = analysis.contrasts ?? [];
+      parts.push(`<div class="meta exp-head-meta">已分析 ${esc(records.length - broken.length)} 个运行${running ? '（正在重新生成，下表是上一次的结果）' : ''}${kinds.length ? ` · E1 类型 ${names(kinds as string[])}` : ''}</div>`);
+      if (analysis.incomplete?.length) parts.push(`<div class="exp-hint">未完成、未纳入分析的运行（${esc(analysis.incomplete.length)}）：${names(analysis.incomplete)}</div>`);
+      if (broken.length) parts.push(`<div class="exp-hint error">分析出错的运行：${broken.map((record) => `${esc(record.run ?? '?')}（${esc(record.error)}）`).join('、')}</div>`);
+      parts.push('<div class="detail-section-title">端点表（按任务 × arm，E1/E2 的中位数与四分位距）</div>');
+      parts.push(rows.length
+        ? `<div class="exp-table-scroll"><table class="exp-table exp-endpoints">
+            <thead><tr><th>任务</th><th>arm</th><th>运行数</th><th>E1 中位</th><th>E1 IQR</th><th>E2 中位</th><th>E2 IQR</th><th>n（E1/E2）</th></tr></thead>
+            <tbody>${rows.map((row) => {
+              const e1 = stat(row.e1);
+              const e2 = stat(row.e2);
+              return `<tr><td>${esc(row.task ?? '—')}</td><td>${esc(row.arm ?? '—')}</td><td class="num">${esc(row.nRuns ?? '—')}</td>
+                <td class="num">${esc(e1.median)}</td><td class="num" title="${esc(e1.range)}">${esc(e1.iqr)}</td>
+                <td class="num">${esc(e2.median)}</td><td class="num" title="${esc(e2.range)}">${esc(e2.iqr)}</td>
+                <td class="num">${esc(e1.n)}/${esc(e2.n)}</td></tr>`;
+            }).join('')}</tbody></table></div>`
+        : emptyState('没有可汇总的已完成运行。', 'Info'));
+      parts.push('<div class="detail-section-title">对比（以 (任务, 种子) 为区块的符号翻转置换检验，E1）</div>');
+      parts.push(contrasts.length
+        ? `<div class="exp-table-scroll"><table class="exp-table exp-contrasts">
+            <thead><tr><th>对比</th><th>区块数</th><th>统计量（E1 均值差）</th><th>p 值</th><th>置换分布 2.5% – 97.5%</th><th>置换方式</th></tr></thead>
+            <tbody>${contrasts.map((row) => `<tr><td>${esc(row.contrast ?? '—')}</td><td class="num">${esc(row.nBlocks ?? '—')}</td>
+              <td class="num">${esc(fmtSigned(row.statistic))}</td><td class="num">${esc(fmtP(row.pValue))}</td>
+              <td class="num">${esc(fmtSigned(row.permLow))} … ${esc(fmtSigned(row.permHigh))}</td><td>${esc(row.permutations ?? '—')}</td></tr>`).join('')}</tbody></table></div>
+          <p class="exp-hint">统计量 = 前者 − 后者的 E1 在各区块上的均值差；p 为双侧置换 p 值。</p>`
+        : emptyState('没有对比结果。', 'Info'));
+      const audit = analysis.audit;
+      if (audit?.pathViolationRuns?.length) parts.push(`<div class="exp-hint error">审计：路径违规的运行 ${names(audit.pathViolationRuns)}</div>`);
+      if (audit?.gainRatioFlagRuns?.length) parts.push(`<div class="exp-hint error">审计：增益比标记的运行 ${names(audit.gainRatioFlagRuns)}</div>`);
     }
+    if (data?.logTail) parts.push(`<details class="exp-keep exp-sublog"><summary>分析日志尾部</summary><pre class="exp-pre">${esc(data.logTail)}</pre></details>`);
     target.innerHTML = `
-      <div class="panel-heading"><span data-icon="Gauge"></span><span>最终指标（按任务 × arm，仅统计已完成单元格）</span></div>
-      <div class="exp-table-scroll"><table class="exp-table exp-final">
-        <thead><tr><th>任务</th><th>arm</th><th>完成</th><th>最优 diag MSE（中位）</th><th>接受数（中位）</th><th>饱和</th></tr></thead>
-        <tbody>${rows.join('')}</tbody></table></div>
-      <p class="exp-hint">diag MSE 为该格各轮评估中的最小值；同一任务内中位 MSE 最低的 arm 高亮。</p>`;
+      <div class="exp-head-row exp-analysis-head">
+        <div class="exp-head-title panel-heading"><span data-icon="Gauge"></span><span>posthoc 分析</span>${chip}</div>
+        <button type="button" class="secondary" data-exp-action="analyze"${running ? ' disabled' : ''}><span data-icon="Gauge"></span><span>生成分析</span></button>
+      </div>
+      ${parts.join('')}`;
   }
 
   function eventRow(event: BatchEvent) {
@@ -656,86 +816,89 @@ export function createExperiments(deps: ExperimentsDeps) {
 
   // ------------------------------------------------------------ page 3: cell view
 
+  // The incumbent's diag MSE after the last round (the curve carries it forward on rejections).
+  function currentIncumbentMse(cell: CellDetail): number | null {
+    for (let i = cell.incumbentCurve.length - 1; i >= 0; i -= 1) {
+      if (isNum(cell.incumbentCurve[i].mse)) return cell.incumbentCurve[i].mse;
+    }
+    return null;
+  }
+
   function renderCellHead(target: HTMLElement) {
     const cell = s.cell;
     if (!cell) {
-      target.innerHTML = emptyState(s.error ? '无法读取该单元格。' : '正在读取单元格…', s.error ? 'AlertTriangle' : 'Loader2');
+      target.innerHTML = pending();
       return;
     }
     const accepted = cell.rounds.filter((row) => row.accepted).length;
-    const best = Math.min(...cell.rounds.map((row) => row.diagMse).filter(isNum));
+    const process = s.run && s.run.name === s.route.run ? s.run.process : null;
+    const canRun = Boolean(process && process.state !== 'running' && process.specFile) && cell.state !== 'done';
     target.innerHTML = `
       <div class="exp-head-row">
         <div class="exp-head-title"><h3>${esc(cell.cell)}</h3>${cellChip(cell.state)}</div>
-        <button type="button" class="secondary" data-exp-go="${esc(pathFor({ run: s.route.run, cell: null, round: null }))}"><span data-icon="ChevronLeft"></span><span>返回运行</span></button>
+        <div class="exp-nav-btns">
+          ${canRun ? '<button type="button" class="secondary" data-exp-action="runcell"><span data-icon="Play"></span><span>单独运行此单元格</span></button>' : ''}
+          <button type="button" class="secondary" data-exp-go="${esc(pathFor({ run: s.route.run, cell: null, round: null }))}"><span data-icon="ChevronLeft"></span><span>返回运行</span></button>
+        </div>
       </div>
       <div class="meta exp-head-meta">任务 ${esc(cell.task)} · arm ${esc(cell.arm)} · 种子 ${esc(cell.seed)}</div>
       ${progressBar(cell.rounds.length, cell.budget, 'large')}
       <div class="exp-counts">
-        <span><strong>${cell.rounds.length}/${cell.budget ?? '?'}</strong><small>已跑轮数</small></span>
-        <span><strong>${accepted}</strong><small>接受</small></span>
-        <span><strong>${fmtMse(Number.isFinite(best) ? best : null)}</strong><small>最优 diag MSE</small></span>
+        <span><strong>${esc(cell.rounds.length)}/${esc(cell.budget ?? '?')}</strong><small>已跑轮数</small></span>
+        <span><strong>${esc(accepted)}</strong><small>接受</small></span>
+        <span><strong>${esc(fmtMse(currentIncumbentMse(cell)))}</strong><small>当前 incumbent MSE</small></span>
       </div>`;
   }
 
   function renderChart(target: HTMLElement) {
     const cell = s.cell;
-    const heading = '<div class="panel-heading"><span data-icon="Activity"></span><span>最优 diag MSE 随轮次变化</span></div>';
+    const heading = '<div class="panel-heading"><span data-icon="Activity"></span><span>当前 incumbent MSE 随轮次变化</span></div>';
     if (!cell) {
       target.innerHTML = heading;
       return;
     }
-    const rows = cell.rounds;
-    const scored = rows.filter((row) => isNum(row.diagMse));
-    if (!scored.length) {
-      target.innerHTML = `${heading}${emptyState('还没有可绘制的轮次。', 'Info')}`;
+    // Only the incumbent curve is drawn: round 0 is the m0 baseline, the line steps down at
+    // accepted rounds and stays flat otherwise.
+    const line = cell.incumbentCurve.filter((point): point is { round: number; mse: number; accepted: boolean } => isNum(point.mse));
+    if (!line.length) {
+      target.innerHTML = `${heading}${emptyState('还没有可绘制的 incumbent 曲线。', 'Info')}`;
       return;
     }
-    // Running minimum of every evaluated round = the best-so-far curve; accepted rounds are marked.
-    let best = Infinity;
-    const line: Array<{ round: number; value: number }> = [];
-    for (const row of rows) {
-      if (isNum(row.diagMse)) best = Math.min(best, row.diagMse);
-      if (best < Infinity) line.push({ round: row.round, value: best });
-    }
-    const lo = Math.min(...line.map((p) => p.value));
-    const hi = Math.max(...line.map((p) => p.value));
+    const lo = Math.min(...line.map((p) => p.mse));
+    const hi = Math.max(...line.map((p) => p.mse));
     const span = hi - lo || Math.abs(hi) * 0.1 || 1;
     const yMin = lo - span * 0.12;
     const yMax = hi + span * 0.12;
     const W = 760, H = 280, L = 62, R = 18, T = 16, B = 38;
-    const lastRound = Math.max(...rows.map((row) => row.round));
-    const xMax = Math.max(cell.budget ?? 0, lastRound, 2);
-    const x = (round: number) => L + ((round - 1) / (xMax - 1)) * (W - L - R);
-    const y = (value: number) => T + (1 - (Math.min(Math.max(value, yMin), yMax) - yMin) / (yMax - yMin)) * (H - T - B);
+    const lastRound = line[line.length - 1].round;
+    const xMax = Math.max(cell.budget ?? 0, lastRound, 1);
+    const x = (round: number) => L + (round / xMax) * (W - L - R);
+    const y = (value: number) => T + (1 - (value - yMin) / (yMax - yMin)) * (H - T - B);
     const go = (round: number) => esc(pathFor({ run: s.route.run, cell: cell.cell, round }));
     const yTicks = [0, 1, 2, 3].map((i) => yMin + ((yMax - yMin) * i) / 3);
     const xStep = xMax <= 12 ? 1 : xMax <= 30 ? 5 : 10;
     const xTicks: number[] = [];
-    for (let r = 1; r <= xMax; r += 1) if (r === 1 || r % xStep === 0) xTicks.push(r);
-    let path = '';
-    line.forEach((point, index) => {
-      path += index === 0 ? `M${x(point.round)},${y(point.value)}` : `H${x(point.round)}V${y(point.value)}`;
-    });
-    path += `H${x(Math.max(lastRound, line[line.length - 1].round))}`;
-    const pointTip = (row: RoundRow) =>
-      `第 ${row.round} 轮 · ${row.candidateId}\ndiag MSE ${fmtMse(row.diagMse)} · ${row.accepted ? '已接受' : row.status}`;
+    for (let r = 0; r <= xMax; r += 1) if (r === 0 || r % xStep === 0) xTicks.push(r);
+    const path = line.map((point, index) => (index === 0 ? `M${x(point.round)},${y(point.mse)}` : `H${x(point.round)}V${y(point.mse)}`)).join('') + `H${x(lastRound)}`;
+    const pointTip = (point: { round: number; mse: number }) => {
+      const row = cell.rounds.find((item) => item.round === point.round);
+      return `第 ${point.round} 轮${row ? ` · ${row.candidateId}` : ''}\n当前 incumbent MSE ${fmtMse(point.mse)} · 已接受`;
+    };
     target.innerHTML = `${heading}
-      <svg class="exp-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="最优 diag MSE 随轮次变化">
+      <svg class="exp-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="当前 incumbent MSE 随轮次变化">
         ${yTicks.map((tick) => `<line class="metric-grid-line" x1="${L}" x2="${W - R}" y1="${y(tick)}" y2="${y(tick)}"></line><text class="exp-axis-text y" x="${L - 8}" y="${y(tick) + 4}">${esc(fmtMse(tick))}</text>`).join('')}
         <line class="metric-axis" x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}"></line>
         ${xTicks.map((tick) => `<line class="metric-tick" x1="${x(tick)}" x2="${x(tick)}" y1="${H - B}" y2="${H - B + 5}"></line><text class="exp-axis-text x" x="${x(tick)}" y="${H - B + 19}">${tick}</text>`).join('')}
         <text class="exp-axis-text x" x="${(L + W - R) / 2}" y="${H - 4}">轮次</text>
-        ${cell.certifications.filter((c) => c.saturated).map((c) => `<line class="exp-sat-line" x1="${x(c.round)}" x2="${x(c.round)}" y1="${T}" y2="${H - B}"><title>第 ${c.round} 轮认证：已饱和</title></line>`).join('')}
+        ${cell.certifications.filter((c) => c.saturated).map((c) => `<line class="exp-sat-line" x1="${x(c.round)}" x2="${x(c.round)}" y1="${T}" y2="${H - B}"><title>第 ${esc(c.round)} 轮认证：已饱和</title></line>`).join('')}
         <path class="exp-best-line" d="${path}"></path>
-        ${rows.filter((row) => !row.accepted && isNum(row.diagMse)).map((row) => `<circle class="exp-pt reject" data-exp-go="${go(row.round)}" cx="${x(row.round)}" cy="${y(row.diagMse as number)}" r="3.5"><title>${esc(pointTip(row))}</title></circle>`).join('')}
-        ${rows.filter((row) => row.accepted && isNum(row.diagMse)).map((row) => `<circle class="exp-pt accept" data-exp-go="${go(row.round)}" cx="${x(row.round)}" cy="${y(row.diagMse as number)}" r="5.5"><title>${esc(pointTip(row))}</title></circle>`).join('')}
-        ${rows.filter((row) => !isNum(row.diagMse)).map((row) => `<text class="exp-pt fail" data-exp-go="${go(row.round)}" x="${x(row.round)}" y="${H - B - 6}"><title>第 ${row.round} 轮 · ${esc(row.status)}（无 diag MSE）</title>×</text>`).join('')}
+        ${line.filter((point) => point.round === 0).map((point) => `<circle class="exp-pt base" cx="${x(0)}" cy="${y(point.mse)}" r="4.5"><title>m0 基线 · diag MSE ${esc(fmtMse(point.mse))}</title></circle>`).join('')}
+        ${line.filter((point) => point.round > 0 && point.accepted).map((point) => `<circle class="exp-pt accept" data-exp-go="${go(point.round)}" cx="${x(point.round)}" cy="${y(point.mse)}" r="5.5"><title>${esc(pointTip(point))}</title></circle>`).join('')}
       </svg>
       <div class="exp-legend">
-        <span><i class="exp-line-swatch"></i>历史最优</span><span><i class="exp-dot accept"></i>被接受</span>
-        <span><i class="exp-dot reject"></i>未接受（超出范围的点贴边显示）</span><span><i class="exp-x">×</i>失败/无结果</span>
-        <span><i class="exp-line-swatch sat"></i>认证饱和</span><span class="meta">点击任一点进入该轮</span>
+        <span><i class="exp-line-swatch"></i>当前 incumbent MSE</span><span><i class="exp-dot base"></i>m0 基线</span>
+        <span><i class="exp-dot accept"></i>incumbent 更换（该轮被接受）</span>
+        <span><i class="exp-line-swatch sat"></i>认证饱和</span><span class="meta">点击绿点进入该轮</span>
       </div>`;
   }
 
@@ -758,12 +921,12 @@ export function createExperiments(deps: ExperimentsDeps) {
         ? `${esc(row.judgeCause)}${row.judgeFailed ? ' <span class="mini-pill failed">失败</span>' : ''}${row.inspirationParent ? `<small class="meta"> ← ${esc(row.inspirationParent)}</small>` : ''}`
         : '—';
       return `<tr class="${row.accepted ? 'accepted' : ''}" tabindex="0" data-exp-go="${esc(pathFor({ run: s.route.run, cell: cell.cell, round: row.round }))}">
-        <td class="num">${row.round}</td>
+        <td class="num">${esc(row.round)}</td>
         <td><div class="exp-cand">${esc(row.candidateId)}</div>${row.targetAspect ? `<small class="meta">${esc(row.targetAspect)}</small>` : ''}</td>
         <td>${esc(row.parent)}</td><td>${statusChip(row)}</td>
-        <td class="num">${fmtMse(row.diagMse)}</td><td class="num">${fmtP(row.dmP)}</td>
+        <td class="num">${esc(fmtMse(row.diagMse))}</td><td class="num">${esc(fmtP(row.dmP))}</td>
         <td class="center">${row.accepted ? '<span class="exp-ok">✓</span>' : ''}</td>
-        <td>${judge}</td><td class="num" title="${esc(tip)}">${fmtK(total)}</td><td class="num">${esc(fmtSeconds(row.seconds))}</td>
+        <td>${judge}</td><td class="num" title="${esc(tip)}">${esc(fmtK(total))}</td><td class="num">${esc(fmtSeconds(row.seconds))}</td>
         <td class="exp-ellipsis" title="${esc(row.error || row.evalNote || '')}">${esc(row.error || '')}</td></tr>`;
     }).join('');
     target.innerHTML = `${heading}
@@ -775,7 +938,7 @@ export function createExperiments(deps: ExperimentsDeps) {
   function certRow(row: CertRow) {
     return `<div class="exp-cert ${row.saturated ? 'saturated' : ''}">
       <div class="exp-cert-head">
-        <b>第 ${row.round} 轮</b><span class="meta">incumbent ${esc(row.incumbentId)} · 水平 ${esc(fmtMse(row.level))}</span>
+        <b>第 ${esc(row.round)} 轮</b><span class="meta">incumbent ${esc(row.incumbentId)} · 水平 ${esc(fmtMse(row.level))}</span>
         <span class="mini-pill ${row.saturated ? 'ready' : 'idle'}">${row.saturated ? '已饱和' : '未饱和'}</span>
       </div>
       ${row.failures.length ? `<div class="exp-cert-fails"><small class="meta">未通过的统计量</small>${row.failures.map((f) => `<span class="exp-tag warn" title="UCB ${esc(fmtMse(f.ucb))} ≥ 阈值 ${esc(fmtMse(f.threshold))}">${esc(f.label)} <em>${esc(fmtMse(f.ucb))} / ${esc(fmtMse(f.threshold))}</em></span>`).join('')}</div>` : ''}
@@ -811,7 +974,7 @@ export function createExperiments(deps: ExperimentsDeps) {
     const go = (round: number | undefined) => (round === undefined ? '' : `data-exp-go="${esc(pathFor({ run: s.route.run, cell: s.route.cell, round }))}"`);
     target.innerHTML = `
       <div class="exp-head-row">
-        <div class="exp-head-title"><h3>第 ${n} 轮</h3>${row ? statusChip(row) : ''}${row?.accepted ? '<span class="mini-pill ready">已接受 ✓</span>' : ''}</div>
+        <div class="exp-head-title"><h3>第 ${esc(n)} 轮</h3>${row ? statusChip(row) : ''}${row?.accepted ? '<span class="mini-pill ready">已接受 ✓</span>' : ''}</div>
         <div class="exp-nav-btns">
           <button type="button" class="secondary" ${go(prev)} ${prev === undefined ? 'disabled' : ''}><span data-icon="ChevronLeft"></span><span>上一轮</span></button>
           <button type="button" class="secondary" ${go(next)} ${next === undefined ? 'disabled' : ''}><span>下一轮</span><span data-icon="ChevronRight"></span></button>
@@ -820,30 +983,38 @@ export function createExperiments(deps: ExperimentsDeps) {
       ${row ? `<div class="meta exp-head-meta">候选 ${esc(row.candidateId)} · 父 ${esc(row.parent)} · diag MSE ${esc(fmtMse(row.diagMse))} · DM p ${esc(fmtP(row.dmP))} · 耗时 ${esc(fmtSeconds(row.seconds))}${row.error ? ` · 错误：${esc(row.error)}` : ''}</div>` : ''}`;
   }
 
+  // Every key of the proposal object is shown; the four known fields come first, with their labels.
+  const PROPOSAL_LABELS: Record<string, string> = {
+    targetAspect: '方向（targetAspect）',
+    aspectDetail: '细节（aspectDetail）',
+    mechanism: '机制（mechanism）',
+    expectation: '预期（expectation）',
+  };
+
   function renderProposal(target: HTMLElement) {
     const heading = '<div class="panel-heading"><span data-icon="Sparkles"></span><span>提案</span></div>';
     const proposal = s.round?.proposal;
     if (!proposal) {
-      target.innerHTML = `${heading}${emptyState(s.error ? '无法读取该轮。' : '正在读取…', s.error ? 'AlertTriangle' : 'Loader2')}`;
+      target.innerHTML = `${heading}${pending()}`;
       return;
     }
-    const fields: Array<[string, string]> = [
-      ['方向（targetAspect）', 'targetAspect'],
-      ['细节（aspectDetail）', 'aspectDetail'],
-      ['机制（mechanism）', 'mechanism'],
-      ['预期（expectation）', 'expectation'],
-    ];
-    const rows = fields.filter(([, key]) => proposal[key]);
-    target.innerHTML = `${heading}${rows.length
-      ? `<dl class="exp-dl">${rows.map(([label, key]) => `<dt>${esc(label)}</dt><dd>${esc(proposal[key])}</dd>`).join('')}</dl>`
+    const known = Object.keys(PROPOSAL_LABELS).filter((key) => key in proposal);
+    const keys = [...known, ...Object.keys(proposal).filter((key) => !known.includes(key))];
+    const show = (value: any) => (typeof value === 'string' ? value || '—' : JSON.stringify(value, null, 2));
+    target.innerHTML = `${heading}${keys.length
+      ? `<dl class="exp-dl">${keys.map((key) => `<dt>${esc(PROPOSAL_LABELS[key] ?? key)}</dt><dd>${esc(show(proposal[key]))}</dd>`).join('')}</dl>`
       : emptyState('这一轮没有提案内容。', 'Info')}`;
   }
 
   function renderPosthoc(target: HTMLElement) {
     const heading = '<div class="panel-heading"><span data-icon="ShieldCheck"></span><span>Post-hoc 卡片（heldout，仅操作者可见）</span></div>';
-    const cards = s.round?.posthoc;
+    if (!s.round) {
+      target.innerHTML = `${heading}${pending()}`;
+      return;
+    }
+    const cards = s.round.posthoc;
     if (!cards || !cards.length) {
-      target.innerHTML = `${heading}${emptyState(s.round ? '这一轮没有 post-hoc 卡片。' : '正在读取…', 'Info')}`;
+      target.innerHTML = `${heading}${emptyState('这一轮没有 post-hoc 卡片。', 'Info')}`;
       return;
     }
     target.innerHTML = `${heading}<div class="exp-table-scroll"><table class="exp-table">
@@ -854,7 +1025,7 @@ export function createExperiments(deps: ExperimentsDeps) {
   function renderSession(target: HTMLElement) {
     const heading = '<div class="panel-heading"><span data-icon="Bot"></span><span>智能体会话（公开部件）</span></div>';
     if (!s.round) {
-      target.innerHTML = `${heading}${emptyState('正在读取…', 'Loader2')}`;
+      target.innerHTML = `${heading}${pending()}`;
       return;
     }
     const parts = deps.normalizeChatParts(s.round.parts.map((part) => ({ ...part, sourceLabel: '智能体' })));
@@ -872,19 +1043,23 @@ export function createExperiments(deps: ExperimentsDeps) {
     const target = event.target as Element;
     const action = target.closest<HTMLElement>('[data-exp-action]');
     if (action) {
+      if ((action as HTMLButtonElement).disabled) return;
       const name = action.dataset.expAction;
       if (name === 'chat') deps.goChat();
       else if (name === 'start') void startRun();
       else if (name === 'stop') void stopRun();
+      else if (name === 'resume') void restartRun('', validWorkers(s.form.workers) ? s.form.workers : 4);
+      else if (name === 'runcell') void restartRun(`cell=${s.route.cell}`, 1);
+      else if (name === 'analyze') void generateAnalysis();
       return;
     }
     const go = target.closest<HTMLElement>('[data-exp-go]');
-    if (go && !(go as HTMLButtonElement).disabled) navigate(go.dataset.expGo || '/experiments');
+    if (go && !(go as HTMLButtonElement).disabled) navigate(go.dataset.expGo as string);
   });
 
   root.addEventListener('keydown', (event) => {
     const target = event.target as HTMLElement;
-    if (event.key === 'Enter' && target.matches('tr[data-exp-go]')) navigate(target.dataset.expGo || '/experiments');
+    if (event.key === 'Enter' && target.matches('tr[data-exp-go]')) navigate(target.dataset.expGo as string);
   });
 
   root.addEventListener('input', (event) => {
@@ -899,15 +1074,17 @@ export function createExperiments(deps: ExperimentsDeps) {
     } else {
       return;
     }
+    s.startError = '';
     updateStartHint();
   });
 
   root.addEventListener('change', (event) => {
     const target = event.target as HTMLSelectElement;
     if (target.id !== 'expSpec') return;
-    const spec = s.specs?.find((item) => item.name === target.value);
+    const spec = s.specs?.find((item) => item.file === target.value);
     if (!spec) return;
     pickSpec(spec);
+    s.startError = '';
     const panel = el('expStart');
     if (panel) {
       renderStart(panel);
@@ -915,6 +1092,16 @@ export function createExperiments(deps: ExperimentsDeps) {
       updateStartHint();
     }
   });
+
+  // A log inside a closed <details> has no scroll position: pin it to the bottom when opened.
+  root.addEventListener('toggle', (event) => {
+    const details = event.target;
+    if (details instanceof HTMLDetailsElement && details.open) {
+      details.querySelectorAll<HTMLElement>('.exp-pre').forEach((pre) => {
+        pre.scrollTop = pre.scrollHeight;
+      });
+    }
+  }, true);
 
   document.addEventListener('visibilitychange', () => {
     if (s.active && !document.hidden) requestTick();

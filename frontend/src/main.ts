@@ -192,18 +192,6 @@ app.innerHTML = `
     <div class="exp-left-content">
       <section class="panel">
         <div class="panel-heading">
-          <span data-icon="FlaskConical"></span>
-          <span>实验流程</span>
-        </div>
-        <ol class="exp-steps">
-          <li><b>选择规格</b><span>规格定义任务、arm、种子和每格轮数</span></li>
-          <li><b>启动</b><span>后台 batch 进程按并行数跑完全部单元格</span></li>
-          <li><b>看进度</b><span>矩阵 → 单元格逐轮结果 → 单轮提案与会话</span></li>
-          <li><b>读最终指标</b><span>单元格完成后自动汇总到运行页</span></li>
-        </ol>
-      </section>
-      <section class="panel">
-        <div class="panel-heading">
           <span data-icon="Gauge"></span>
           <span>当前运行</span>
         </div>
@@ -595,7 +583,6 @@ const experiments = createExperiments({
   hydrateIcons,
   renderStable,
   runAction: runQuietAction,
-  showDetail,
   emptyState,
   messageHtml,
   normalizeChatParts,

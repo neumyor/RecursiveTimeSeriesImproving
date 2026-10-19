@@ -97,7 +97,7 @@ export type CellSummary = {
   saturated: boolean | null;
   state: CellState;
   lastDiagMse: number | null;
-  bestDiagMse: number | null;
+  incumbentMse: number | null;
 };
 
 export type BatchEvent = {
@@ -162,7 +162,15 @@ export type CellDetail = {
   budget: number | null;
   rounds: RoundRow[];
   certifications: CertRow[];
+  incumbentCurve: IncumbentPoint[];
   logTail: string;
+};
+
+// Round 0 is the m0 baseline; mse is the current incumbent's diag MSE after that round.
+export type IncumbentPoint = {
+  round: number;
+  mse: number | null;
+  accepted: boolean;
 };
 
 export type PosthocCard = {
@@ -178,4 +186,46 @@ export type RoundDetail = {
   proposal: Record<string, any>;
   posthoc: PosthocCard[] | null;
   parts: JsonMap[];
+};
+
+// posthoc analysis.json (experiments/posthoc.py), served verbatim by GET .../analysis.
+export type EndpointStats = {
+  n: number;
+  median: number | null;
+  q25: number | null;
+  q75: number | null;
+  iqr: number | null;
+};
+
+export type EndpointRow = {
+  task: string;
+  arm: string;
+  nRuns: number;
+  e1: EndpointStats;
+  e2: EndpointStats;
+};
+
+export type Contrast = {
+  contrast: string;
+  nBlocks: number;
+  statistic: number | null;
+  pValue: number | null;
+  permLow: number | null;
+  permHigh: number | null;
+  permutations: string | null;
+};
+
+export type Analysis = {
+  runsDir?: string;
+  runs?: Array<{ run?: string; e1Kind?: string; error?: string }>;
+  incomplete?: string[];
+  endpointTable?: Array<Partial<EndpointRow>>;
+  contrasts?: Array<Partial<Contrast>>;
+  audit?: { pathViolationRuns?: string[]; gainRatioFlagRuns?: string[] };
+};
+
+export type AnalysisResponse = {
+  process: { state: 'running' | 'stopped' | 'none'; pid: number | null };
+  analysis: Analysis | null;
+  logTail: string;
 };
