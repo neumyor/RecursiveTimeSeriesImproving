@@ -1,7 +1,9 @@
 """Experiment-run API: start/stop experiments/batch.py and read its run directory.
 
 The contract is docs/experiments-api.md.  Everything here is plain file reads
-plus one child process (batch.py) whose pid lives in <run>/batch-process.json.
+plus two kinds of background child process, each in its own session: batch.py
+(pid in <run>/batch-process.json) and posthoc.py (pid in
+<run>/analysis-process.json).
 """
 
 from __future__ import annotations
@@ -21,25 +23,29 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from harnessing_ts.agent.translate import filter_display_parts
+from harnessing_ts.agent.translate import collapse_tool_parts, filter_display_parts
+from harnessing_ts.state.jsonl import read_jsonl
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = REPO_ROOT / "experiments" / "runs"
 SPECS_DIR = REPO_ROOT / "experiments" / "specs"
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _PROCESS_FILE = "batch-process.json"
 _BATCH_LOG = "batch-run.log"
+_ANALYSIS_PROCESS_FILE = "analysis-process.json"
+_ANALYSIS_LOG = "analysis-run.log"
+_ANALYSIS_FILE = "analysis.json"
 _STATUS_FILE = "batch-status.jsonl"
 _LOG_TAIL_LINES = 200
 _LOG_TAIL_BYTES = 256 * 1024
 _EVENT_TAIL = 50
-_STOP_WAIT_SECONDS = 3.0
+_STOP_WAIT_SECONDS = 8.0  # batch's own kill grace is 5 s
 _TOKEN_KEYS = ("inputTokens", "outputTokens", "cacheReadTokens", "reasoningTokens")
 
 router = APIRouter(prefix="/api/experiments")
 
-# Popen objects of batch processes started by this server, by pid.  Polling
+# Popen objects of child processes started by this server, by pid.  Polling
 # them reaps the exit status, so a finished child never lingers as a zombie
 # that os.kill(pid, 0) would still report as alive.
 _children: dict[int, subprocess.Popen[bytes]] = {}
@@ -49,8 +55,12 @@ _lock = threading.Lock()
 # ------------------------------------------------------------------ helpers
 
 
+def _valid_name(value: Any) -> bool:
+    return isinstance(value, str) and _NAME_RE.fullmatch(value) is not None
+
+
 def _check_name(value: str, what: str) -> str:
-    if not _NAME_RE.match(value) or value in (".", ".."):
+    if not _valid_name(value):
         raise HTTPException(status_code=400, detail=f"invalid {what} name: {value!r}")
     return value
 
@@ -70,20 +80,25 @@ def _read_json(path: Path) -> Any:
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Parseable object lines; a torn last line is skipped."""
-    rows: list[dict[str, Any]] = []
+    """Object lines of a jsonl file; unparseable lines (a torn last line) are skipped."""
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
-    except OSError:
-        pass
-    return rows
+        return [row for row in read_jsonl(path) if isinstance(row, dict)]
+    except (OSError, ValueError):
+        return []
+
+
+def _first_row(path: Path) -> dict[str, Any] | None:
+    """The first line of a jsonl file as an object, None when absent or unparseable."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            row = json.loads(handle.readline())
+    except (OSError, ValueError):
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _tail(path: Path, lines: int = _LOG_TAIL_LINES) -> str:
@@ -156,20 +171,21 @@ def list_specs() -> list[dict[str, Any]]:
 
 
 def _pid_alive(pid: int) -> bool:
+    """A child of this server is alive until it exits; any other pid must be a
+    process-group leader (children start in their own session, so pid == pgid),
+    which rules out an unrelated process that reused the pid."""
     child = _children.get(pid)
     if child is not None:
         return child.poll() is None
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+        return os.getpgid(pid) == pid
+    except (ProcessLookupError, PermissionError):
         return False
-    except PermissionError:
-        return True
-    return True
 
 
-def _process_record(run_dir: Path) -> dict[str, Any] | None:
-    record = _read_json(run_dir / _PROCESS_FILE)
+def _process_record(run_dir: Path, file: str = _PROCESS_FILE) -> dict[str, Any] | None:
+    record = _read_json(run_dir / file)
     if isinstance(record, dict) and isinstance(record.get("pid"), int) and record["pid"] > 1:
         return record
     return None
@@ -185,6 +201,26 @@ def _process_status(record: dict[str, Any] | None) -> dict[str, Any]:
         "specFile": Path(spec_path).name if isinstance(spec_path, str) else None,
         "startedAt": record.get("startedAt"),
     }
+
+
+def _launch(
+    run_dir: Path, command: list[str], log_file: str, log_mode: str, record_file: str, extra: dict[str, Any],
+) -> dict[str, Any]:
+    """Start command in its own session, output to run_dir/log_file; remember its pid."""
+    with (run_dir / log_file).open(log_mode) as log:
+        try:
+            proc = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                cwd=REPO_ROOT, start_new_session=True,
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"could not start process: {exc}") from None
+    _children[proc.pid] = proc
+    record = {"pid": proc.pid, "startedAt": _iso(time.time()), **extra}
+    temp = run_dir / f"{record_file}.tmp"
+    temp.write_text(json.dumps(record), encoding="utf-8")
+    temp.replace(run_dir / record_file)
+    return record
 
 
 def _batch_command(spec_path: Path, runs_root: Path, workers: int, only: str) -> list[str]:
@@ -219,27 +255,17 @@ def start_run(name: str, body: StartRequest) -> dict[str, Any]:
         record = _process_record(run_dir)
         if record is not None and _pid_alive(record["pid"]):
             raise HTTPException(status_code=409, detail=f"run {name} already has a running process")
+        previous = _process_status(record)["specFile"]
+        if previous is not None and previous != body.spec:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run {name} belongs to spec {previous}; use a new run name for {body.spec}",
+            )
         run_dir.mkdir(parents=True, exist_ok=True)
-        command = _batch_command(spec_path, run_dir, body.workers, body.only)
-        with (run_dir / _BATCH_LOG).open("ab") as log:
-            try:
-                proc = subprocess.Popen(
-                    command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                    cwd=REPO_ROOT, start_new_session=True,
-                )
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"could not start batch: {exc}") from None
-        _children[proc.pid] = proc
-        record = {
-            "pid": proc.pid,
-            "specPath": str(spec_path),
-            "startedAt": _iso(time.time()),
-            "workers": body.workers,
-            "only": body.only,
-        }
-        temp = run_dir / f"{_PROCESS_FILE}.tmp"
-        temp.write_text(json.dumps(record), encoding="utf-8")
-        temp.replace(run_dir / _PROCESS_FILE)
+        record = _launch(
+            run_dir, _batch_command(spec_path, run_dir, body.workers, body.only), _BATCH_LOG, "ab", _PROCESS_FILE,
+            {"specPath": str(spec_path), "workers": body.workers, "only": body.only},
+        )
     return {"process": _process_status(record)}
 
 
@@ -252,12 +278,64 @@ def stop_run(name: str) -> dict[str, Any]:
             raise HTTPException(status_code=409, detail=f"run {name} has no running process")
         try:
             os.killpg(record["pid"], signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
         deadline = time.monotonic() + _STOP_WAIT_SECONDS
         while _pid_alive(record["pid"]) and time.monotonic() < deadline:
             time.sleep(0.05)
     return {"process": _process_status(record)}
+
+
+# ----------------------------------------------------------------- analysis
+
+
+def _real_csvs(run_dir: Path) -> dict[str, Path]:
+    """{task: csv path} for the real tasks of the spec this run was started with."""
+    record = _process_record(run_dir)
+    spec_path = record.get("specPath") if record else None
+    raw = _read_json(SPECS_DIR / Path(spec_path).name) if isinstance(spec_path, str) else None
+    tasks = raw.get("tasks") if isinstance(raw, dict) else None
+    csvs: dict[str, Path] = {}
+    for task in tasks if isinstance(tasks, list) else []:
+        if isinstance(task, dict) and task.get("kind") == "real" and _valid_name(task.get("name")) \
+                and isinstance(task.get("csv"), str):
+            csvs[task["name"]] = REPO_ROOT / task["csv"]
+    return csvs
+
+
+def _analysis_command(run_dir: Path, real_csvs: dict[str, Path]) -> list[str]:
+    command = [
+        sys.executable, str(REPO_ROOT / "experiments" / "posthoc.py"),
+        "--runs", str(run_dir), "--out", str(run_dir / _ANALYSIS_FILE),
+    ]
+    for task, csv in real_csvs.items():
+        command += ["--real-csv", f"{task}={csv}"]
+    return command
+
+
+@router.post("/runs/{name}/analysis")
+def start_analysis(name: str) -> dict[str, Any]:
+    run_dir = _run_dir(name)
+    with _lock:
+        record = _process_record(run_dir, _ANALYSIS_PROCESS_FILE)
+        if record is not None and _pid_alive(record["pid"]):
+            raise HTTPException(status_code=409, detail=f"run {name} already has a running analysis")
+        record = _launch(
+            run_dir, _analysis_command(run_dir, _real_csvs(run_dir)), _ANALYSIS_LOG, "wb",
+            _ANALYSIS_PROCESS_FILE, {},
+        )
+    return {"process": _process_status(record)}
+
+
+@router.get("/runs/{name}/analysis")
+def get_analysis(name: str) -> dict[str, Any]:
+    run_dir = _run_dir(name)
+    analysis = _read_json(run_dir / _ANALYSIS_FILE)
+    return {
+        "process": _process_status(_process_record(run_dir, _ANALYSIS_PROCESS_FILE)),
+        "analysis": analysis if isinstance(analysis, dict) else None,
+        "logTail": _tail(run_dir / _ANALYSIS_LOG),
+    }
 
 
 # -------------------------------------------------------------------- cells
@@ -272,7 +350,7 @@ def _cell_parts(cell: str, rows: list[dict[str, Any]]) -> tuple[str, str, int] |
     """(task, arm, seed) of a cell found on disk without a spec: <task>-<arm>-<seed>."""
     head, _, seed = cell.rpartition("-")
     arm = rows[0].get("arm") if rows else None
-    if not seed.isdigit() or not isinstance(arm, str) or not head.endswith(f"-{arm}"):
+    if not (seed.isascii() and seed.isdigit()) or not isinstance(arm, str) or not head.endswith(f"-{arm}"):
         return None
     return head[: -len(arm) - 1], arm, int(seed)
 
@@ -289,29 +367,50 @@ def _cell_list(run_dir: Path, spec: dict[str, Any] | None) -> list[tuple[str, st
     for child in sorted(run_dir.iterdir()):
         if child.name in known or not child.is_dir() or not (child / "rounds.jsonl").is_file():
             continue
-        parts = _cell_parts(child.name, _read_jsonl(child / "rounds.jsonl")[:1])
+        first = _first_row(child / "rounds.jsonl")
+        parts = _cell_parts(child.name, [first] if first else [])
         if parts is not None:
             cells.append((child.name, *parts))
     return cells
 
 
 def _is_done(cell_dir: Path) -> bool:
+    """Same criterion as batch.cell_done: done.json in the heldout dir that heldout.json points to."""
     heldout = _heldout_dir(cell_dir)
     return heldout is not None and (heldout / "done.json").is_file()
 
 
-def _last_events(run_dir: Path) -> dict[str, str]:
-    return {row["cell"]: row.get("event") for row in _read_jsonl(run_dir / _STATUS_FILE) if "cell" in row}
+def _timestamp(value: Any) -> float | None:
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
-def _cell_state(cell_dir: Path, last_event: str | None, alive: bool) -> str:
-    if _is_done(cell_dir):
+def _last_events(run_dir: Path) -> dict[str, tuple[str | None, float | None]]:
+    """cell -> (event, event time) of the cell's last batch-status line."""
+    return {
+        row["cell"]: (row.get("event"), _timestamp(row.get("at")))
+        for row in _read_jsonl(run_dir / _STATUS_FILE) if "cell" in row
+    }
+
+
+def _cell_state(
+    run_dir: Path, cell: str, last_event: tuple[str | None, float | None] | None, started_at: float | None,
+) -> str:
+    """started_at is the batch process's start time when it is alive, else None."""
+    if _is_done(run_dir / cell):
         return "done"
-    if last_event == "fail" and not alive:
-        return "failed"
-    if (cell_dir / "rounds.jsonl").is_file() and alive:
-        return "running"
-    return "pending"
+    event, event_at = last_event if last_event is not None else (None, None)
+    if started_at is not None:
+        try:
+            modified = (run_dir / "logs" / f"{cell}.log").stat().st_mtime
+        except OSError:
+            modified = None
+        # Event times have whole-second precision, so compare the log's whole second.
+        if modified is not None and modified >= started_at and (event_at is None or int(modified) > event_at):
+            return "running"
+    return "failed" if event == "fail" else "pending"
 
 
 def _certifications(cell_dir: Path) -> list[dict[str, Any]]:
@@ -332,14 +431,30 @@ def _certifications(cell_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _incumbent_curve(cell_dir: Path, rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The incumbent's diag MSE after each round, round 0 being m0 (None when m0.json is absent)."""
+    heldout = _heldout_dir(cell_dir)
+    m0 = _read_json(heldout / "posthoc" / "m0.json") if heldout is not None else None
+    mse = m0.get("diagMse") if isinstance(m0, dict) and _number(m0.get("diagMse")) else None
+    curve = [{"round": 0, "mse": mse, "accepted": False}]
+    for index, row in enumerate(rounds):
+        accepted = row.get("accepted") is True
+        if accepted and _number(row.get("diagMse")):
+            mse = row["diagMse"]
+        number = row["round"] if isinstance(row.get("round"), int) else index + 1
+        curve.append({"round": number, "mse": mse, "accepted": accepted})
+    return curve
+
+
 def _cell_summary(
-    run_dir: Path, cell: tuple[str, str, str, int], budget: int | None, last_event: str | None, alive: bool,
+    run_dir: Path, cell: tuple[str, str, str, int], budget: int | None,
+    last_event: tuple[str | None, float | None] | None, started_at: float | None,
 ) -> dict[str, Any]:
     cell_id, task, arm, seed = cell
     cell_dir = run_dir / cell_id
     rounds = _read_jsonl(cell_dir / "rounds.jsonl")
     accepted = [row for row in rounds if row.get("accepted") is True]
-    diag = [row["diagMse"] for row in rounds if isinstance(row.get("diagMse"), (int, float))]
+    diag = [row["diagMse"] for row in rounds if _number(row.get("diagMse"))]
     certs = _certifications(cell_dir)
     return {
         "cell": cell_id, "task": task, "arm": arm, "seed": seed,
@@ -348,9 +463,9 @@ def _cell_summary(
         "accepted": len(accepted),
         "incumbent": accepted[-1].get("candidateId", "m0") if accepted else "m0",
         "saturated": certs[-1]["saturated"] if certs else None,
-        "state": _cell_state(cell_dir, last_event, alive),
+        "state": _cell_state(run_dir, cell_id, last_event, started_at),
         "lastDiagMse": diag[-1] if diag else None,
-        "bestDiagMse": min(diag) if diag else None,
+        "incumbentMse": _incumbent_curve(cell_dir, rounds)[-1]["mse"],
     }
 
 
@@ -363,7 +478,7 @@ def list_runs() -> list[dict[str, Any]]:
         return []
     runs = []
     for run_dir in sorted(RUNS_ROOT.iterdir()):
-        if not run_dir.is_dir() or run_dir.name.startswith(".") or not _NAME_RE.match(run_dir.name):
+        if not run_dir.is_dir() or not _valid_name(run_dir.name):
             continue
         record = _process_record(run_dir)
         spec = _spec_for(record)
@@ -389,19 +504,19 @@ def get_run(name: str) -> dict[str, Any]:
     run_dir = _run_dir(name)
     record = _process_record(run_dir)
     process = _process_status(record)
-    alive = process["state"] == "running"
+    started_at = _started_at(process)
     spec = _spec_for(record)
     budget = spec["budget"] if spec is not None else None
     last_events = _last_events(run_dir)
     cells = [
-        _cell_summary(run_dir, cell, budget, last_events.get(cell[0]), alive)
+        _cell_summary(run_dir, cell, budget, last_events.get(cell[0]), started_at)
         for cell in _cell_list(run_dir, spec)
     ]
     events = []
     for row in _read_jsonl(run_dir / _STATUS_FILE)[-_EVENT_TAIL:]:
         cell = row.get("cell") if isinstance(row.get("cell"), str) else ""
         detail = row.get("detail")
-        if isinstance(detail, str) and _NAME_RE.match(cell):
+        if isinstance(detail, str) and _valid_name(cell):
             detail = _mask(detail, _heldout_dir(run_dir / cell))
         events.append({
             "event": row.get("event"), "cell": cell, "exitCode": row.get("exitCode"),
@@ -416,6 +531,11 @@ def get_run(name: str) -> dict[str, Any]:
         "batchLogTail": _tail(run_dir / _BATCH_LOG),
         "batchEvents": events,
     }
+
+
+def _started_at(process: dict[str, Any]) -> float | None:
+    """The process start time while it is running, else None."""
+    return _timestamp(process["startedAt"]) if process["state"] == "running" else None
 
 
 def _cell_dir(run_dir: Path, cell: str) -> Path:
@@ -454,14 +574,16 @@ def get_cell(name: str, cell: str) -> dict[str, Any]:
     entry = next((c for c in _cell_list(run_dir, spec) if c[0] == cell), None)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"cell not found: {cell}")
-    alive = _process_status(record)["state"] == "running"
+    started_at = _started_at(_process_status(record))
     summary = _cell_summary(run_dir, entry, spec["budget"] if spec is not None else None,
-                            _last_events(run_dir).get(cell), alive)
+                            _last_events(run_dir).get(cell), started_at)
+    rounds = _read_jsonl(cell_dir / "rounds.jsonl")
     return {
         "cell": cell, "task": entry[1], "arm": entry[2], "seed": entry[3],
         "state": summary["state"],
         "budget": summary["budget"],
-        "rounds": [_round_row(row) for row in _read_jsonl(cell_dir / "rounds.jsonl")],
+        "rounds": [_round_row(row) for row in rounds],
+        "incumbentCurve": _incumbent_curve(cell_dir, rounds),
         "certifications": _certifications(cell_dir),
         "logTail": _mask(_tail(run_dir / "logs" / f"{cell}.log"), _heldout_dir(cell_dir)),
     }
@@ -469,7 +591,7 @@ def get_cell(name: str, cell: str) -> dict[str, Any]:
 
 def _posthoc(cell_dir: Path, candidate_id: Any) -> list[dict[str, Any]] | None:
     heldout = _heldout_dir(cell_dir)
-    if heldout is None or not isinstance(candidate_id, str) or not _NAME_RE.match(candidate_id):
+    if heldout is None or not isinstance(candidate_id, str) or not _valid_name(candidate_id):
         return None
     stored = _read_json(heldout / "posthoc" / f"{candidate_id}.json")
     card = stored.get("card") if isinstance(stored, dict) else None
@@ -485,7 +607,7 @@ def _posthoc(cell_dir: Path, candidate_id: Any) -> list[dict[str, Any]] | None:
 def get_round(name: str, cell: str, n: str) -> dict[str, Any]:
     run_dir = _run_dir(name)
     cell_dir = _cell_dir(run_dir, cell)
-    if not n.isdigit():
+    if not (n.isascii() and n.isdigit()):
         raise HTTPException(status_code=400, detail=f"invalid round number: {n!r}")
     number = int(n)
     row = next((r for r in _read_jsonl(cell_dir / "rounds.jsonl") if r.get("round") == number), None)
@@ -496,5 +618,5 @@ def get_round(name: str, cell: str, n: str) -> dict[str, Any]:
         "round": number,
         "proposal": row.get("proposal") if isinstance(row.get("proposal"), dict) else {},
         "posthoc": _posthoc(cell_dir, row.get("candidateId")),
-        "parts": filter_display_parts(log),
+        "parts": filter_display_parts(collapse_tool_parts(log)),
     }
