@@ -2,7 +2,6 @@
   "config": {
     "inputLength": 96,
     "horizon": 24,
-    "arm": "fixed",
     "evolution": true,
     "budgetCandidates": 25,
     "candidateTimeoutSeconds": 600.0,
@@ -79,20 +78,20 @@
         "saturated": 18,
         "total_lcbs": [
           -0.00038,
-          -0.0004,
+          -0.00024,
           -0.00066,
           -0.00012,
           -0.00023,
-          -0.00084,
-          -0.00407,
-          -0.03311,
+          -7e-05,
+          -0.01171,
+          -0.01891,
           -0.00138,
-          -0.0018,
+          -0.00248,
           -0.0012,
           -0.00714,
-          -0.00066,
-          -0.00079,
           -0.00037,
+          -0.00079,
+          -0.00021,
           -0.00141,
           -0.00014,
           -0.00076
@@ -112,18 +111,18 @@
           "lcb_coverage": 1.0,
           "ucb_coverage": 1.0,
           "truth_over_gap": [
-            0.806,
-            0.812,
-            0.769,
-            0.641,
-            0.683,
+            0.803,
+            0.811,
+            0.796,
+            0.638,
+            0.68,
             0.644,
-            0.766,
-            0.671,
-            0.648,
-            0.695,
+            0.765,
+            0.677,
+            0.646,
+            0.693,
             0.582,
-            0.757
+            0.755
           ]
         },
         "arfima": {
@@ -467,43 +466,43 @@
         ],
         "scatter": [
           {
-            "lcb": 0.0648,
-            "delta": 0.0816,
+            "lcb": 0.064,
+            "delta": 0.0807,
             "gap": 0.1263
           },
           {
-            "lcb": 0.0761,
-            "delta": 0.0907,
+            "lcb": 0.0759,
+            "delta": 0.0905,
             "gap": 0.1205
           },
           {
-            "lcb": 0.067,
-            "delta": 0.0813,
+            "lcb": 0.0668,
+            "delta": 0.0812,
             "gap": 0.1115
           },
           {
-            "lcb": 0.1609,
-            "delta": 0.2099,
+            "lcb": 0.1608,
+            "delta": 0.2098,
             "gap": 0.241
           },
           {
             "lcb": 0.169,
-            "delta": 0.1955,
+            "delta": 0.1954,
             "gap": 0.22
           },
           {
-            "lcb": 0.1364,
-            "delta": 0.1914,
+            "lcb": 0.1363,
+            "delta": 0.1913,
             "gap": 0.2162
           },
           {
-            "lcb": 0.0349,
-            "delta": 0.0335,
+            "lcb": 0.0348,
+            "delta": 0.0333,
             "gap": 0.0608
           },
           {
-            "lcb": 0.0305,
-            "delta": 0.0311,
+            "lcb": 0.0306,
+            "delta": 0.0312,
             "gap": 0.0636
           },
           {
@@ -512,13 +511,13 @@
             "gap": 0.0615
           },
           {
-            "lcb": 0.0522,
-            "delta": 0.053,
+            "lcb": 0.0524,
+            "delta": 0.0531,
             "gap": 0.081
           },
           {
-            "lcb": 0.0524,
-            "delta": 0.0538,
+            "lcb": 0.0526,
+            "delta": 0.054,
             "gap": 0.0832
           },
           {
@@ -562,17 +561,17 @@
             "gap": 0.0555
           },
           {
-            "lcb": 0.0269,
-            "delta": 0.0269,
+            "lcb": 0.027,
+            "delta": 0.0271,
             "gap": 0.0592
           },
           {
-            "lcb": 0.024,
-            "delta": 0.025,
+            "lcb": 0.0242,
+            "delta": 0.0252,
             "gap": 0.0558
           }
         ],
-        "tightness_ratio_median": 0.606,
+        "tightness_ratio_median": 0.603,
         "tightness_cells": 18,
         "localization_hits": 17,
         "localization_cells": 21,
@@ -741,11 +740,11 @@
       "stats": {
         "incumbent_model": "m0-linear",
         "remaining_gap_ratio_by_task": {
-          "lgssm_multiperiod": 0.291,
+          "lgssm_multiperiod": 0.294,
           "lgssm_xchannel": 0.464,
           "arfima": 0.759,
           "hmm_ar_switch": 0.908,
-          "nonlinear_xchannel": 0.544
+          "nonlinear_xchannel": 0.542
         },
         "qualified_tasks": 4
       },

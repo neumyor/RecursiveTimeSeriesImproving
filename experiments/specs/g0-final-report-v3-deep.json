@@ -3,7 +3,6 @@
   "config": {
     "inputLength": 96,
     "horizon": 24,
-    "arm": "fixed",
     "evolution": true,
     "budgetCandidates": 25,
     "candidateTimeoutSeconds": 600.0,
@@ -143,23 +142,23 @@
   },
   "carry_over": {
     "G0-1": {
-      "v1_artifact": "experiments/specs/g0-final-report.json",
-      "v1_pass": true,
+      "artifact": "experiments/specs/g0-final-report-v3.json",
+      "pass": true,
       "reason": "oracle negative control: run with m = oracle, so no incumbent is involved; it measures the machinery's behaviour at zero true headroom"
     },
     "G0-2": {
-      "v1_artifact": "experiments/specs/g0-final-report.json",
-      "v1_pass": true,
-      "reason": "CI calibration: the HAC/HLN interval and the greedy total-gain estimator are properties of the corrector machinery, not of the model whose residuals feed it; the v1 coverage was measured with m0-linear cells, the coverage claim is estimator-level"
+      "artifact": "experiments/specs/g0-final-report-v3.json",
+      "pass": true,
+      "reason": "CI calibration: the HAC/HLN interval and the greedy total-gain estimator are properties of the corrector machinery, not of the model whose residuals feed it; the coverage is measured with m0-linear cells, and the coverage claim is estimator-level"
     },
     "G0-5": {
-      "v1_artifact": "experiments/specs/g0-final-report.json",
-      "v1_pass": true,
-      "reason": "false-stop: the Bonferroni level wiring, the two-sided-to-one-sided conservatism and the eps*MSE threshold never reference the incumbent; planted-defect gaps just need to sit far above the stop threshold, which the v1 linear defects did"
+      "artifact": "experiments/specs/g0-final-report-v3.json",
+      "pass": true,
+      "reason": "false-stop: the fixed certification level, the two-sided-to-one-sided conservatism and the eps*MSE threshold never reference the incumbent; planted-defect gaps just need to sit far above the stop threshold, which the linear defects do"
     },
     "G0-7": {
-      "v1_artifact": "experiments/specs/g0-final-report.json",
-      "v1_pass": true,
+      "artifact": "experiments/specs/g0-final-report-v3.json",
+      "pass": true,
       "reason": "observation-0: a pure AR(1)/white-noise analytic control with m == 0 — no incumbent exists in the gate at all"
     }
   },
@@ -386,8 +385,8 @@
             "seed": 0,
             "gap": 0.0587,
             "eligible_for_tightness": true,
-            "top_coordinate": "lag[0,23]",
-            "top_aspect": "lag-structure",
+            "top_coordinate": "channel->3",
+            "top_aspect": "cross-channel",
             "expected": [
               "cross-channel",
               "lag-structure"
@@ -929,63 +928,63 @@
         ],
         "scatter": [
           {
-            "lcb": 0.079,
-            "delta": 0.1041,
+            "lcb": 0.0787,
+            "delta": 0.1037,
             "gap": 0.1445
           },
           {
-            "lcb": 0.0836,
-            "delta": 0.0968,
+            "lcb": 0.0834,
+            "delta": 0.0964,
             "gap": 0.1354
           },
           {
-            "lcb": 0.0746,
-            "delta": 0.0876,
+            "lcb": 0.0743,
+            "delta": 0.0873,
             "gap": 0.1249
           },
           {
-            "lcb": 0.0764,
-            "delta": 0.0969,
+            "lcb": 0.0761,
+            "delta": 0.0965,
             "gap": 0.1413
           },
           {
-            "lcb": 0.0892,
-            "delta": 0.1087,
+            "lcb": 0.0891,
+            "delta": 0.1085,
             "gap": 0.1417
           },
           {
-            "lcb": 0.0711,
-            "delta": 0.0889,
+            "lcb": 0.0709,
+            "delta": 0.0887,
             "gap": 0.1235
           },
           {
-            "lcb": 0.0798,
-            "delta": 0.1009,
+            "lcb": 0.0704,
+            "delta": 0.0885,
             "gap": 0.1448
           },
           {
-            "lcb": 0.0823,
-            "delta": 0.0957,
+            "lcb": 0.0821,
+            "delta": 0.0954,
             "gap": 0.1346
           },
           {
-            "lcb": 0.0713,
-            "delta": 0.0887,
+            "lcb": 0.0711,
+            "delta": 0.0885,
             "gap": 0.1269
           },
           {
-            "lcb": 0.5816,
-            "delta": 0.7765,
+            "lcb": 0.5813,
+            "delta": 0.7761,
             "gap": 0.8157
           },
           {
             "lcb": 0.5585,
-            "delta": 0.6381,
+            "delta": 0.638,
             "gap": 0.6668
           },
           {
-            "lcb": 0.386,
-            "delta": 0.6645,
+            "lcb": 0.3858,
+            "delta": 0.6644,
             "gap": 0.6944
           },
           {
@@ -994,8 +993,8 @@
             "gap": 0.0603
           },
           {
-            "lcb": 0.0308,
-            "delta": 0.0314,
+            "lcb": 0.031,
+            "delta": 0.0317,
             "gap": 0.0621
           },
           {
@@ -1009,8 +1008,8 @@
             "gap": 0.0587
           },
           {
-            "lcb": 0.0306,
-            "delta": 0.0315,
+            "lcb": 0.0309,
+            "delta": 0.0317,
             "gap": 0.0612
           },
           {
@@ -1024,8 +1023,8 @@
             "gap": 0.0581
           },
           {
-            "lcb": 0.031,
-            "delta": 0.0317,
+            "lcb": 0.0313,
+            "delta": 0.032,
             "gap": 0.0607
           },
           {
@@ -1039,8 +1038,8 @@
             "gap": 0.0566
           },
           {
-            "lcb": 0.0316,
-            "delta": 0.0324,
+            "lcb": 0.0318,
+            "delta": 0.0326,
             "gap": 0.0597
           },
           {
@@ -1049,13 +1048,13 @@
             "gap": 0.0599
           },
           {
-            "lcb": 0.0093,
-            "delta": 0.036,
+            "lcb": 0.0097,
+            "delta": 0.0365,
             "gap": 0.1584
           },
           {
-            "lcb": 0.0029,
-            "delta": 0.0078,
+            "lcb": 0.001,
+            "delta": 0.0112,
             "gap": 0.1486
           },
           {
@@ -1064,8 +1063,8 @@
             "gap": 0.1647
           },
           {
-            "lcb": 0.043,
-            "delta": 0.0954,
+            "lcb": 0.0442,
+            "delta": 0.0962,
             "gap": 0.2281
           },
           {
@@ -1124,8 +1123,8 @@
             "gap": 0.0773
           },
           {
-            "lcb": 0.0146,
-            "delta": 0.014,
+            "lcb": 0.0149,
+            "delta": 0.0066,
             "gap": 0.0595
           },
           {
@@ -1144,8 +1143,8 @@
             "gap": 0.0545
           },
           {
-            "lcb": 0.0261,
-            "delta": 0.026,
+            "lcb": 0.0263,
+            "delta": 0.0263,
             "gap": 0.0569
           },
           {
@@ -1159,8 +1158,8 @@
             "gap": 0.0531
           },
           {
-            "lcb": 0.0263,
-            "delta": 0.0262,
+            "lcb": 0.0266,
+            "delta": 0.0265,
             "gap": 0.0563
           },
           {
@@ -1174,13 +1173,13 @@
             "gap": 0.0525
           },
           {
-            "lcb": 0.0264,
-            "delta": 0.026,
+            "lcb": 0.0266,
+            "delta": 0.0263,
             "gap": 0.0549
           },
           {
-            "lcb": 0.0226,
-            "delta": 0.0242,
+            "lcb": 0.023,
+            "delta": 0.0245,
             "gap": 0.0535
           },
           {
@@ -1189,17 +1188,17 @@
             "gap": 0.0514
           },
           {
-            "lcb": 0.0267,
-            "delta": 0.0268,
+            "lcb": 0.0269,
+            "delta": 0.027,
             "gap": 0.0548
           },
           {
-            "lcb": 0.0283,
-            "delta": 0.0297,
+            "lcb": 0.0277,
+            "delta": 0.0291,
             "gap": 0.0555
           }
         ],
-        "tightness_ratio_median": 0.49,
+        "tightness_ratio_median": 0.491,
         "tightness_cells": 54,
         "localization_hits": 49,
         "localization_cells": 54,
@@ -1211,11 +1210,11 @@
       "stats": {
         "incumbent_model": "m0-patchtst",
         "remaining_gap_ratio_by_task": {
-          "lgssm_multiperiod": 0.288,
-          "lgssm_xchannel": 0.452,
-          "hmm_ar_switch": 0.857,
+          "lgssm_multiperiod": 0.291,
+          "lgssm_xchannel": 0.45,
+          "hmm_ar_switch": 0.848,
           "arfima": 0.702,
-          "nonlinear_xchannel": 0.529
+          "nonlinear_xchannel": 0.527
         },
         "qualified_tasks": 4
       },
@@ -1228,17 +1227,17 @@
     "threshold": 0.3,
     "by_task": {
       "hmm_ar_switch": {
-        "remaining_gap_ratio": 0.857,
+        "remaining_gap_ratio": 0.848,
         "seeds": 3,
         "recommendation": "keep"
       },
       "nonlinear_xchannel": {
-        "remaining_gap_ratio": 0.529,
+        "remaining_gap_ratio": 0.527,
         "seeds": 3,
         "recommendation": "keep"
       },
       "lgssm_xchannel": {
-        "remaining_gap_ratio": 0.452,
+        "remaining_gap_ratio": 0.45,
         "seeds": 3,
         "recommendation": "keep"
       }
@@ -1247,66 +1246,66 @@
   },
   "fit_seconds_by_model": {
     "m0-patchtst": [
-      5.4,
-      4.6,
-      4.5,
-      4.6,
-      4.5,
-      4.6,
-      1.3,
-      1.3,
-      1.3,
+      6.0,
+      5.6,
+      5.3,
+      5.0,
+      5.3,
+      5.0,
+      1.1,
+      1.1,
+      1.1,
+      1.1,
+      1.1,
       1.2,
-      1.2,
-      1.2,
-      4.6,
-      4.7,
-      4.8
+      4.4,
+      4.4,
+      4.4
     ],
     "m0-patchtst-noattn": [
-      1.7,
-      1.7,
-      1.6,
-      1.7,
-      1.7,
-      1.7,
-      0.5,
-      0.5,
-      0.5,
-      0.5,
-      0.4,
-      0.4,
+      2.0,
+      1.9,
+      2.1,
+      2.0,
       1.8,
-      1.7,
-      1.7
+      2.2,
+      0.4,
+      0.4,
+      0.4,
+      0.4,
+      0.4,
+      0.4,
+      1.6,
+      1.6,
+      1.6
     ],
     "m0-patchtst-coarsepatch": [
-      0.7,
-      0.7,
+      0.9,
       0.8,
       0.7,
-      0.7,
-      0.7,
+      0.8,
+      0.8,
+      0.8,
       0.2,
       0.2,
       0.2,
       0.2,
-      0.3,
+      0.2,
       0.2,
       0.7,
       0.7,
       0.7
     ],
     "m0-patchtst-channelmix": [
-      4.7,
-      5.2,
-      4.7,
-      4.8,
       5.0,
-      5.1,
-      4.8,
-      4.6,
-      4.6
+      5.0,
+      5.3,
+      4.4,
+      4.5,
+      4.4,
+      4.4,
+      4.5,
+      4.5
     ]
   }
 }
