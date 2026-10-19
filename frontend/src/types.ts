@@ -31,7 +31,6 @@ export type Bootstrap = {
   chainSummaryParts?: JsonMap[];
   referenceFeatureBuild?: JsonMap;
   referenceFeatureTool?: JsonMap;
-  referenceFeatureParts?: JsonMap[];
   dryRun?: boolean;
   debugEnabled?: boolean;
   runtime?: {

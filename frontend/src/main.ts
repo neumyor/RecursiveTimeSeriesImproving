@@ -98,8 +98,6 @@ const state = {
     mainApiKey: string;
   },
   renderSignatures: new Map<string, string>(),
-  messageFingerprints: new Map<string, string>(),
-  settingsFormVersion: 0,
   realtimeWaiters: [] as Array<{
     predicate: (data: Bootstrap) => boolean;
     resolve: (data: Bootstrap) => void;
@@ -202,16 +200,7 @@ app.innerHTML = `
         </div>
       </section>
 
-      <details class="panel graph-settings-card">
-        <summary class="panel-heading">
-          <span data-icon="SlidersHorizontal"></span>
-          <span>详细设置</span>
-        </summary>
-        <div class="graph-settings-body">
-        <p class="meta">构建模型与抽取深度集中在设置页面管理。</p>
-        <button id="openGraphSettingsBtn" type="button" class="secondary full-width"><span data-icon="SlidersHorizontal"></span><span>打开工作区设置</span></button>
-        </div>
-      </details>
+      <button id="openGraphSettingsBtn" type="button" class="secondary full-width"><span data-icon="SlidersHorizontal"></span><span>打开工作区设置</span></button>
 
       <section class="panel">
         <div class="panel-heading">
@@ -622,9 +611,9 @@ els.backToChatBtn.addEventListener('click', () => {
 });
 function openSettingsView() {
   state.view = 'settings';
-  state.settingsFormVersion += 1;
   history.pushState({}, '', '/settings');
   render();
+  syncAndRenderSettingsForm();
 }
 els.settingsBtn.addEventListener('click', openSettingsView);
 els.openGraphSettingsBtn.addEventListener('click', openSettingsView);
@@ -634,22 +623,22 @@ els.settingsDoneBtn.addEventListener('click', () => {
   render();
 });
 els.buildGraphBtn.addEventListener('click', async () => {
-  await runAction(async () => {
+  await runQuietAction(async () => {
     await postJson('/api/knowledge-graph/build', { trigger: 'manual' });
   });
 });
 els.rebuildGraphBtn.addEventListener('click', async () => {
-  await runAction(async () => {
+  await runQuietAction(async () => {
     await postJson('/api/knowledge-graph/build', { trigger: 'rebuild' });
   });
 });
 els.continueGraphBtn.addEventListener('click', async () => {
-  await runAction(async () => {
+  await runQuietAction(async () => {
     await postJson('/api/knowledge-graph/continue', {});
   });
 });
 els.pauseGraphBtn.addEventListener('click', async () => {
-  await runAction(async () => {
+  await runQuietAction(async () => {
     await postJson('/api/knowledge-graph/pause', { reason: '用户从知识图谱页面暂停。' });
   });
 });
@@ -688,7 +677,7 @@ els.backToChainFromImageBtn.addEventListener('click', () => {
 });
 els.buildChainSummaryBtn.addEventListener('click', async () => {
   resetChainRenderSignatures();
-  await runAction(async () => {
+  await runQuietAction(async () => {
     await postJson('/api/chain-summary/build', {});
   });
 });
@@ -707,11 +696,11 @@ window.addEventListener('popstate', () => {
     : path === '/settings'
     ? 'settings'
     : 'chat';
-  if (state.view === 'settings') state.settingsFormVersion += 1;
   state.selectedImagePath = path === '/image-viewer'
     ? new URLSearchParams(window.location.search).get('path') || ''
     : state.selectedImagePath;
   render();
+  if (state.view === 'settings') syncAndRenderSettingsForm();
 });
 els.interruptBtn.addEventListener('click', async () => {
   const reason = els.messageInput.value.trim();
@@ -893,17 +882,13 @@ function applyRealtimeEvent(eventType: string, payload: JsonMap) {
   }
   if (!state.bootstrap) return;
   if (eventType === 'main_parts') {
-    state.bootstrap.mainParts = payload.mainPart
-      ? appendRealtimePart(state.bootstrap.mainParts, payload.mainPart)
-      : payload.mainParts || [];
+    state.bootstrap.mainParts = appendRealtimePart(state.bootstrap.mainParts, payload.mainPart);
     state.pendingParts = reconcilePendingParts(state.bootstrap);
     render();
     return;
   }
   if (eventType === 'knowledge_graph_parts') {
-    state.bootstrap.knowledgeGraphParts = payload.knowledgeGraphPart
-      ? appendRealtimePart(state.bootstrap.knowledgeGraphParts || [], payload.knowledgeGraphPart)
-      : payload.knowledgeGraphParts || [];
+    state.bootstrap.knowledgeGraphParts = appendRealtimePart(state.bootstrap.knowledgeGraphParts || [], payload.knowledgeGraphPart);
     render();
     return;
   }
@@ -915,14 +900,7 @@ function applyRealtimeEvent(eventType: string, payload: JsonMap) {
     return;
   }
   if (eventType === 'chain_summary_parts') {
-    state.bootstrap.chainSummaryParts = payload.chainSummaryPart
-      ? appendRealtimePart(state.bootstrap.chainSummaryParts || [], payload.chainSummaryPart)
-      : payload.chainSummaryParts || [];
-    render();
-    return;
-  }
-  if (eventType === 'reference_feature_parts') {
-    state.bootstrap.referenceFeatureParts = payload.referenceFeatureParts || [];
+    state.bootstrap.chainSummaryParts = appendRealtimePart(state.bootstrap.chainSummaryParts || [], payload.chainSummaryPart);
     render();
     return;
   }
@@ -932,10 +910,7 @@ function applyRealtimeEvent(eventType: string, payload: JsonMap) {
     for (const [nodeId, part] of Object.entries(nodePartById)) {
       mergedNodeParts[nodeId] = appendRealtimePart(mergedNodeParts[nodeId] || [], part as JsonMap);
     }
-    state.bootstrap.nodePartsById = {
-      ...mergedNodeParts,
-      ...(payload.nodePartsById || {}),
-    };
+    state.bootstrap.nodePartsById = mergedNodeParts;
     if (payload.nodes) state.bootstrap.nodes = payload.nodes;
     if (payload.state) state.bootstrap.state = payload.state;
     if (payload.timeline) state.bootstrap.timeline = payload.timeline;
@@ -967,6 +942,7 @@ function appendRealtimePart(parts: JsonMap[], part: JsonMap): JsonMap[] {
 }
 
 function applyBootstrapSnapshot(data: Bootstrap) {
+  const firstBootstrap = state.bootstrap === null;
   state.bootstrap = data;
   syncRuntimeBusy(data);
   state.pendingParts = reconcilePendingParts(data);
@@ -974,6 +950,7 @@ function applyBootstrapSnapshot(data: Bootstrap) {
     ? state.loadingMessage || loadingPart('后端运行中，正在实时接收最新消息')
     : null;
   render();
+  if (firstBootstrap) syncAndRenderSettingsForm();
   resolveRealtimeWaiters(data);
 }
 
@@ -1031,7 +1008,7 @@ function render() {
   els.pauseWaitHint.textContent = pauseWaiting
     ? '正在等待 DSH 取消当前 turn、收拢子 agent 并完成持久化 checkpoint。'
     : '';
-  els.modeText.textContent = data.dryRun ? `${modeLabel(ws.controlMode || ws.mode)} / 试运行` : modeLabel(ws.controlMode || ws.mode || '-');
+  els.modeText.textContent = data.dryRun ? `${modeLabel(ws.controlMode)} / 试运行` : modeLabel(ws.controlMode || '-');
   setHtmlIfChanged(els.variantText, variantPill(data.variant));
   els.modelText.textContent = data.llmConfig?.config?.model || 'sdk-default';
   setHtmlIfChanged(els.runtimeUvText, runtimePill(data.runtime?.workspaceUv));
@@ -1045,7 +1022,7 @@ function render() {
   renderStable('transcript-scope', [data.nodes, state.transcriptScope], () => renderTranscriptScope(data.nodes));
   renderChat(data);
   renderStable('knowledge-graph', [data.knowledgeGraph, state.selectedGraphNodeId], () => renderKnowledgeGraph(data.knowledgeGraph));
-  renderStable('knowledge-builder', [data.knowledgeGraphBuild, data.runtime, data.knowledgeGraphLlmConfig], () => renderKnowledgeGraphBuilder(data));
+  renderStable('knowledge-builder', [data.knowledgeGraphBuild, data.runtime], () => renderKnowledgeGraphBuilder(data));
   renderStable('knowledge-workbench', [data.knowledgeBaseSummary, state.selectedKnowledgeBaseKind, state.knowledgeBaseCards, state.knowledgeBaseCardsBusy], () => renderKnowledgeWorkbench(data));
   renderStable('builder-trace', data.knowledgeGraphParts || [], () => renderBuilderTrace(data.knowledgeGraphParts || []));
   renderKnowledgeGraphTabState();
@@ -1235,12 +1212,11 @@ function renderChat(data: Bootstrap) {
   let changed = false;
   renderedParts.forEach((part, index) => {
     const key = messageKey(part, index);
-    const fingerprint = JSON.stringify(part ?? null);
+    const html = messageHtml(part).trim();
     desiredKeys.add(key);
     let element = existing.get(key);
-    if (!element || state.messageFingerprints.get(key) !== fingerprint) {
-      state.messageFingerprints.set(key, fingerprint);
-      const replacement = createMessageElement(part, key);
+    if (!element || renderedMessageHtml.get(element) !== html) {
+      const replacement = createMessageElement(html, key);
       if (element) element.remove();
       element = replacement;
       changed = true;
@@ -1251,7 +1227,6 @@ function renderChat(data: Bootstrap) {
   for (const [key, element] of existing) {
     if (!desiredKeys.has(key)) {
       element.remove();
-      state.messageFingerprints.delete(key);
       changed = true;
     }
   }
@@ -1277,12 +1252,15 @@ function messageKey(part: JsonMap, index: number) {
   return String(part.id || part.sortKey || `${part.role || 'system'}:${part.type || 'text'}:${part.timestamp || index}`);
 }
 
-function createMessageElement(part: JsonMap, key: string) {
+const renderedMessageHtml = new WeakMap<HTMLElement, string>();
+
+function createMessageElement(html: string, key: string) {
   const template = document.createElement('template');
-  template.innerHTML = messageHtml(part).trim();
+  template.innerHTML = html;
   const element = template.content.firstElementChild as HTMLElement | null;
   if (!element) throw new Error(`Unable to render message ${key}`);
   element.dataset.messageKey = key;
+  renderedMessageHtml.set(element, html);
   bindToolCards(element);
   hydrateIcons(element);
   return element;
@@ -1352,7 +1330,7 @@ function renderChainCta(data: Bootstrap) {
 }
 
 function syncSettingsFromBootstrap(data: Bootstrap) {
-  const settings = data.runtimeSettings || data.state?.runtimeSettings || {};
+  const settings = data.runtimeSettings || {};
   state.settings.iterativeK = settings.iterativeCandidateCount ?? 3;
   state.settings.graphDepth = settings.knowledgeGraphExtractionDepth ?? 2;
 
@@ -1370,23 +1348,22 @@ function syncSettingsFromBootstrap(data: Bootstrap) {
   state.settings.graphModel = graph.model || '';
   state.settings.graphBaseUrl = graph.baseUrl || '';
   state.settings.graphApiKey = '';
+}
 
-  // The reference feature extractor is built by the main session; no
-  // independent LLM config is needed. The validated tool status is
-  // surfaced through the node detail panel and the chain CTA.
+function syncAndRenderSettingsForm() {
+  if (!state.bootstrap) return;
+  syncSettingsFromBootstrap(state.bootstrap);
+  renderSettingsForm();
 }
 
 function renderSettings(data: Bootstrap) {
   if (state.view !== 'settings') return;
   if (!data) return;
   // The readout section has no inputs and can re-render on state updates.
-  // The form section renders only when the view mounts or after an explicit
-  // re-render, so in-progress edits survive every background update.
+  // The form section is rendered by syncAndRenderSettingsForm (entering the
+  // view, the first bootstrap, restoring defaults), so in-progress edits
+  // survive every background update.
   renderStable('settings-workspace', [data.variant, data.state, data.dryRun, data.debugEnabled, data.runtime?.workspaceUv], () => renderSettingsWorkspace(data));
-  renderStable('settings-form', [state.settingsFormVersion], () => {
-    syncSettingsFromBootstrap(data);
-    renderSettingsForm();
-  });
 }
 
 function renderSettingsWorkspace(data: Bootstrap) {
@@ -1396,7 +1373,7 @@ function renderSettingsWorkspace(data: Bootstrap) {
     { label: '当前节点', value: ws.activeNode
       ? `<span class="settings-readout-pill active">${escapeHtml(nodeDisplayName(ws.activeNode))}</span>`
       : `<span class="settings-readout-pill">—</span>` },
-    { label: '控制模式', value: `<span class="settings-readout-pill ${ws.controlMode === 'auto' ? 'active' : ''}">${escapeHtml(modeLabel(ws.controlMode || ws.mode || 'manual'))}</span>` },
+    { label: '控制模式', value: `<span class="settings-readout-pill ${ws.controlMode === 'auto' ? 'active' : ''}">${escapeHtml(modeLabel(ws.controlMode || 'manual'))}</span>` },
     { label: '试运行', value: data.dryRun
       ? `<span class="settings-readout-pill active">开启</span>`
       : `<span class="settings-readout-pill">关闭</span>` },
@@ -1428,6 +1405,7 @@ function renderSettingsWorkspace(data: Bootstrap) {
       <p class="settings-section-foot">这些项目由服务启动参数决定，例如 <code>TS_HARNESS_VARIANT</code>、<code>TS_HARNESS_CONTROL_MODE</code>、<code>TS_HARNESS_DRY_RUN</code> 和 <code>TS_HARNESS_DEBUG</code>。如需修改，请重启服务。</p>
     </div>
   `;
+  bindSettingsWorkspaceHandlers(els.settingsWorkspaceSection);
   hydrateIcons(els.settingsWorkspaceSection);
 }
 
@@ -1464,7 +1442,7 @@ function renderSettingsForm() {
     ${renderLlmSection('main', '主模型', '供编排器和所有节点智能体使用。保存到 <code>&lt;workspace&gt;/config.llm.json</code>，通常在下一条消息后生效。', true)}
   `;
 
-  bindSettingsHandlers();
+  bindSettingsFormHandlers(els.settingsFormSection);
   hydrateIcons(els.settingsFormSection);
 }
 
@@ -1486,7 +1464,7 @@ function renderLlmSection(prefix: 'graph' | 'main', title: string, description: 
   const modelPlaceholder = isMain ? '例如 deepseek-v4-pro' : '默认继承主模型';
   const baseUrlPlaceholder = isMain ? 'https://api.deepseek.com' : '默认继承主接口地址';
   const apiKeyPlaceholder = '留空表示保持当前密钥';
-  const saveBtnId = isMain ? 'saveMainLlmBtn' : 'saveGraphLlmBtn2';
+  const saveBtnId = isMain ? 'saveMainLlmBtn' : 'saveGraphLlmBtn';
   const resetBtnId = isMain ? 'resetMainLlmBtn' : '';
   const modelId = `${prefix}Model`;
   const baseUrlId = `${prefix}BaseUrl`;
@@ -1538,8 +1516,8 @@ function segmentedHtml(group: string, values: string[], current: string, labels:
   `;
 }
 
-function bindSettingsHandlers() {
-  for (const group of els.settingsContent.querySelectorAll<HTMLElement>('[data-segmented-group]')) {
+function bindSettingsFormHandlers(root: HTMLElement) {
+  for (const group of root.querySelectorAll<HTMLElement>('[data-segmented-group]')) {
     const name = group.dataset.segmentedGroup || '';
     for (const item of group.querySelectorAll<HTMLButtonElement>('.settings-segmented-item')) {
       item.addEventListener('click', async () => {
@@ -1560,7 +1538,7 @@ function bindSettingsHandlers() {
       });
     }
   }
-  for (const input of els.settingsContent.querySelectorAll<HTMLInputElement>('.settings-input')) {
+  for (const input of root.querySelectorAll<HTMLInputElement>('.settings-input')) {
     input.addEventListener('input', () => {
       const id = input.id;
       if (id === 'graphModel') state.settings.graphModel = input.value;
@@ -1571,13 +1549,16 @@ function bindSettingsHandlers() {
       else if (id === 'mainApiKey') state.settings.mainApiKey = input.value;
     });
   }
-  const graphSave = els.settingsContent.querySelector<HTMLButtonElement>('#saveGraphLlmBtn2');
+  const graphSave = root.querySelector<HTMLButtonElement>('#saveGraphLlmBtn');
   graphSave?.addEventListener('click', () => saveLlmConfig(false));
-  const mainSave = els.settingsContent.querySelector<HTMLButtonElement>('#saveMainLlmBtn');
+  const mainSave = root.querySelector<HTMLButtonElement>('#saveMainLlmBtn');
   mainSave?.addEventListener('click', () => saveLlmConfig(true));
-  const mainReset = els.settingsContent.querySelector<HTMLButtonElement>('#resetMainLlmBtn');
+  const mainReset = root.querySelector<HTMLButtonElement>('#resetMainLlmBtn');
   mainReset?.addEventListener('click', () => resetMainLlmConfig());
-  for (const detailBtn of els.settingsContent.querySelectorAll<HTMLButtonElement>('[data-settings-detail]')) {
+}
+
+function bindSettingsWorkspaceHandlers(root: HTMLElement) {
+  for (const detailBtn of root.querySelectorAll<HTMLButtonElement>('[data-settings-detail]')) {
     detailBtn.addEventListener('click', () => {
       if (detailBtn.dataset.settingsDetail === 'state') {
         showDetail('工作区状态文件', state.bootstrap?.state);
@@ -1586,7 +1567,7 @@ function bindSettingsHandlers() {
       }
     });
   }
-  for (const copyBtn of els.settingsContent.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
+  for (const copyBtn of root.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
     copyBtn.addEventListener('click', async () => {
       const text = copyBtn.dataset.copy || '';
       try {
@@ -1608,13 +1589,27 @@ function bindSettingsHandlers() {
 }
 
 async function saveRuntimeSettings() {
-  await runAction(async () => {
+  try {
     const result = await postJson('/api/runtime-settings', {
       iterativeCandidateCount: state.settings.iterativeK,
       knowledgeGraphExtractionDepth: state.settings.graphDepth,
     });
     applyBootstrapSnapshot(result.bootstrap);
-  });
+  } catch (error) {
+    const saved = state.bootstrap?.runtimeSettings || {};
+    state.settings.iterativeK = saved.iterativeCandidateCount ?? 3;
+    state.settings.graphDepth = saved.knowledgeGraphExtractionDepth ?? 2;
+    selectSegment('iterativeK', state.settings.iterativeK);
+    selectSegment('graphDepth', state.settings.graphDepth);
+    showDetail('错误', { message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function selectSegment(group: string, value: number) {
+  const segmented = els.settingsFormSection.querySelector<HTMLElement>(`[data-segmented-group="${group}"]`);
+  for (const item of segmented?.querySelectorAll<HTMLButtonElement>('.settings-segmented-item') || []) {
+    item.classList.toggle('selected', item.dataset.value === String(value));
+  }
 }
 
 async function saveLlmConfig(isMain: boolean) {
@@ -1671,9 +1666,8 @@ async function resetMainLlmConfig() {
       model: '',
       baseUrl: '',
     });
-    syncSettingsFromBootstrap(result.bootstrap);
-    state.settingsFormVersion += 1;
     applyBootstrapSnapshot(result.bootstrap);
+    syncAndRenderSettingsForm();
   } catch (error) {
     showDetail('恢复主模型失败', { message: error instanceof Error ? error.message : String(error) });
   }
@@ -2654,7 +2648,7 @@ function toolDetail(part: JsonMap) {
       '调用参数:',
       JSON.stringify(part.input ?? {}, null, 2),
     ];
-    if (part.status === 'completed' || part.resultText) {
+    if (part.status === 'completed' || part.status === 'failed' || part.resultText) {
       chunks.push('', '调用结果:', part.resultText || '');
     } else {
       chunks.push('', '调用结果:', '等待工具返回结果。');
@@ -2749,17 +2743,16 @@ function isDisplayableSessionPart(part: JsonMap): boolean {
   // Semantic tool cards carry a concise intend, parameters, status, and
   // result.
   if (part.type === 'tool_call' || part.type === 'tool_result') return true;
-  // A successful turn result is a transport marker rather than user-facing
-  // content.  Failures are converted to a readable system message above.
+  // A successful turn result carries no user-facing content and is hidden.
+  // A failed one is shown as a system message (see protocolFailureText).
   if (part.role === 'system' && part.type === 'result') return part.status === 'failed';
   return true;
 }
 
 function protocolFailureText(part: JsonMap): string {
-  const toolPart = part.type === 'tool_call' || part.type === 'tool_result';
-  if (!toolPart || part.status !== 'failed') return '';
+  if (part.role !== 'system' || part.type !== 'result' || part.status !== 'failed') return '';
   const detail = String(part.resultText || part.text || '').trim();
-  return detail ? `工具执行失败：${detail}` : '工具执行失败。';
+  return detail ? `执行失败：${detail}` : '执行失败。';
 }
 
 function displaySafeSessionParts(parts: unknown): JsonMap[] {
@@ -2775,13 +2768,11 @@ function displayTextForPart(part: JsonMap) {
   if (part.type === 'tool_result') {
     const result = part.resultText || part.text || '';
     // An empty result is transported as the placeholder "Tool result"; the
-    // card then carries no user-facing text.
-    return result === 'Tool result' ? '' : result;
+    // card then carries no user-facing text unless the call failed.
+    const text = result === 'Tool result' ? '' : result;
+    return text || (part.status === 'failed' ? '工具执行失败' : '');
   }
-  if (part.role === 'system' && part.type === 'result') {
-    if (part.status === 'failed') return part.resultText || part.text || '错误';
-    return '';
-  }
+  if (part.role === 'system' && part.type === 'result') return '';
   return part.text || '';
 }
 
@@ -2876,10 +2867,11 @@ async function showWorkspaceFile(path: string) {
 function updateControls(data: Bootstrap) {
   const ws = data.state || {};
   const canContinue = Boolean(data.execution?.canContinue);
+  const resumesNode = canContinue && Boolean(ws.activeNode);
   const pendingControl = Boolean(ws.pendingControl);
   els.sendBtn.disabled = state.busy || (Boolean(ws.activeNode) && !canContinue);
   els.messageInput.disabled = state.busy || (Boolean(ws.activeNode) && !canContinue);
-  els.messageInput.placeholder = canContinue
+  els.messageInput.placeholder = resumesNode
     ? '补充说明后点击 Resume，当前 node 会继续执行'
     : '向任务编排器发送消息';
   els.interruptBtn.disabled = !data.execution?.canPause;
@@ -2889,7 +2881,7 @@ function updateControls(data: Bootstrap) {
   els.rawZipUploadBtn.disabled = state.busy;
   els.approveControlBtn.disabled = state.busy || !pendingControl;
   els.rejectControlBtn.disabled = state.busy || !pendingControl;
-  updateSendButton(canContinue);
+  updateSendButton(resumesNode);
 }
 
 function getActiveNodeSession(data: Bootstrap) {
@@ -2908,6 +2900,14 @@ async function runAction(fn: () => Promise<void>) {
   } finally {
     state.busy = false;
     render();
+  }
+}
+
+async function runQuietAction(fn: () => Promise<void>) {
+  try {
+    await fn();
+  } catch (error) {
+    showDetail('错误', { message: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -3168,7 +3168,6 @@ async function pauseCurrent(reason: string) {
     render();
     showDetail('暂停失败', { message: error instanceof Error ? error.message : String(error) });
   } finally {
-    els.interruptBtn.disabled = false;
     updateControls(state.bootstrap || emptyBootstrap());
   }
 }
