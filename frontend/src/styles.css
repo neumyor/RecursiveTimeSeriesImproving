@@ -3637,6 +3637,8 @@ dialog pre {
 }
 
 /* ===== Settings view (Apple-style) ===== */
+body.settings-page .left-rail,
+body.settings-page .left-toggle,
 body.settings-page .right-rail,
 body.settings-page .right-toggle,
 body.settings-page .toolbar {
@@ -3644,6 +3646,7 @@ body.settings-page .toolbar {
 }
 
 body.settings-page .main-pane {
+  margin-left: 0;
   margin-right: 0;
   grid-template-rows: 1fr;
   background:
@@ -4142,6 +4145,8 @@ body.settings-page.left-collapsed .main-pane {
   color: #6a48c8;
 }
 
+body.experiments-page .left-rail,
+body.experiments-page .left-toggle,
 body.experiments-page .right-rail,
 body.experiments-page .right-toggle,
 body.experiments-page .toolbar {
@@ -4149,7 +4154,7 @@ body.experiments-page .toolbar {
 }
 
 body.experiments-page .main-pane {
-  margin-left: 320px;
+  margin-left: 0;
   margin-right: 0;
   grid-template-rows: 1fr;
 }
@@ -4928,4 +4933,419 @@ body.experiments-page .exp-left-content {
 .exp-kv {
   grid-template-columns: 44px minmax(0, 1fr);
   margin-bottom: 10px;
+}
+
+/* ===== Experiment console (readability refresh) ===== */
+.exp-header-lead {
+  max-width: 760px;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.exp-scroll {
+  padding-bottom: 24px;
+}
+
+.exp-page {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.exp-card {
+  padding: 18px 20px;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.exp-card .panel-heading {
+  margin-bottom: 6px;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.exp-section-lead {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* three-step guide on the overview page */
+.exp-guide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.exp-guide-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(201, 211, 220, 0.62);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(223, 244, 241, 0.6), rgba(255, 255, 255, 0.92));
+  box-shadow: var(--shadow-soft);
+}
+
+.exp-guide-num {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.exp-guide-step strong {
+  font-size: 13.5px;
+}
+
+.exp-guide-step p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .exp-guide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* start panel */
+.exp-spec-summary {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.exp-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.exp-summary-head strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.exp-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.exp-facts > div {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.exp-facts dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.exp-facts dd {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.exp-arm-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exp-arm {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.exp-arm b {
+  font-size: 12.5px;
+}
+
+.exp-arm small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.exp-field {
+  font-size: 12.5px;
+}
+
+.exp-field-row {
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: end;
+}
+
+.exp-workers-hint {
+  margin: 0 0 10px;
+}
+
+.exp-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.exp-choice {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.exp-choice:hover:not(:disabled) {
+  transform: none;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.exp-choice.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.exp-advanced {
+  margin: 2px 0 14px;
+  padding: 9px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+}
+
+.exp-advanced > summary {
+  cursor: pointer;
+  color: var(--accent-dark);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.exp-advanced[open] > summary {
+  margin-bottom: 10px;
+}
+
+.exp-advanced .exp-field {
+  margin-bottom: 6px;
+}
+
+.exp-start-btn {
+  min-height: 46px;
+  border-radius: 10px;
+  font-size: 14px;
+  box-shadow: 0 8px 18px rgba(15, 124, 124, 0.18);
+}
+
+/* runs list */
+.exp-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.exp-group-title:first-of-type {
+  margin-top: 4px;
+}
+
+.exp-group-count {
+  min-width: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.exp-run-row {
+  min-height: 66px;
+}
+
+.exp-empty-runs {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.exp-empty-runs > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.exp-empty-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.exp-empty-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.exp-empty-row:hover:not(:disabled) {
+  transform: none;
+  border-color: var(--line-strong);
+  box-shadow: none;
+  color: var(--text);
+}
+
+/* run head */
+.exp-spec-line {
+  margin: 6px 0 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.exp-counts span {
+  background: var(--surface-soft);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.exp-counts span strong {
+  color: var(--ink);
+}
+
+.exp-counts .count-done {
+  background: var(--green-soft);
+  border-color: rgba(20, 132, 93, 0.28);
+  color: var(--green);
+}
+
+.exp-counts .count-done strong {
+  color: var(--green);
+}
+
+.exp-counts .count-running {
+  background: var(--amber-soft);
+  border-color: rgba(175, 107, 0, 0.3);
+  color: var(--amber);
+}
+
+.exp-counts .count-running strong {
+  color: var(--amber);
+}
+
+.exp-counts .count-failed {
+  background: var(--red-soft);
+  border-color: rgba(196, 49, 45, 0.3);
+  color: var(--red);
+}
+
+.exp-counts .count-failed strong {
+  color: var(--red);
+}
+
+.exp-counts .count-wide {
+  max-width: 260px;
+}
+
+.exp-counts .count-wide strong {
+  font-size: 13px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.exp-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(40, 100, 201, 0.25);
+  border-radius: 10px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 12.5px;
+}
+
+.exp-notice p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.exp-notice.ok {
+  border-color: rgba(20, 132, 93, 0.28);
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+/* matrix */
+.exp-matrix thead th {
+  padding: 0 8px 4px;
+}
+
+.exp-matrix th small {
+  display: block;
+  margin-top: 2px;
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.exp-matrix-corner {
+  color: var(--subtle) !important;
+  font-size: 11px !important;
+}
+
+.exp-matrix tbody th {
+  min-width: 150px;
+}
+
+.exp-tile {
+  min-width: 92px;
+  min-height: 60px;
+  border-radius: 10px;
+}
+
+.exp-analysis-head {
+  margin-bottom: 6px;
 }

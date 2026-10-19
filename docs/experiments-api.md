@@ -37,7 +37,7 @@ heldout 数据只给操作者看，页面显示它不会泄露给智能体（智
 ## 响应结构
 
 ```
-SpecSummary      { name, file, description, cellCount, tasks: [str], arms: [str], seeds: [int], budget: int }
+SpecSummary      { name, file, registeredAt, description, cellCount, tasks: [str], arms: [str], seeds: [int], budget: int }
 RunSummary       { name, process: ProcessStatus, cellsDone, cellsTotal | null, lastActivityAt | null }
 ProcessStatus    { state: "running" | "stopped" | "none", pid | null, specFile | null, startedAt | null }
 

@@ -58,7 +58,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_batch_command", lambda spec, root, workers, only: FAKE_BATCH)
 
     _write(specs / "tiny.json", json.dumps({
-        "name": "tiny-spec", "description": "two tasks",
+        "name": "tiny-spec", "registeredAt": "2026-10-19", "description": "two tasks",
         "tasks": [{"name": "t1", "kind": "synthetic"}, {"name": "t2", "kind": "synthetic"}],
         "arms": ["fixed", "self-built"], "seeds": [0], "budget": 3,
     }))
@@ -139,7 +139,8 @@ def test_specs_lists_only_matrix_specs(env) -> None:
     response = client.get("/api/experiments/specs")
     assert response.status_code == 200
     assert response.json() == [{
-        "name": "tiny-spec", "file": "tiny.json", "description": "two tasks", "cellCount": 4,
+        "name": "tiny-spec", "file": "tiny.json", "registeredAt": "2026-10-19",
+        "description": "two tasks", "cellCount": 4,
         "tasks": ["t1", "t2"], "arms": ["fixed", "self-built"], "seeds": [0], "budget": 3,
     }]
 

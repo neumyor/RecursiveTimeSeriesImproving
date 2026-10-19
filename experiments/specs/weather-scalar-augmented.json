@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "registeredAt": "2026-10-19",
+  "name": "weather-scalar-augmented",
+  "description": "Weather real task, scalar vs augmented. One real task (de-identified weather station CSV: 21 channels, 10-minute sampling), two arms, three seeds, 25 candidates per cell. The config is the main-v3 config (inputLength 96, horizon 24); the incumbent is m0-patchtst. The endpoint is the relative MSE ratio MSE(final)/MSE(m0) after the uniform m0+g postprocessing (no oracle). Independent of main-v3.json, which stays frozen.",
+  "tasks": [
+    {
+      "name": "real-weather",
+      "kind": "real",
+      "csv": "experiments/data/weather.csv",
+      "rationale": "de-identified real task; endpoint is relative MSE (no oracle)"
+    }
+  ],
+  "arms": ["scalar", "augmented"],
+  "seeds": [0, 1, 2],
+  "budget": 25,
+  "config": {
+    "inputLength": 96,
+    "horizon": 24,
+    "acceptanceAlpha": 0.05,
+    "certifyAlpha": 0.05,
+    "certifyEpsilon": 0.02,
+    "candidateTimeoutSeconds": 600,
+    "maxRepairs": 2,
+    "evolution": true
+  }
+}

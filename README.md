@@ -74,7 +74,7 @@ The current upstream HTTP fetch provider does not provide private-network/SSRF p
 Use a separate workspace per experiment or ablation variant.
 
 ```bash
-export TS_HARNESS_WORKSPACE="$HOME/.RecursiveECG/workspaces/default"
+export TS_HARNESS_WORKSPACE="$HOME/.harnessingts/workspaces/default"
 export TS_HARNESS_VARIANT=NOD-KGR-KTL-CRV-SUB-ADA
 export TS_HARNESS_CONTROL_MODE=auto
 export HOST=127.0.0.1
@@ -230,7 +230,7 @@ The DSH MCP bridge is an implementation detail, not a public integration endpoin
 Runtime workspaces are separate from the source repository. By default they live under:
 
 ```text
-~/.RecursiveECG/workspaces/default
+~/.harnessingts/workspaces/default
 ```
 
 Important workspace directories:

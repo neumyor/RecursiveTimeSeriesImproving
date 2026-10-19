@@ -1,59 +1,14 @@
 export type JsonMap = Record<string, any>;
 
-export type FileTreeNode = {
-  kind: 'dir' | 'file';
-  name: string;
-  path: string;
-  size?: number;
-  truncated?: boolean;
-  childCount?: number;
-  maxChildren?: number;
-  maxDepth?: number;
-  children?: FileTreeNode[];
-};
-
 export type Bootstrap = {
   variant?: JsonMap;
   state: JsonMap;
-  timeline: JsonMap[];
-  mainParts: JsonMap[];
-  nodes: JsonMap[];
-  nodePartsById: Record<string, JsonMap[]>;
-  nodeSpecs: JsonMap[];
-  fileTree: { root?: string; tree?: FileTreeNode; truncated?: boolean; entryCount?: number; maxDepth?: number; maxChildrenPerDir?: number } | null;
   llmConfig?: JsonMap;
-  runtimeSettings?: JsonMap;
-  knowledgeGraph?: JsonMap;
-  knowledgeBaseSummary?: JsonMap;
-  knowledgeGraphParts?: JsonMap[];
-  chainSummary?: JsonMap;
-  chainSummaryBuild?: JsonMap;
-  chainSummaryParts?: JsonMap[];
-  referenceFeatureBuild?: JsonMap;
-  referenceFeatureTool?: JsonMap;
   dryRun?: boolean;
   debugEnabled?: boolean;
   runtime?: {
-    running?: boolean;
-    knowledgeGraphRunning?: boolean;
-    chainSummaryRunning?: boolean;
-    pipelineComplete?: boolean;
     workspaceUv?: JsonMap | null;
   };
-  execution?: {
-    actorId?: string;
-    sessionId?: string | null;
-    phase?: 'ready' | 'running' | 'pausing' | 'paused' | 'recovering' | 'failed';
-    epoch?: number;
-    operationId?: string | null;
-    checkpointSeq?: number;
-    canPause?: boolean;
-    canForceStop?: boolean;
-    canContinue?: boolean;
-    lastError?: string | null;
-  };
-  knowledgeGraphBuild?: JsonMap;
-  knowledgeGraphLlmConfig?: JsonMap;
 };
 
 // Experiment-run API (docs/experiments-api.md).
@@ -67,6 +22,7 @@ export type ProcessStatus = {
 export type SpecSummary = {
   name: string;
   file: string;
+  registeredAt?: string;
   description: string;
   cellCount: number;
   tasks: string[];

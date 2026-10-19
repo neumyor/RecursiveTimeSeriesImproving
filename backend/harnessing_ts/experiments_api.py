@@ -140,6 +140,7 @@ def _spec_summary(file: Path, raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": raw.get("name") if isinstance(raw.get("name"), str) else file.stem,
         "file": file.name,
+        "registeredAt": raw.get("registeredAt") if isinstance(raw.get("registeredAt"), str) else "",
         "description": raw.get("description") if isinstance(raw.get("description"), str) else "",
         "cellCount": len(tasks) * len(arms) * len(seeds),
         "tasks": tasks,
