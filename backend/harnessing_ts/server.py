@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from harnessing_ts.api.payloads import build_bootstrap_payload, build_live_payload, masked_llm_config
 from harnessing_ts.api.realtime import RealtimeEvent, RealtimeEventBroker
+from harnessing_ts.experiments_api import router as experiments_router
 from harnessing_ts.orchestrator import HarnessOrchestrator
 from harnessing_ts.paths import control_mode_from_env, default_workspace_path, frontend_root
 from harnessing_ts.variants import resolve_variant, variant_help_text
@@ -125,6 +126,7 @@ def create_app() -> FastAPI:
                 await orchestrator.close()
 
     app = FastAPI(title="HarnessingTS", lifespan=lifespan)
+    app.include_router(experiments_router)
     realtime = RealtimeEventBroker()
     orchestrator.set_realtime_event_sink(realtime.publish)
     app.state.orchestrator = orchestrator
