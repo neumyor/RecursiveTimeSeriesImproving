@@ -16,11 +16,12 @@ Per run it also reports the diagnostics (acceptance/failure counts, tokens,
 wall-clock, numpy-vs-torch mix, directed/off-target rates against the
 parent's top card coordinate, the cert-level total LCB vs true-test-gap
 correlation across accepted incumbents, the certification stop point and
-the post-stop gain) and the audit: absolute paths outside the workspace
-(and outside experiments/templates and backend) in the agent's read/glob/
-grep tool calls — the heldout path appearing there voids the run's
-isolation — plus candidates whose diag card gain dwarfs their cert gain
-(ratio > 5), the overfit-to-diagnostic signature.
+the post-stop gain) and the audit: paths outside the workspace (and outside
+experiments/templates and backend) in the agent's read/glob/grep tool calls,
+resolved the way the tools resolve them (relative to the workspace, with ~
+and environment variables expanded) — a heldout path appearing there voids
+the run's isolation — plus candidates whose diag card gain dwarfs their cert
+gain (ratio > 5), the overfit-to-diagnostic signature.
 
 Arm level: per-(task, arm) median+IQR of E1/E2 and the seed-blocked
 sign-flip permutation test for the five pre-registered contrasts
@@ -49,6 +50,7 @@ from functools import partial
 import itertools
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -341,20 +343,28 @@ class _Replay:
 # --- audit ------------------------------------------------------------------------------
 
 
-def _offending_paths(text: str, allowed: list[Path]) -> set[str]:
-    """Absolute filesystem paths in ``text`` outside every allowed root.
+_PATH_ARGUMENTS = {"read": ("file_path", "path"), "glob": ("path", "pattern"), "grep": ("path",)}
 
-    A path counts as absolute only when the leading slash starts a token, so
-    the slash inside a workspace-relative path such as ``models/candidates/x``
-    or a glob such as ``models/*/model.py`` is not read as the root directory.
+
+def _offending_paths(
+    arguments: dict[str, Any], base: Path, allowed: list[Path], tool: str
+) -> set[str]:
+    """Path arguments of a read/glob/grep call that resolve outside every allowed root.
+
+    The tools interpret a relative path against the workspace, so each path
+    argument is expanded (``~`` and environment variables) and resolved
+    against ``base``.  ``../`` escapes and absolute paths land outside the
+    roots and are reported; workspace-relative paths and globs stay inside
+    and are not.  Only the argument that names a path is checked; grep's
+    ``pattern`` is a regular expression.
     """
     found: set[str] = set()
-    text = re.sub(r"https?://\S+", " ", text)  # URL path segments are not filesystem paths
-    for match in re.finditer(
-        r"(?<![A-Za-z0-9_.\-~*/?\[\]{}])/[A-Za-z0-9_][A-Za-z0-9_.\-/]*", text
-    ):
-        raw = match.group().rstrip(".,;:)]}\"'")
-        resolved = Path(raw).resolve()
+    for key in _PATH_ARGUMENTS.get(tool, ()):
+        raw = arguments.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        candidate = Path(os.path.expandvars(os.path.expanduser(raw)))
+        resolved = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
         if all(resolved != root and root not in resolved.parents for root in allowed):
             found.add(raw)
     return found
@@ -373,8 +383,11 @@ def _audit_paths(run_dir: Path) -> list[str]:
     found: set[str] = set()
     for log in sorted((ws / "logs").glob("round-*.jsonl")):
         for part in _iter_json_objects(log.read_text(encoding="utf-8", errors="replace")):
-            if part.get("name") in _READ_TOOLS and part.get("type") in ("tool_call", "tool_use"):
-                found |= _offending_paths(json.dumps(part.get("input", {}), default=str), allowed)
+            name = part.get("name")
+            if name in _READ_TOOLS and part.get("type") in ("tool_call", "tool_use"):
+                arguments = part.get("input")
+                if isinstance(arguments, dict):
+                    found |= _offending_paths(arguments, ws, allowed, name)
     sessions = ws / ".dsh-sessions"
     if sessions.is_dir():
         try:
@@ -393,9 +406,14 @@ def _audit_paths(run_dir: Path) -> list[str]:
                         and isinstance(data, dict)
                         and data.get("name") in _READ_TOOLS
                     ):
-                        found |= _offending_paths(
-                            json.dumps(data.get("arguments", ""), default=str), allowed
-                        )
+                        arguments = data.get("arguments")
+                        if isinstance(arguments, str):
+                            try:
+                                arguments = json.loads(arguments)
+                            except ValueError:
+                                arguments = None
+                        if isinstance(arguments, dict):
+                            found |= _offending_paths(arguments, ws, allowed, data["name"])
     return sorted(found)
 
 
