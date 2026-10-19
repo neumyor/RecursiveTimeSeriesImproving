@@ -1,9 +1,8 @@
-# RecursiveECG
+# RecursiveTimeSeriesImproving
 
-RecursiveECG is a time-series tool-use harness built on the official Python DeepSeek Harness SDK.
-It helps an agent work through a time-series task with references, data exploration, a problem contract, iterative tool building, evidence review, and a final summary.
+RecursiveTimeSeriesImproving is a research harness for residual-headroom experiments on time-series forecasting. The web console starts and monitors experiment runs (`experiments/loop.py`), and the Settings page edits the main model configuration used by the agents.
 
-It is not a leaderboard or model-comparison framework. The goal is a structured, auditable problem-solving workflow.
+It is not a leaderboard or model-comparison framework. The goal is a structured, auditable search for forecasting improvements.
 
 ## Quick Start
 
@@ -19,8 +18,8 @@ uv --version
 ### 2. Prepare The Project
 
 ```bash
-git clone https://github.com/neumyor/RecursiveECG.git
-cd RecursiveECG
+git clone https://github.com/neumyor/RecursiveTimeSeriesImproving.git
+cd RecursiveTimeSeriesImproving
 
 uv sync
 uv run ts-harness setup-server
@@ -100,20 +99,12 @@ TS_HARNESS_DEBUG=true uv run ts-harness-server
 
 ## Using The UI
 
-Typical flow:
+The web console has two pages:
 
-1. Open **Settings** and confirm the Main LLM configuration.
-2. Upload domain documents through **Reference Files**.
-3. Upload task data through **Raw Data Zip**.
-4. Send the task definition in the main chat.
-5. Build the **Knowledge Graph** when using a `KGR` profile.
-6. Let the node chain run through `problem-contract`, optional `knowledge-to-tools`, `iterative-solving`, and `final-summary`.
-7. Inspect node logs, workspace files, run outputs, case-review artifacts, chain summary, and final summary.
+1. **实验运行** (`/experiments`): choose a registered spec under `experiments/specs/`, pick all cells or one feedback arm, set the number of parallel workers, and start the run. The matrix shows each cell's rounds and accepted candidates; a cell page shows its diagnostic MSE curve, round table and saturation certificates. **生成分析** runs the held-out posthoc analysis for finished cells.
+2. **设置** (`/settings`): read the workspace state and edit the main model configuration.
 
-Control modes:
-
-- `TS_HARNESS_CONTROL_MODE=auto`: node transitions are accepted automatically.
-- `TS_HARNESS_CONTROL_MODE=manual`: each node entry and completion waits for browser approval.
+One cell is one task × one feedback arm × one seed, and runs for the spec's round budget. Runs are resumable: restarting the same run name skips cells whose `done.json` exists.
 
 ### Session Recovery
 
