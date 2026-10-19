@@ -765,13 +765,13 @@ export function createExperiments(deps: ExperimentsDeps) {
       });
       const rows = analysis.endpointTable ?? [];
       const contrasts = analysis.contrasts ?? [];
-      parts.push(`<div class="meta exp-head-meta">已分析 ${esc(records.length - broken.length)} 个运行${running ? '（正在重新生成，下表是上一次的结果）' : ''}${kinds.length ? ` · E1 类型 ${names(kinds as string[])}` : ''}</div>`);
-      if (analysis.incomplete?.length) parts.push(`<div class="exp-hint">未完成、未纳入分析的运行（${esc(analysis.incomplete.length)}）：${names(analysis.incomplete)}</div>`);
-      if (broken.length) parts.push(`<div class="exp-hint error">分析出错的运行：${broken.map((record) => `${esc(record.run ?? '?')}（${esc(record.error)}）`).join('、')}</div>`);
+      parts.push(`<div class="meta exp-head-meta">已分析 ${esc(records.length - broken.length)} 个单元格${running ? '（正在重新生成，下表是上一次的结果）' : ''}${kinds.length ? ` · E1 类型 ${names(kinds as string[])}` : ''}</div>`);
+      if (analysis.incomplete?.length) parts.push(`<div class="exp-hint">未完成、未纳入分析的单元格（${esc(analysis.incomplete.length)}）：${names(analysis.incomplete)}</div>`);
+      if (broken.length) parts.push(`<div class="exp-hint error">分析出错的单元格：${broken.map((record) => `${esc(record.run ?? '?')}（${esc(record.error)}）`).join('、')}</div>`);
       parts.push('<div class="detail-section-title">端点表（按任务 × arm，E1/E2 的中位数与四分位距）</div>');
       parts.push(rows.length
         ? `<div class="exp-table-scroll"><table class="exp-table exp-endpoints">
-            <thead><tr><th>任务</th><th>arm</th><th>运行数</th><th>E1 中位</th><th>E1 IQR</th><th>E2 中位</th><th>E2 IQR</th><th>n（E1/E2）</th></tr></thead>
+            <thead><tr><th>任务</th><th>arm</th><th>单元格数</th><th>E1 中位</th><th>E1 IQR</th><th>E2 中位</th><th>E2 IQR</th><th>n（E1/E2）</th></tr></thead>
             <tbody>${rows.map((row) => {
               const e1 = stat(row.e1);
               const e2 = stat(row.e2);
