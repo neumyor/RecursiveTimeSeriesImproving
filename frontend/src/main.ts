@@ -16,6 +16,7 @@ import {
   Circle,
   Clock3,
   File,
+  FlaskConical,
   FolderTree,
   Gauge,
   GitBranch,
@@ -42,6 +43,7 @@ import {
 import type { IconNode } from 'lucide';
 import { marked } from 'marked';
 import type { Bootstrap, FileTreeNode, JsonMap } from './types';
+import { createExperiments } from './experiments';
 
 const state = {
   bootstrap: null as Bootstrap | null,
@@ -60,7 +62,9 @@ const state = {
     ? 'imageViewer'
     : window.location.pathname === '/settings'
     ? 'settings'
-    : 'chat') as 'chat' | 'knowledgeGraph' | 'chainSummary' | 'imageViewer' | 'settings'),
+    : isExperimentsPath(window.location.pathname)
+    ? 'experiments'
+    : 'chat') as 'chat' | 'knowledgeGraph' | 'chainSummary' | 'imageViewer' | 'settings' | 'experiments'),
   selectedImagePath: new URLSearchParams(window.location.search).get('path') || '',
   selectedGraphNodeId: null as string | null,
   knowledgeGraphTab: 'graph' as 'graph' | 'trace',
@@ -183,6 +187,28 @@ app.innerHTML = `
       </summary>
       <div id="timeline" class="timeline"></div>
     </details>
+    </div>
+
+    <div class="exp-left-content">
+      <section class="panel">
+        <div class="panel-heading">
+          <span data-icon="FlaskConical"></span>
+          <span>实验流程</span>
+        </div>
+        <ol class="exp-steps">
+          <li><b>选择规格</b><span>规格定义任务、arm、种子和每格轮数</span></li>
+          <li><b>启动</b><span>后台 batch 进程按并行数跑完全部单元格</span></li>
+          <li><b>看进度</b><span>矩阵 → 单元格逐轮结果 → 单轮提案与会话</span></li>
+          <li><b>读最终指标</b><span>单元格完成后自动汇总到运行页</span></li>
+        </ol>
+      </section>
+      <section class="panel">
+        <div class="panel-heading">
+          <span data-icon="Gauge"></span>
+          <span>当前运行</span>
+        </div>
+        <div id="expRailRun" class="exp-rail-run"></div>
+      </section>
     </div>
 
     <div class="graph-left-content">
@@ -317,6 +343,8 @@ app.innerHTML = `
       </div>
     </section>
 
+    <section id="experimentsView" class="experiments-view" hidden></section>
+
     <section id="imageViewerView" class="image-viewer-view" hidden>
       <header class="image-viewer-header">
         <div>
@@ -363,6 +391,18 @@ app.innerHTML = `
         <div class="kg-cta-meta">
           <span class="kg-cta-pill" id="chainCtaPill">空闲</span>
           <span class="kg-cta-stats" id="chainCtaStats">尚未生成</span>
+        </div>
+      </div>
+      <div class="kg-cta-arrow"><span data-icon="ChevronRight"></span></div>
+    </button>
+    <button id="expCta" class="kg-cta exp-cta" type="button" data-state="idle" aria-label="打开实验运行">
+      <div class="kg-cta-icon"><span data-icon="FlaskConical"></span></div>
+      <div class="kg-cta-body">
+        <div class="kg-cta-eyebrow">实验</div>
+        <div class="kg-cta-title">实验运行</div>
+        <div class="kg-cta-meta">
+          <span class="kg-cta-pill" id="expCtaPill">空闲</span>
+          <span class="kg-cta-stats" id="expCtaStats">尚无运行</span>
         </div>
       </div>
       <div class="kg-cta-arrow"><span data-icon="ChevronRight"></span></div>
@@ -426,6 +466,7 @@ const iconMap: Record<string, IconNode> = {
   Circle,
   Clock3,
   File,
+  FlaskConical,
   FolderTree,
   Gauge,
   GitBranch,
@@ -526,6 +567,10 @@ const els = {
   chainCta: query<HTMLButtonElement>('#chainCta'),
   chainCtaPill: query<HTMLElement>('#chainCtaPill'),
   chainCtaStats: query<HTMLElement>('#chainCtaStats'),
+  experimentsView: query<HTMLElement>('#experimentsView'),
+  expCta: query<HTMLButtonElement>('#expCta'),
+  expCtaPill: query<HTMLElement>('#expCtaPill'),
+  expCtaStats: query<HTMLElement>('#expCtaStats'),
   settingsBtn: query<HTMLButtonElement>('#settingsBtn'),
   settingsView: query<HTMLElement>('#settingsView'),
   settingsContent: query<HTMLElement>('#settingsContent'),
@@ -542,6 +587,25 @@ const els = {
 };
 
 hydrateIcons();
+
+const experiments = createExperiments({
+  root: els.experimentsView,
+  cta: { button: els.expCta, pill: els.expCtaPill, stats: els.expCtaStats },
+  escapeHtml,
+  hydrateIcons,
+  renderStable,
+  runAction,
+  showDetail,
+  emptyState,
+  messageHtml,
+  normalizeChatParts,
+  bindToolCards,
+  goChat: () => {
+    state.view = 'chat';
+    history.pushState({}, '', '/');
+    render();
+  },
+});
 
 els.leftRailToggle.addEventListener('click', () => {
   state.leftCollapsed = !state.leftCollapsed;
@@ -665,6 +729,11 @@ els.chainCta.addEventListener('click', async () => {
   resetChainRenderSignatures();
   render();
 });
+els.expCta.addEventListener('click', () => {
+  state.view = 'experiments';
+  history.pushState({}, '', '/experiments');
+  render();
+});
 els.backToChatFromChainBtn.addEventListener('click', () => {
   state.view = 'chat';
   history.pushState({}, '', '/');
@@ -695,6 +764,8 @@ window.addEventListener('popstate', () => {
     ? 'imageViewer'
     : path === '/settings'
     ? 'settings'
+    : isExperimentsPath(path)
+    ? 'experiments'
     : 'chat';
   state.selectedImagePath = path === '/image-viewer'
     ? new URLSearchParams(window.location.search).get('path') || ''
@@ -1678,19 +1749,27 @@ function renderViewState() {
   const chainMode = state.view === 'chainSummary';
   const imageMode = state.view === 'imageViewer';
   const settingsMode = state.view === 'settings';
-  els.chatStream.hidden = graphMode || chainMode || imageMode || settingsMode;
+  const experimentsMode = state.view === 'experiments';
+  els.chatStream.hidden = graphMode || chainMode || imageMode || settingsMode || experimentsMode;
+  els.experimentsView.hidden = !experimentsMode;
+  experiments.setActive(experimentsMode);
   els.knowledgeGraphView.hidden = !graphMode;
   els.chainSummaryView.hidden = !chainMode;
   els.imageViewerView.hidden = !imageMode;
   els.settingsView.hidden = !settingsMode;
-  els.sendForm.hidden = graphMode || chainMode || imageMode || settingsMode;
-  els.transcriptScope.disabled = graphMode || chainMode || imageMode;
-  query('#mainTitle').textContent = graphMode ? '知识图谱' : chainMode ? '思维链总结' : imageMode ? '图片查看' : settingsMode ? '设置' : '任务编排';
+  els.sendForm.hidden = graphMode || chainMode || imageMode || settingsMode || experimentsMode;
+  els.transcriptScope.disabled = graphMode || chainMode || imageMode || experimentsMode;
+  query('#mainTitle').textContent = graphMode ? '知识图谱' : chainMode ? '思维链总结' : imageMode ? '图片查看' : settingsMode ? '设置' : experimentsMode ? '实验运行' : '任务编排';
   document.body.classList.toggle('knowledge-page', graphMode);
   document.body.classList.toggle('chain-page', chainMode);
   document.body.classList.toggle('image-page', imageMode);
   document.body.classList.toggle('settings-page', settingsMode);
+  document.body.classList.toggle('experiments-page', experimentsMode);
   updateChatTopButton();
+}
+
+function isExperimentsPath(path: string) {
+  return path === '/experiments' || path.startsWith('/experiments/');
 }
 
 function updateChatTopButton() {
