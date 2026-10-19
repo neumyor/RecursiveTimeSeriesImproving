@@ -952,12 +952,6 @@ class HarnessOrchestrator:
                 status = {**status, "ready": False, "validationError": str(exc)}
         return status
 
-    def get_reference_feature_parts(self) -> list[Part]:
-        self._ensure_initialized()
-        if not self.variant.reference_feature_source:
-            return []
-        return self.store.read_reference_feature_parts()
-
     def get_reference_feature_tool(self) -> dict[str, Any]:
         self._ensure_initialized()
         if not self.variant.reference_feature_extractor:

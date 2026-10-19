@@ -297,12 +297,6 @@ class WorkspaceStore:
         })
         return sanitized
 
-    def read_reference_feature_parts(self) -> list[Part]:
-        """The reference feature extractor is built by the main session and
-        logs into the main transcript; the bootstrap payload expects this
-        key, so it returns an empty list."""
-        return []
-
     def read_runtime_settings(self) -> RuntimeSettings:
         raw = read_json(self.runtime_settings_path) or {}
         return {
