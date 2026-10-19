@@ -30,3 +30,10 @@ src/harnessing_ts.egg-info/
 config.yaml
 config.llm.json
 experiments/runs/
+
+.dsh-sessions/
+REMOTE_SERVER.md
+.claude/
+docs/slides/
+docs/slides-team-intro.pptx
+docs/system-flow-and-contributions.pptx
