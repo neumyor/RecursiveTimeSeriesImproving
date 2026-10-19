@@ -4,8 +4,10 @@ import asyncio
 from contextlib import asynccontextmanager
 import mimetypes
 import os
+from pathlib import Path
 import socket
 import sys
+import threading
 from typing import Any
 from urllib.parse import unquote
 
@@ -15,11 +17,18 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from harnessing_ts.api.payloads import build_bootstrap_payload, build_live_payload, masked_llm_config
+from harnessing_ts.api.payloads import (
+    build_bootstrap_payload,
+    build_experiments_bootstrap_payload,
+    build_live_payload,
+    masked_llm_config,
+)
 from harnessing_ts.api.realtime import RealtimeEvent, RealtimeEventBroker
 from harnessing_ts.experiments_api import router as experiments_router
 from harnessing_ts.orchestrator import HarnessOrchestrator
 from harnessing_ts.paths import control_mode_from_env, default_workspace_path, frontend_root
+from harnessing_ts.settings.llm import mask_llm_config, read_effective_llm_config
+from harnessing_ts.state.workspace_store import WorkspaceStore
 from harnessing_ts.variants import resolve_variant, variant_help_text
 
 
@@ -99,36 +108,109 @@ class DshMcpControlRequest(BaseModel):
     args: dict[str, Any] = {}
 
 
+def _legacy_enabled() -> bool:
+    return os.getenv("TS_HARNESS_LEGACY") == "true"
+
+
+class _LazyOrchestrator:
+    """Construct the legacy harness on first use, not when the server starts.
+
+    The experiments console never calls a legacy route.  Eager construction
+    would run the workspace uv sync and the old session recovery for a system
+    the console does not use; TS_HARNESS_LEGACY=true keeps the old eager
+    behavior for deployments that still use the interactive harness.
+    """
+
+    _OWN_ATTRS = frozenset({"_workspace_path", "_dry_run", "_locale", "_mode", "_configure", "_instance", "_lock"})
+
+    def __init__(self, workspace_path: Path, *, dry_run: bool, mode: str, configure: Any) -> None:
+        object.__setattr__(self, "_workspace_path", workspace_path)
+        object.__setattr__(self, "_dry_run", dry_run)
+        object.__setattr__(self, "_locale", "zh")
+        object.__setattr__(self, "_mode", mode)
+        object.__setattr__(self, "_configure", configure)
+        object.__setattr__(self, "_instance", None)
+        object.__setattr__(self, "_lock", threading.Lock())
+
+    @property
+    def initialized(self) -> bool:
+        return self._instance is not None
+
+    def ensure_initialized(self) -> Any:
+        return self._get()
+
+    def _get(self) -> Any:
+        with self._lock:
+            if self._instance is None:
+                instance = HarnessOrchestrator(
+                    self._workspace_path, dry_run=self._dry_run, locale=self._locale, mode=self._mode
+                )
+                instance.initialize(reporter=_startup_report)
+                self._configure(instance)
+                instance.recover_interrupted_execution()
+                object.__setattr__(self, "_instance", instance)
+            return self._instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._OWN_ATTRS:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._get(), name, value)
+
+
+def _configure_legacy(orchestrator: HarnessOrchestrator, realtime: RealtimeEventBroker, control_url: str) -> None:
+    orchestrator.set_realtime_event_sink(realtime.publish)
+    orchestrator.set_runtime_snapshot_provider(lambda: _live(orchestrator))
+    orchestrator.configure_mcp_control(control_url)
+
+
 def create_app() -> FastAPI:
     workspace_path = default_workspace_path()
     dry_run = os.getenv("TS_HARNESS_DRY_RUN") == "true"
     debug_enabled = os.getenv("TS_HARNESS_DEBUG") == "true"
-    control_mode = control_mode_from_env()
+    legacy_enabled = _legacy_enabled()
+    control_mode = control_mode_from_env() if legacy_enabled else "auto"
     frontend = frontend_root()
     web_root = frontend / "dist" if (frontend / "dist").exists() else frontend
-    orchestrator = HarnessOrchestrator(workspace_path, dry_run=dry_run, locale="zh", mode=control_mode)
-    orchestrator.initialize(reporter=_startup_report)
+    realtime = RealtimeEventBroker()
+    control_url = os.getenv("DSH_MCP_CONTROL_URL", "").strip()
+    if not control_url:
+        # DSH's MCP process is a local child of this server.  It must never
+        # discover the public listening address or inherit a user-facing URL.
+        control_url = f"http://127.0.0.1:{_startup_port()}"
+    orchestrator = _LazyOrchestrator(
+        workspace_path,
+        dry_run=dry_run,
+        mode=control_mode,
+        configure=lambda instance: _configure_legacy(instance, realtime, control_url),
+    )
+    if legacy_enabled:
+        orchestrator.ensure_initialized()
     _print_ready_urls()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
-            await orchestrator.complete_interrupted_recovery()
+            if orchestrator.initialized:
+                await orchestrator.complete_interrupted_recovery()
             yield
         finally:
             # asyncio tasks and MCP capabilities are process-local. Persist
             # an explicit paused state before Uvicorn tears the process down.
-            try:
-                # Server shutdown follows the same native DSH checkpoint
-                # boundary as an explicit user pause.
-                if orchestrator.execution.snapshot()["phase"] == "running":
-                    await orchestrator.interrupt_current("Harness server is shutting down.")
-            finally:
-                await orchestrator.close()
+            if orchestrator.initialized:
+                try:
+                    # Server shutdown follows the same native DSH checkpoint
+                    # boundary as an explicit user pause.
+                    if orchestrator.execution.snapshot()["phase"] == "running":
+                        await orchestrator.interrupt_current("Harness server is shutting down.")
+                finally:
+                    await orchestrator.close()
 
     app = FastAPI(title="HarnessingTS", lifespan=lifespan)
     app.include_router(experiments_router)
-    realtime = RealtimeEventBroker()
-    orchestrator.set_realtime_event_sink(realtime.publish)
     app.state.orchestrator = orchestrator
     app.state.realtime = realtime
     app.state.workspace_path = workspace_path
@@ -138,14 +220,6 @@ def create_app() -> FastAPI:
     app.state.knowledge_graph_task = None
     app.state.chain_summary_task = None
     app.state.pause_task = None
-    orchestrator.set_runtime_snapshot_provider(lambda: _live(orchestrator))
-    control_url = os.getenv("DSH_MCP_CONTROL_URL", "").strip()
-    if not control_url:
-        # DSH's MCP process is a local child of this server.  It must never
-        # discover the public listening address or inherit a user-facing URL.
-        control_url = f"http://127.0.0.1:{_startup_port()}"
-    orchestrator.configure_mcp_control(control_url)
-    orchestrator.recover_interrupted_execution()
 
     @app.middleware("http")
     async def no_store_cache(request: Any, call_next: Any) -> Any:
@@ -364,8 +438,24 @@ def create_app() -> FastAPI:
 
     @app.post("/api/llm-config")
     async def update_main_llm_config(request: MainLlmConfigRequest) -> dict[str, Any]:
-        config = orchestrator.update_main_llm_config(request.model_dump(exclude_none=True))
-        return {"config": config, "bootstrap": _bootstrap(orchestrator, workspace_path, dry_run, debug_enabled)}
+        # Saving settings must not construct the legacy harness.  The editor
+        # leaves the key blank to keep the current one, so carry the effective
+        # key into the workspace file instead of writing an unusable manual
+        # config that would shadow the source the key came from.
+        values = request.model_dump(exclude_none=True)
+        effective = read_effective_llm_config(workspace_path)
+        if not values.get("apiKey") and effective.apiKey:
+            values["apiKey"] = effective.apiKey
+        if values.get("maxTokens") is None and effective.maxTokens is not None:
+            values["maxTokens"] = effective.maxTokens
+        store = WorkspaceStore(workspace_path)
+        store.ensure_layout()
+        store.write_main_llm_config(values)
+        config = read_effective_llm_config(workspace_path)
+        return {
+            "config": {"config": mask_llm_config(config), "sdk": {}},
+            "bootstrap": _bootstrap(orchestrator, workspace_path, dry_run, debug_enabled),
+        }
 
     @app.get("/api/reference-features/status")
     async def reference_feature_status() -> dict[str, Any]:
@@ -564,19 +654,29 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}")
         async def static_files(full_path: str) -> FileResponse:
-            target = (web_root / (full_path or "index.html")).resolve()
-            if not str(target).startswith(str(web_root.resolve())):
-                raise HTTPException(status_code=403, detail="Forbidden")
-            if target.is_dir():
-                target = target / "index.html"
-            if not target.exists():
-                target = web_root / "index.html"
-            return FileResponse(target)
+            return FileResponse(_static_file_target(web_root, full_path))
 
     return app
 
 
-def _bootstrap(orchestrator: HarnessOrchestrator, workspace_path: Path, dry_run: bool, debug_enabled: bool) -> dict[str, Any]:
+def _static_file_target(web_root: Path, full_path: str) -> Path:
+    """Resolve a request path under web_root; sibling-prefix escapes are rejected."""
+    root = web_root.resolve()
+    target = (web_root / (full_path or "index.html")).resolve()
+    if not target.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if target.is_dir():
+        target = target / "index.html"
+    if not target.exists():
+        target = root / "index.html"
+    return target
+
+
+def _bootstrap(orchestrator: Any, workspace_path: Path, dry_run: bool, debug_enabled: bool) -> dict[str, Any]:
+    if not getattr(orchestrator, "initialized", True):
+        return build_experiments_bootstrap_payload(
+            workspace_path=workspace_path, dry_run=dry_run, debug_enabled=debug_enabled,
+        )
     return build_bootstrap_payload(
         orchestrator=orchestrator,
         workspace_path=workspace_path,
@@ -756,11 +856,12 @@ def _format_exception(exc: Exception) -> str:
 
 
 def main() -> None:
+    legacy_enabled = _legacy_enabled()
     try:
         host = _startup_host()
         port = _startup_port()
-        control_mode = control_mode_from_env()
-        variant = resolve_variant()
+        control_mode = control_mode_from_env() if legacy_enabled else None
+        variant = resolve_variant() if legacy_enabled else None
     except RuntimeError as exc:
         _print_startup_error(str(exc), include_variant_help=True)
         raise SystemExit(2) from None
@@ -768,13 +869,16 @@ def main() -> None:
         _print_startup_error(str(exc))
         raise SystemExit(2) from None
     print(f"Workspace: {default_workspace_path()}")
-    print(f"Control mode: {control_mode}")
-    print(f"Ablation variant: {variant.id} · {variant.name}")
+    if legacy_enabled:
+        print(f"Control mode: {control_mode}")
+        print(f"Ablation variant: {variant.id} · {variant.name}")
+    else:
+        print("Legacy interactive harness: disabled (set TS_HARNESS_LEGACY=true to enable).")
     if os.getenv("TS_HARNESS_DRY_RUN") == "true":
         print("Dry-run mode enabled")
     if os.getenv("TS_HARNESS_DEBUG") == "true":
         print("Debug actions enabled")
-    print("Initializing backend and runtime workspace. The web UI URL will be printed when ready.")
+    print("Starting the experiments server. The web UI URL will be printed when ready.")
     uvicorn.run("harnessing_ts.server:create_app", host=host, port=port, factory=True)
 
 

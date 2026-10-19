@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -28,6 +29,7 @@ def test_bootstrap_contract_includes_full_static_payload(tmp_path, monkeypatch) 
 
     WorkspaceStore(tmp_path).ensure_layout()
     monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("TS_HARNESS_LEGACY", "true")
 
     response = _get(create_app(), "/api/bootstrap")
 
@@ -62,6 +64,44 @@ def test_bootstrap_contract_includes_full_static_payload(tmp_path, monkeypatch) 
     assert {"running", "nodeRunning", "knowledgeGraphRunning", "chainSummaryRunning", "workspaceUv"}.issubset(payload["runtime"])
     assert payload["variant"]["id"] == "NOD-KGR-KTL-CRV-SUB-ADA"
     assert payload["variant"]["features"] == ["NOD", "KGR", "KTL", "CRV", "SUB", "ADA"]
+
+
+def test_llm_config_save_keeps_the_effective_api_key(tmp_path, monkeypatch) -> None:
+    from harnessing_ts.server import create_app
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "config.llm.json").write_text(
+        json.dumps({"authMode": "manual", "model": "repo-model", "apiKey": "sk-repo", "baseUrl": "https://repo.example"}),
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("TS_HARNESS_WORKSPACE", str(workspace))
+    monkeypatch.chdir(repo)
+
+    response = _post(
+        create_app(), "/api/llm-config",
+        {"authMode": "manual", "model": "edited-model", "baseUrl": "https://edited.example"},
+    )
+
+    assert response.status_code == 200
+    written = json.loads((workspace / "config.llm.json").read_text(encoding="utf-8"))
+    assert written["model"] == "edited-model"
+    assert written["apiKey"] == "sk-repo"
+
+
+def test_masked_llm_config_tolerates_a_manual_config_without_a_key(tmp_path) -> None:
+    from harnessing_ts.api.payloads import masked_llm_config
+
+    (tmp_path / "config.llm.json").write_text(
+        json.dumps({"authMode": "manual", "model": "model-without-key"}), encoding="utf-8",
+    )
+
+    masked = masked_llm_config(tmp_path)
+
+    assert masked["config"]["model"] == "model-without-key"
+    assert masked["sdk"]["model"] == "model-without-key"
 
 
 def test_realtime_sse_endpoint_is_registered(tmp_path, monkeypatch) -> None:

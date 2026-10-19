@@ -4,10 +4,48 @@ from pathlib import Path
 from typing import Any, Callable
 
 from harnessing_ts.orchestrator import HarnessOrchestrator
-from harnessing_ts.settings.llm import build_sdk_invocation_config, mask_llm_config, mask_sdk_invocation_config, read_effective_llm_config
+from harnessing_ts.settings.llm import (
+    SdkInvocationConfig,
+    build_sdk_invocation_config,
+    mask_llm_config,
+    mask_sdk_invocation_config,
+    read_effective_llm_config,
+)
+from harnessing_ts.state.jsonl import read_json
 
 
 TaskRunning = Callable[[Any], bool]
+
+
+def build_experiments_bootstrap_payload(
+    *, workspace_path: Path, dry_run: bool, debug_enabled: bool,
+) -> dict[str, Any]:
+    """The experiments console's bootstrap, without constructing the legacy harness.
+
+    The console only reads the workspace state, the masked LLM config and the
+    (optional) legacy runtime status.  A missing runtime record means the
+    legacy workspace environment was never set up, which is the normal case
+    for an experiments-only server.
+    """
+    workspace_uv = read_json(workspace_path / "state" / "runtime.json")
+    if not isinstance(workspace_uv, dict):
+        workspace_uv = {}
+    workspace_uv.setdefault("workspace", str(workspace_path))
+    return {
+        "variant": None,
+        "state": read_json(workspace_path / "state" / "workspace.json") or {},
+        "llmConfig": masked_llm_config(workspace_path),
+        "dryRun": dry_run,
+        "debugEnabled": debug_enabled,
+        "runtime": {
+            "running": False,
+            "nodeRunning": False,
+            "knowledgeGraphRunning": False,
+            "chainSummaryRunning": False,
+            "pipelineComplete": False,
+            "workspaceUv": workspace_uv,
+        },
+    }
 
 
 def build_bootstrap_payload(
@@ -76,7 +114,12 @@ def build_live_payload(
 
 def masked_llm_config(workspace_path: Path) -> dict[str, Any]:
     cfg = read_effective_llm_config(workspace_path)
-    sdk = build_sdk_invocation_config(cfg)
+    try:
+        sdk = build_sdk_invocation_config(cfg)
+    except RuntimeError:
+        # A manual config without a key is still displayable; the settings
+        # page must render so the user can supply the missing key.
+        sdk = SdkInvocationConfig(model=cfg.model.strip() or None)
     return {"config": mask_llm_config(cfg), "sdk": mask_sdk_invocation_config(sdk)}
 
 

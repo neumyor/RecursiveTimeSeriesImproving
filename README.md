@@ -42,11 +42,12 @@ Or save an explicit DeepSeek-compatible endpoint configuration:
 
 ```bash
 export TS_HARNESS_LLM_AUTH_MODE=manual
-export TS_HARNESS_LLM_PROTOCOL=deepseek
 export TS_HARNESS_LLM_MODEL=deepseek-v4-flash
 export TS_HARNESS_LLM_BASE_URL=https://api.deepseek.com
 export TS_HARNESS_LLM_API_KEY=YOUR_API_KEY
 ```
+
+The settings page writes `<TS_HARNESS_WORKSPACE>/config.llm.json`. The server exports that path to every experiment cell, so a saved configuration applies to cells started afterwards.
 
 Check the effective configuration without printing the full API key:
 
@@ -70,12 +71,10 @@ The current upstream HTTP fetch provider does not provide private-network/SSRF p
 
 ### 4. Start Locally
 
-Use a separate workspace per experiment or ablation variant.
+Use a separate workspace per experiment.
 
 ```bash
 export TS_HARNESS_WORKSPACE="$HOME/.harnessingts/workspaces/default"
-export TS_HARNESS_VARIANT=NOD-KGR-KTL-CRV-SUB-ADA
-export TS_HARNESS_CONTROL_MODE=auto
 export HOST=127.0.0.1
 export PORT=4327
 
@@ -84,10 +83,18 @@ uv run ts-harness-server
 
 Open [http://127.0.0.1:4327](http://127.0.0.1:4327).
 
+The experiments server does not initialize the legacy interactive harness. Its routes and startup recovery are opt-in for deployments that still use them:
+
+```bash
+export TS_HARNESS_VARIANT=NOD-KGR-KTL-CRV-SUB-ADA
+export TS_HARNESS_CONTROL_MODE=auto
+export TS_HARNESS_LEGACY=true
+```
+
 Useful launch options:
 
 ```bash
-# Show registered ablation profiles.
+# Show registered ablation profiles (legacy harness).
 uv run ts-harness variants
 
 # Run the UI without calling DeepSeek Harness.
@@ -102,17 +109,19 @@ TS_HARNESS_DEBUG=true uv run ts-harness-server
 The web console has two pages:
 
 1. **实验运行** (`/experiments`): choose a registered spec under `experiments/specs/`, pick all cells or one feedback arm, set the number of parallel workers, and start the run. The matrix shows each cell's rounds and accepted candidates; a cell page shows its diagnostic MSE curve, round table and saturation certificates. **生成分析** runs the held-out posthoc analysis for finished cells.
-2. **设置** (`/settings`): read the workspace state and edit the main model configuration.
+2. **设置** (`/settings`): read the workspace state and edit the main model configuration used by new experiment cells.
 
 One cell is one task × one feedback arm × one seed, and runs for the spec's round budget. Runs are resumable: restarting the same run name skips cells whose `done.json` exists.
 
-### Session Recovery
+### Legacy Harness Session Recovery
 
-DSH's append-only session log under `.dsh-sessions/` is the conversation and tool-history source of truth. Each logical main/node actor owns one stable DSH session ID. Every turn opens a fresh runtime process, explicitly creates or resumes that identity, runs one prompt, flushes a durable checkpoint, and closes the process.
+When the legacy harness is enabled with `TS_HARNESS_LEGACY=true`, DSH's append-only session log under `.dsh-sessions/` is the conversation and tool-history source of truth. Each logical main/node actor owns one stable DSH session ID. Every turn opens a fresh runtime process, explicitly creates or resumes that identity, runs one prompt, flushes a durable checkpoint, and closes the process.
 
 Pause uses DSH's native boundary: cancel the root agent, wait until it is idle, drain continuable descendants, flush the session, then acknowledge `paused`. The acknowledged DSH checkpoint sequence is persisted in `state/execution.json` and in the `execution_paused` timeline event. It has no automatic client or server timeout. A separately confirmed force-stop is available only while `pausing`; recovery first resumes the same session so DSH can repair an incomplete tool boundary. If a process died after reserving an identity but before DSH created its log, recovery may create that exact identity only after DSH explicitly reports it absent. Continuing a paused actor requires a non-empty user message; it clears the node's active `pausedAt` marker while retaining the historical pause event in the timeline. `running`, `pausing`, `recovering`, and `failed` executions reject new messages.
 
 ## Ablation Variants
+
+This section describes the legacy interactive harness. The experiment console selects its feedback arms in the spec file instead.
 
 `TS_HARNESS_VARIANT` is read once at process startup. Restart the server to switch variants, and use a different `TS_HARNESS_WORKSPACE` for each experiment.
 
@@ -153,7 +162,7 @@ A removed feature is not merely optional. It is blocked by tool availability and
 
 ## Startup Errors
 
-The server validates startup-only configuration before binding the port.
+The server validates startup-only configuration before binding the port. Variant and control-mode validation applies only when `TS_HARNESS_LEGACY=true`.
 
 | Error text | What to do |
 |---|---|
@@ -166,7 +175,7 @@ The server validates startup-only configuration before binding the port.
 
 ## Server Deployment
 
-For LAN or server use, bind to a non-loopback address and keep all startup-only values in the same service environment.
+For LAN or server use, bind to a non-loopback address and keep all startup-only values in the same service environment. Add `TS_HARNESS_LEGACY=true` only if the deployment also needs the legacy interactive harness.
 
 ```bash
 export HOST=0.0.0.0

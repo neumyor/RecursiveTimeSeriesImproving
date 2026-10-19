@@ -18,6 +18,8 @@ git diff -- README.md AGENT.md docs/ backend/harnessing_ts/config/
 
 HarnessingTS 是基于官方 Python DeepSeek Harness SDK 的时间序列 tool-use harness。前端是 `frontend/` 的静态 UI，由 FastAPI 服务托管。Python SDK 通过 JSON-RPC 显式启动 `backend/dsh_runtime/` 中 package-locked 的 Node/Cordis 运行时；运行时状态和 DSH session persistence 位于用户指定的 `TS_HARNESS_WORKSPACE`，不是源码仓库。
 
+默认入口是实验运行控制台，启动时不会构造旧的交互 harness（不做 workspace uv sync，也不做旧 session recovery）。`TS_HARNESS_LEGACY=true` 恢复启动时初始化的旧行为；旧路由即使未设置该变量，也会在第一次访问时按需初始化。实验单元格通过 `TS_HARNESS_LLM_CONFIG_FILE` 读取服务器工作区的 `config.llm.json`。
+
 标准启动入口：
 
 ```bash
