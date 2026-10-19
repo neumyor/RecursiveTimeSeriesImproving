@@ -290,6 +290,8 @@ def _log_tail(path: Path) -> str:
 
 _LIVE_PROCS: list[subprocess.Popen[bytes]] = []
 _LIVE_LOCK = threading.Lock()
+# Set once a stop begins: queued cells must not start while the live ones die.
+_STOPPING = threading.Event()
 
 
 def kill_live_cells() -> None:
@@ -298,6 +300,7 @@ def kill_live_cells() -> None:
     Each child starts its own session, so `uv run` and its python die
     together; an orphaned loop would keep spending LLM budget otherwise.
     """
+    _STOPPING.set()
     with _LIVE_LOCK:
         procs = list(_LIVE_PROCS)
     for proc in procs:
@@ -333,6 +336,8 @@ def spawn_cell(cmd: list[str], run_dir: Path, log_path: Path, attempt: int) -> t
         f"\n===== batch attempt {attempt} at "
         f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} | {' '.join(cmd)} =====\n"
     )
+    if _STOPPING.is_set():
+        return None, "batch is stopping; this cell was not started"
     with log_path.open("ab") as log:
         log.write(header.encode("utf-8"))
         log.flush()
@@ -347,6 +352,10 @@ def spawn_cell(cmd: list[str], run_dir: Path, log_path: Path, attempt: int) -> t
         except OSError as exc:
             return None, redact(f"could not start the loop process: {exc}")
         with _LIVE_LOCK:
+            if _STOPPING.is_set():
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                return None, "batch is stopping; this cell was not started"
             _LIVE_PROCS.append(proc)
         try:
             code = proc.wait()
